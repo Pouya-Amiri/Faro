@@ -91,12 +91,6 @@ For networks where peer-to-peer connectivity is unavailable, choose
 **Advanced hosting** to use a reachable Faro server and explicit network
 settings.
 
-## Acknowledgments
-
-Peer-to-peer connectivity is powered by
-[Tailcat](https://github.com/tailscale/tailcat). Faro's desktop application is
-built with [Wails](https://wails.io/).
-
 ## Build from source
 
 Building the desktop app requires Go 1.27, Wails v3, and the platform WebView
@@ -115,30 +109,11 @@ wails3 package
 
 Run the test suite with `go test -race ./...`.
 
-## Making a release
+## Acknowledgments
 
-`internal/buildinfo/version.go` is the only version source that is edited by
-hand. Package tasks synchronize the Wails, Windows, macOS, and AppStream
-metadata automatically. To publish a release:
-
-```sh
-# First change Version in internal/buildinfo/version.go, then verify and commit.
-go test -race ./...
-git add -A
-git commit -m "Release Faro 1.0.0"
-git push origin HEAD
-
-version="$(go run ./cmd/faro-version)"
-git tag -a "v${version}" -m "Faro ${version}"
-git push origin "v${version}"
-```
-
-The tag must exactly equal `v` plus the source version. A tag push builds one
-Linux job, one Windows job, and native Apple Silicon and Intel macOS jobs, then
-publishes their assets and checksums as a GitHub release. Tests do not run on
-every push; the **Manual verification** workflow is available when a clean
-GitHub-hosted test run is useful. Push the release commit before its tag so the
-workflow file is already present on the repository's default branch.
+Peer-to-peer connectivity is powered by
+[Tailcat](https://github.com/tailscale/tailcat). Faro's desktop application is
+built with [Wails](https://wails.io/).
 
 ## License
 
