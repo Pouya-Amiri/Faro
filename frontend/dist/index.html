@@ -14,12 +14,17 @@
         try {
           preference = JSON.parse(localStorage.getItem("faro.preferences") || "{}").theme || "system";
         } catch (_) {}
-        var dark = preference === "dark" || (preference === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
-        document.documentElement.dataset.theme = dark ? "dark" : "light";
-        document.documentElement.style.colorScheme = dark ? "dark" : "light";
+        var resolved;
+        if (preference === "system") {
+          resolved = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        } else {
+          resolved = preference;
+        }
+        document.documentElement.dataset.theme = resolved;
+        document.documentElement.style.colorScheme = resolved === "dark" ? "dark" : "light";
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=24" />
+    <link rel="stylesheet" href="/styles.css?v=26" />
     <link rel="stylesheet" href="/desktop.css?v=16" />
   </head>
   <body>
@@ -627,6 +632,7 @@
                       <option value="system">Follow System</option>
                       <option value="dark">Dark</option>
                       <option value="light">Light</option>
+                      <option value="sage">Sage Light</option>
                     </select>
                   </div>
 

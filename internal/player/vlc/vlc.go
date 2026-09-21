@@ -83,7 +83,7 @@ func Start(ctx context.Context, cfg Config, initialSource string) (*VLC, error) 
 	return instance, nil
 }
 
-func launchArguments(_ string, address string, extra []string, initialSource string) []string {
+func launchArguments(operatingSystem string, address string, extra []string, initialSource string) []string {
 	args := make([]string, 0, len(extra)+7)
 	for _, argument := range extra {
 		if argument == "--rc-quiet" {
@@ -98,11 +98,15 @@ func launchArguments(_ string, address string, extra []string, initialSource str
 	// could never complete against it. The Lua cli exists on every platform
 	// VLC ships and provides the prompt plus the "( state ... )" responses.
 	args = append(args,
-		"--extraintf=luaintf", "--lua-intf=cli", "--rc-host="+address, "--no-video-title-show",
-		// Faro needs a dedicated process so its RC socket and lifecycle cannot be
-		// redirected to an unrelated VLC window by the user's one-instance setting.
-		"--no-one-instance", "--no-one-instance-when-started-from-file",
+		"--extraintf=luaintf", "--lua-intf=cli", "--cli-host="+address, "--no-video-title-show",
 	)
+	if operatingSystem != "darwin" {
+		// Faro needs a dedicated process so its control socket and lifecycle cannot
+		// be redirected to an unrelated VLC window by the user's one-instance
+		// setting. VLC's macOS interface does not expose these Qt/Windows options;
+		// launching the app-bundle executable already creates the owned process.
+		args = append(args, "--no-one-instance", "--no-one-instance-when-started-from-file")
+	}
 	if initialSource != "" {
 		args = append(args, initialSource)
 	}

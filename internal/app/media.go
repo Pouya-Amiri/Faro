@@ -51,9 +51,9 @@ func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.
 		}})
 		return
 	}
-	currentClient, mediaPlayer, err := s.ensurePlayer()
+	currentClient, mediaPlayer, err := s.ensurePlayer(playerStartAutomatic)
 	if err != nil || currentClient != client {
-		if err != nil {
+		if err != nil && !errors.Is(err, errPlayerDismissed) {
 			s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "open_player", Message: err.Error()}})
 		}
 		return
@@ -157,7 +157,7 @@ func (s *Service) SpinPlaylistWheel() error {
 func (s *Service) OpenMedia(source string) error {
 	s.mediaLoadMu.Lock()
 	defer s.mediaLoadMu.Unlock()
-	client, mediaPlayer, err := s.ensurePlayer()
+	client, mediaPlayer, err := s.ensurePlayer(playerStartExplicit)
 	if err != nil {
 		return err
 	}
@@ -205,7 +205,7 @@ func (s *Service) OpenMedia(source string) error {
 func (s *Service) reopenMediaAtRoomClock(source string, paused bool) error {
 	s.mediaLoadMu.Lock()
 	defer s.mediaLoadMu.Unlock()
-	client, mediaPlayer, err := s.ensurePlayer()
+	client, mediaPlayer, err := s.ensurePlayer(playerStartExplicit)
 	if err != nil {
 		return err
 	}

@@ -20,6 +20,11 @@ Desktop clients and standalone servers are published as separate files:
 
 Each release includes `SHA256SUMS.txt`. Linux AppImages may need to be made
 executable with `chmod +x Faro-*.AppImage` before they can be opened.
+The AppImage intentionally uses the distribution's GTK 4 and WebKitGTK 6
+runtime.
+Install `gtk4` and `webkitgtk6.0` on Fedora, or `libgtk-4-1` and
+`libwebkitgtk-6.0-4` on Ubuntu/Debian. The DEB and RPM declare these
+dependencies automatically.
 Public-repository builds also receive GitHub/Sigstore provenance attestations,
 which can be checked with `gh attestation verify <file> -R Pouya-Amiri/Faro`.
 

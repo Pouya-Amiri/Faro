@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 func ipcAddress(id string) (string, func(), error) {
@@ -20,5 +21,7 @@ func ipcAddress(id string) (string, func(), error) {
 func dialIPC(path string) (io.ReadWriteCloser, error) { return net.Dial("unix", path) }
 
 func assignProcessCleanup(process *os.Process) (func(), error) {
-	return func() { _ = process.Kill() }, nil
+	// SIGTERM lets wrappers such as iina-cli forward termination to the real
+	// application. SIGKILL would terminate only the wrapper and leave IINA open.
+	return func() { _ = process.Signal(syscall.SIGTERM) }, nil
 }

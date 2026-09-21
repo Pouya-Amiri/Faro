@@ -2,6 +2,7 @@
    Theme tokens. One definition per theme:
      dark  - the original Faro dark palette, reproduced value for value
      light - warm paper (charcoal ink on unbleached white)
+     sage  - vintage LCD calculator (crisp charcoal ink on pale olive-sage glass with terracotta accents)
    The stored preference ("system" | "dark" | "light") is resolved to a
    concrete data-theme by app.js and by the boot script in index.html, before
    first paint, so neither palette is repeated inside a prefers-color-scheme
@@ -74,6 +75,67 @@
   --shadow-dock: 0 -8px 28px rgba(0, 0, 0, .12);
 
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%23b3b5bc' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round' d='M2.5 4.5L6 8L9.5 4.5'/%3E%3C/svg%3E");
+}
+
+html[data-theme="sage"] {
+  color-scheme: light;
+
+  --bg: #E2E7DC;
+  --panel: #ECF1E6;
+  --panel-alt: #D8DED2;
+  --panel-raised: #F2F6EC;
+  --field: #F0F5EB;
+  --shell: var(--bg);
+  --hover: var(--fill);
+  --pressed: rgba(34, 41, 34, .12);
+  --fill-quiet: rgba(34, 41, 34, .025);
+  --fill-soft: rgba(34, 41, 34, .045);
+  --fill: rgba(34, 41, 34, .065);
+  --fill-strong: rgba(34, 41, 34, .10);
+  --fill-active: rgba(34, 41, 34, .10);
+  --sunken: rgba(34, 41, 34, .05);
+  --edge-hi: rgba(255, 255, 255, .7);
+  --field-shadow: inset 0 1px 2px rgba(34, 41, 34, .06);
+
+  /* Hairlines: etched instrument rules and grid markings. */
+  --line-faint: #D4DCCE;
+  --line: #C5CEBF;
+  --line-strong: #9CA994;
+  --line-hover: #7D8D74;
+  --line-row: #C5CEBF;
+
+  /* Ink: deep liquid-crystal charcoal with a forest undertone. */
+  --text: #222922;
+  --text-dim: #3E473E;
+  --text-muted: #5E695E;
+  --text-quiet: #4B554B;
+  --text-hint: #5E695E;
+
+  --accent: #BA5220;
+  --accent-hover: #A04417;  /* deeper terracotta */
+  --accent-text: #FFFFFF;
+  --accent-soft: #F0E5DC;   /* pale terracotta wash */
+  --focus-ring: #BA5220;
+  --focus: color-mix(in srgb, var(--focus-ring) 34%, transparent);
+  --success: #46784A;
+  --warning: #A87528;
+  --danger: #B84739;
+  --danger-bg: color-mix(in srgb, var(--danger) 12%, transparent);
+  --selection: #D2DCD0;     /* soft sage highlight */
+  --selection-text: #222922;
+  --chapter: #3B6B61;       /* muted LCD deep teal */
+  --flag-tint: color-mix(in srgb, var(--danger) 10%, transparent);
+  --close-hover-bg: #B84739;
+
+  --scrim: rgba(28, 36, 28, .38);
+  --shade-1: rgba(28, 36, 28, .07);
+  --shade-2: rgba(28, 36, 28, .14);
+  --shade-3: rgba(28, 36, 28, .22);
+  --shadow-menu: 0 18px 44px rgba(28, 36, 28, .15), 0 0 0 .5px rgba(28, 36, 28, .08);
+  --shadow-modal: 0 28px 80px rgba(28, 36, 28, .22);
+  --shadow-dock: 0 -8px 24px rgba(28, 36, 28, .06);
+
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%235E695E' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round' d='M2.5 4.5L6 8L9.5 4.5'/%3E%3C/svg%3E");
 }
 
 html[data-theme="light"] {
@@ -152,7 +214,7 @@ html, body {
 }
 /* The paper theme highlights selections so they stay warm on paper; the dark
    theme keeps the platform selection it has always used. */
-html[data-theme="light"] ::selection { background: var(--selection); color: var(--selection-text); }
+html[data-theme="light"] ::selection, html[data-theme="sage"] ::selection { background: var(--selection); color: var(--selection-text); }
 button, input, select { font: inherit; }
 button { color: inherit; }
 svg { display: block; flex: 0 0 auto; }

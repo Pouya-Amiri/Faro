@@ -42,3 +42,12 @@ func TestMPVNetUsesDedicatedProcessForFaroIPC(t *testing.T) {
 		t.Fatalf("mpv.net arguments dropped safe user option: %v", args)
 	}
 }
+
+func TestIINAUsesLongLivedCLIWrapperAndDedicatedIPC(t *testing.T) {
+	args := Config{Profile: ProfileIINA}.arguments("/tmp/faro-iina.sock", "")
+	for _, required := range []string{"--keep-running", "--no-stdin", "--mpv-input-ipc-server=/tmp/faro-iina.sock"} {
+		if !slices.Contains(args, required) {
+			t.Fatalf("IINA arguments %v do not contain %q", args, required)
+		}
+	}
+}

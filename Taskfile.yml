@@ -136,14 +136,12 @@ tasks:
       - mkdir -p dist_actions
       - wails3 tool package -name faro -format deb -config packaging/linux/nfpm.yaml -out dist_actions
       - wails3 tool package -name faro -format rpm -config packaging/linux/nfpm.yaml -out dist_actions
-      # AppImage tooling resolves Icon=faro by filename, so create that name as
-      # a generated input instead of committing another copy of the artwork.
-      - mkdir -p build/linux/appimage/input
-      - cp build/appicon.png build/linux/appimage/input/faro.png
-      - wails3 generate appimage -binary build/bin/faro -icon build/linux/appimage/input/faro.png -desktopfile packaging/linux/faro.desktop -outputdir dist_actions -builddir build/linux/appimage
+      # WebKitGTK helper paths are distribution-specific and compiled into the
+      # library. Build a thin AppImage that uses the host GTK/WebKit stack just
+      # like the native packages instead of bundling an Ubuntu-specific copy.
+      - packaging/linux/build_appimage.sh {{.VERSION}} {{.APPIMAGE_ARCH}}
       - mv -f dist_actions/faro.deb 'dist_actions/Faro-{{.VERSION}}-linux-{{.ARCH}}.deb'
       - mv -f dist_actions/faro.rpm 'dist_actions/Faro-{{.VERSION}}-linux-{{.RPM_ARCH}}.rpm'
-      - mv -f dist_actions/faro-{{.APPIMAGE_ARCH}}.AppImage 'dist_actions/Faro-{{.VERSION}}-linux-{{.APPIMAGE_ARCH}}.AppImage'
       - task: package:server
         vars: {GOOS: linux, ARCH: '{{.ARCH}}', DIST_ARCH: '{{.APPIMAGE_ARCH}}'}
     vars:

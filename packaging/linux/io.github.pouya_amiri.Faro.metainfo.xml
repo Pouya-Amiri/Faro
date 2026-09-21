@@ -22,9 +22,9 @@
     <id>io.github.pouya_amiri.Faro.desktop</id>
   </provides>
   <releases>
-    <release version="1.0.1" date="2026-09-21">
+    <release version="1.0.2" date="2026-09-21">
       <description>
-        <p>Improves desktop packaging, synchronized playback, playlists, and direct peer-to-peer media sharing.</p>
+        <p>Fixes cross-distribution AppImage startup and improves media-player lifecycle and macOS IINA/VLC compatibility.</p>
       </description>
     </release>
   </releases>

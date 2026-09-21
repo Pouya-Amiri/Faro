@@ -87,10 +87,35 @@ const wheelThemes = {
     separator: "rgba(37, 39, 42, 0.3)",
     rim: "rgba(37, 39, 42, 0.18)",
     empty: "#FFFFFF"
+  },
+  sage: {
+    segments: [
+      "#4E7A63", // sage green
+      "#BA5220", // terracotta
+      "#4A6D7C", // slate blue
+      "#8C874A", // olive
+      "#7D5875", // mauve
+      "#387780", // teal
+      "#A86F30", // ochre
+      "#5A6585", // indigo gray
+      "#A35467", // rose
+      "#657A36", // moss
+      "#675284", // plum
+      "#49784D"  // fern
+    ],
+    // Same per-segment ink logic as the light wheel, re-based onto the calculator
+    // palette and its crisp LCD charcoal ink.
+    label: (segment) => {
+      const ink = wheelLabelColor(segment, "#F2F6EC", "#222922");
+      return { color: ink, shadow: ink === "#222922" ? "transparent" : "rgba(0, 0, 0, 0.6)" };
+    },
+    separator: "rgba(34, 41, 34, 0.3)",
+    rim: "rgba(34, 41, 34, 0.18)",
+    empty: "#E2E7DC"
   }
 };
 function wheelTheme() {
-  return document.documentElement.dataset.theme === "light" ? wheelThemes.light : wheelThemes.dark;
+  return wheelThemes[document.documentElement.dataset.theme] || wheelThemes.dark;
 }
 function relativeLuminance(hex) {
   const value = parseInt(hex.slice(1), 16);
@@ -301,20 +326,20 @@ function savePreferences(values = {}) {
 
 function applyPreferences() {
   const systemDark = matchMedia("(prefers-color-scheme: dark)").matches;
-  const dark = preferences.theme === "dark" || (preferences.theme === "system" && systemDark);
+  const resolved = preferences.theme === "system" ? (systemDark ? "dark" : "light") : preferences.theme;
   // data-theme carries the resolved theme, never the preference, so styles.css
   // defines each palette once.
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
-  document.documentElement.style.colorScheme = dark ? "dark" : "light";
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.style.colorScheme = resolved === "dark" ? "dark" : "light";
   document.body.classList.toggle("compact", Boolean(preferences.compact));
   document.body.classList.toggle("reduce-motion", Boolean(preferences.reduceMotion));
   const themeButton = $("welcome-theme");
   if (themeButton) {
     const iconSpan = themeButton.querySelector(".theme-btn-icon");
     if (iconSpan) {
-      iconSpan.innerHTML = dark ? sunIcon : moonIcon;
+      iconSpan.innerHTML = resolved === "dark" ? sunIcon : moonIcon;
     } else {
-      themeButton.innerHTML = dark ? sunIcon : moonIcon;
+      themeButton.innerHTML = resolved === "dark" ? sunIcon : moonIcon;
     }
   }
   if ($("theme-select")) {
@@ -1717,7 +1742,9 @@ $("legal-source").onclick = async () => {
 
 function cycleTheme() {
   // data-theme is already resolved, so the toggle never needs the system query.
-  savePreferences({ theme: document.documentElement.dataset.theme === "dark" ? "light" : "dark" });
+  const order = ["dark", "light", "sage"];
+  const next = order[(order.indexOf(document.documentElement.dataset.theme) + 1) % order.length];
+  savePreferences({ theme: next });
 }
 $("welcome-theme").onclick = cycleTheme;
 $("theme-select").onchange = (event) => savePreferences({ theme: event.target.value });

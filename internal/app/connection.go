@@ -45,6 +45,7 @@ func (s *Service) Connect(request ConnectionRequest) error {
 	s.sessionCtx, s.cancel, s.client, s.player, s.sync = ctx, cancel, client, nil, nil
 	s.playerCancel = nil
 	s.playerContext = nil
+	s.playerDismissed = false
 	s.invite = parsed
 	s.ownerToken = welcome.OwnerToken
 	if s.ownerToken == "" {
@@ -326,15 +327,28 @@ func (s *Service) connectedPlayer() (*faroclient.Client, player.Player, error) {
 	return s.client, s.player, nil
 }
 
-func (s *Service) ensurePlayer() (*faroclient.Client, player.Player, error) {
+type playerStartIntent uint8
+
+const (
+	playerStartAutomatic playerStartIntent = iota
+	playerStartExplicit
+)
+
+var errPlayerDismissed = errors.New("player was closed; press Play to open it again")
+
+func (s *Service) ensurePlayer(intent playerStartIntent) (*faroclient.Client, player.Player, error) {
 	s.playerLifecycleMu.Lock()
 	defer s.playerLifecycleMu.Unlock()
 
 	s.mu.RLock()
 	client, mediaPlayer, sessionCtx, request := s.client, s.player, s.sessionCtx, s.request
+	dismissed := s.playerDismissed
 	s.mu.RUnlock()
 	if client == nil || sessionCtx == nil {
 		return nil, nil, errors.New("not connected")
+	}
+	if mediaPlayer == nil && dismissed && intent == playerStartAutomatic {
+		return nil, nil, errPlayerDismissed
 	}
 	if mediaPlayer != nil {
 		checkCtx, cancel := context.WithTimeout(sessionCtx, time.Second)
@@ -347,13 +361,20 @@ func (s *Service) ensurePlayer() (*faroclient.Client, player.Player, error) {
 		oldCancel := s.playerCancel
 		s.player, s.playerCancel, s.sync = nil, nil, nil
 		s.playerContext = nil
+		s.playerDismissed = intent == playerStartAutomatic
 		s.selectedItem = ""
 		s.mu.Unlock()
 		if oldCancel != nil {
 			oldCancel()
 		}
 		_ = mediaPlayer.Close()
+		if intent == playerStartAutomatic {
+			return nil, nil, errPlayerDismissed
+		}
 	}
+	s.mu.Lock()
+	s.playerDismissed = false
+	s.mu.Unlock()
 	playerCtx, playerCancel := context.WithCancel(sessionCtx)
 	started, err := s.startPlayer(playerCtx, request)
 	if err != nil {
@@ -369,6 +390,7 @@ func (s *Service) ensurePlayer() (*faroclient.Client, player.Player, error) {
 	}
 	s.player, s.playerCancel = started, playerCancel
 	s.playerContext = playerCtx
+	s.playerDismissed = false
 	s.sync = syncer.New(&trackedPlayer{Player: started, service: s}, client, client.ServerNow)
 	s.lastPlayer = player.State{}
 	s.lastRemoteRevision = 0
@@ -389,6 +411,7 @@ func (s *Service) releasePlayer(target player.Player, message string) {
 	client, cancel := s.client, s.playerCancel
 	s.player, s.playerCancel, s.sync = nil, nil, nil
 	s.playerContext = nil
+	s.playerDismissed = true
 	s.selectedItem = ""
 	s.localPlaybackPending = false
 	s.lastPlayer = player.State{}
@@ -441,6 +464,7 @@ func (s *Service) Disconnect() {
 	cancel, playerCancel, client, mediaPlayer := s.cancel, s.playerCancel, s.client, s.player
 	streams := s.detachStreamingLocked()
 	s.sessionCtx, s.cancel, s.playerCancel, s.client, s.player, s.sync = nil, nil, nil, nil, nil, nil
+	s.playerDismissed = false
 	s.mu.Unlock()
 	s.playerLifecycleMu.Unlock()
 	if cancel != nil {

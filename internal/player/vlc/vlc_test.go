@@ -12,8 +12,23 @@ func TestLaunchArgumentsTargetTheLuaCliInterface(t *testing.T) {
 		if !containsArgument(args, "--extraintf=luaintf") || !containsArgument(args, "--lua-intf=cli") {
 			t.Fatalf("%s arguments do not target the Lua cli interface: %q", goos, args)
 		}
+		if !containsArgument(args, "--cli-host=127.0.0.1:1234") || containsArgument(args, "--rc-host=127.0.0.1:1234") {
+			t.Fatalf("%s arguments do not configure the Lua cli socket: %q", goos, args)
+		}
 		if containsArgument(args, "--rc-quiet") {
 			t.Fatalf("%s arguments contain --rc-quiet: %q", goos, args)
+		}
+	}
+	macArgs := launchArguments("darwin", "127.0.0.1:1234", nil, "")
+	for _, unsupported := range []string{"--no-one-instance", "--no-one-instance-when-started-from-file"} {
+		if containsArgument(macArgs, unsupported) {
+			t.Fatalf("macOS arguments contain unsupported instance option %q: %q", unsupported, macArgs)
+		}
+	}
+	for _, goos := range []string{"linux", "windows"} {
+		args := launchArguments(goos, "127.0.0.1:1234", nil, "")
+		if !containsArgument(args, "--no-one-instance") || !containsArgument(args, "--no-one-instance-when-started-from-file") {
+			t.Fatalf("%s arguments do not isolate Faro's VLC process: %q", goos, args)
 		}
 	}
 	for _, goos := range []string{"linux", "darwin", "windows"} {

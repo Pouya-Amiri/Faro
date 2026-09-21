@@ -84,7 +84,10 @@ func Start(ctx context.Context, cfg Config, initialSource string) (*MPV, error) 
 	if err != nil {
 		return nil, err
 	}
-	command := exec.CommandContext(ctx, executable, cfg.arguments(ipcPath, initialSource)...)
+	// Player lifetime is owned by MPV.Close rather than exec.CommandContext.
+	// In particular, iina-cli is a wrapper around the real IINA process; a
+	// context cancellation would SIGKILL only the wrapper and orphan IINA.
+	command := exec.Command(executable, cfg.arguments(ipcPath, initialSource)...)
 	if cfg.Profile == ProfileMPVNet {
 		cleanup, err = isolateMPVNet(command, cleanup)
 		if err != nil {

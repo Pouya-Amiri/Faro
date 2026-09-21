@@ -57,7 +57,13 @@ func (c Config) arguments(ipcPath, initialSource string) []string {
 	// be accidentally overridden by saved Extra Arguments.
 	args := safeExtraArguments(c.ExtraArgs)
 	if c.Profile == ProfileIINA {
-		args = append(args, "--no-stdin", "--mpv-input-ipc-server="+ipcPath)
+		args = append(args,
+			// iina-cli otherwise exits immediately after launching the app. Faro
+			// owns this dedicated instance and needs the wrapper to track it.
+			"--keep-running",
+			"--no-stdin",
+			"--mpv-input-ipc-server="+ipcPath,
+		)
 	} else {
 		args = append(args,
 			"--idle=yes",

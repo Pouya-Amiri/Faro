@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+app_dir="${APPDIR:-}"
+if [[ -z "$app_dir" ]]; then
+  app_dir="$(dirname "$(readlink -f "$0")")"
+fi
+binary="$app_dir/usr/bin/faro"
+
+missing="$(ldd "$binary" 2>&1 | awk '/not found/ { print $1 }')"
+if [[ -n "$missing" ]]; then
+  printf '%s\n' \
+    "Faro needs the host GTK 4 and WebKitGTK 6 runtime." \
+    "Missing libraries:" \
+    "$missing" \
+    "" \
+    "Fedora: sudo dnf install gtk4 webkitgtk6.0" \
+    "Ubuntu/Debian: sudo apt install libgtk-4-1 libwebkitgtk-6.0-4" >&2
+  exit 1
+fi
+
+exec "$binary" "$@"

@@ -21,6 +21,16 @@ suggests:
   - mpv
   - vlc
 
+overrides:
+  deb:
+    depends:
+      - libgtk-4-1
+      - libwebkitgtk-6.0-4
+  rpm:
+    depends:
+      - gtk4
+      - webkitgtk6.0
+
 contents:
   - src: ./build/bin/faro
     dst: /usr/bin/faro

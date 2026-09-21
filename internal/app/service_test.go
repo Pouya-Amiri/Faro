@@ -468,7 +468,7 @@ func firstNonLoopbackIPv4(t *testing.T) string {
 	return ""
 }
 
-func TestPlaylistAvailabilitySharedAndClosedSelectionReopens(t *testing.T) {
+func TestPlaylistAvailabilitySharedAndClosedSelectionWaitsForExplicitPlay(t *testing.T) {
 	t.Setenv("FARO_TLS_DIR", t.TempDir())
 	host, guest := New(context.Background(), nil), New(context.Background(), nil)
 	host.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
@@ -528,14 +528,23 @@ func TestPlaylistAvailabilitySharedAndClosedSelectionReopens(t *testing.T) {
 	first := host.player
 	host.mu.RUnlock()
 	host.releasePlayer(first, "")
-	// A wheel can choose the same selected item. It must launch again after close.
+	// Room reconciliation must respect the user's decision to close the player.
 	client, _ := host.connected()
 	host.applySelectedPlaylist(context.Background(), client)
 	host.mu.RLock()
 	reopened := host.player
 	host.mu.RUnlock()
+	if reopened != nil {
+		t.Fatal("selected playlist item reopened a player the user closed")
+	}
+	if err := host.SetPaused(false); err != nil {
+		t.Fatal(err)
+	}
+	host.mu.RLock()
+	reopened = host.player
+	host.mu.RUnlock()
 	if reopened == nil || reopened == first {
-		t.Fatal("same selection failed to reopen closed player")
+		t.Fatal("explicit Play did not reopen the selected media")
 	}
 }
 

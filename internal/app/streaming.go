@@ -222,6 +222,7 @@ func (s *Service) reconcilePlaylistStreams(ctx context.Context, client *faroclie
 	receiving := cloneStreamMedia(s.streamIdentity)
 	receivingItemID := s.streamReceiveItemID
 	activation := s.streamActivation
+	playerDismissed := s.playerDismissed
 	pendingCount := len(s.pendingStreams)
 	hasPending := pendingCount != 0 || s.streamActivationCancel != nil
 	pendingSelectionInvalid := false
@@ -237,6 +238,9 @@ func (s *Service) reconcilePlaylistStreams(ctx context.Context, client *faroclie
 	}
 	localSource := s.sources[selectedFingerprint]
 	s.mu.RUnlock()
+	if playerDismissed {
+		return
+	}
 
 	offeredItemPresent := offeredItemID == ""
 	for _, item := range snapshot.Playlist.Items {
@@ -382,10 +386,20 @@ func (s *Service) activateStream(ctx context.Context, client *faroclient.Client,
 		s.failStreamActivation(client, grant, pending, nil, "stream_connect", err)
 		return
 	}
-	currentClient, mediaPlayer, err := s.ensurePlayer()
+	currentClient, mediaPlayer, err := s.ensurePlayer(playerStartAutomatic)
 	if err != nil || currentClient != client {
 		if err == nil {
 			err = errors.New("connection changed while starting stream")
+		}
+		if errors.Is(err, errPlayerDismissed) {
+			if gateway != nil {
+				_ = gateway.Close()
+			} else {
+				_ = pending.viewer.Close()
+			}
+			_ = client.RevokeStream(protocol.MediaStreamRevoke{RequestID: grant.RequestID, Reason: "viewer closed the media player"})
+			s.sink(Event{Kind: "stream", Stream: &StreamStatus{State: "idle"}})
+			return
 		}
 		s.failStreamActivation(client, grant, pending, gateway, "stream_player", err)
 		return

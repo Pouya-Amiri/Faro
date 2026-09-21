@@ -114,6 +114,7 @@ type Service struct {
 	player                 player.Player
 	playerCancel           context.CancelFunc
 	playerContext          context.Context
+	playerDismissed        bool
 	sync                   *syncer.Controller
 	invite                 invite.Invite
 	ownerToken             string
