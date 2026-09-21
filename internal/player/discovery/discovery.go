@@ -42,6 +42,25 @@ func Find(player string) (string, error) {
 	return "", fmt.Errorf("%s executable not found; install it or choose its location manually", displayName(profile))
 }
 
+// Supported reports whether the selected player has a launcher and control
+// protocol supported by Faro on the current operating system.
+func Supported(player string) bool {
+	profile, err := canonicalProfile(player)
+	return err == nil && platformSupports(profile)
+}
+
+// SupportedPlayers returns the frontend values supported on this platform in
+// their preferred display order.
+func SupportedPlayers() []string {
+	result := make([]string, 0, 5)
+	for _, profile := range []string{"mpv", "mpv.net", "iina", "memento", "vlc"} {
+		if platformSupports(profile) {
+			result = append(result, profile)
+		}
+	}
+	return result
+}
+
 func preferWindowsExecutables(names []string) []string {
 	result := make([]string, 0, len(names))
 	for _, suffix := range []string{".exe", ".com", ""} {
@@ -56,19 +75,30 @@ func preferWindowsExecutables(names []string) []string {
 }
 
 func executableNames(player string) (string, []string, error) {
+	profile, err := canonicalProfile(player)
+	if err != nil {
+		return "", nil, err
+	}
+	if !platformSupports(profile) {
+		return "", nil, fmt.Errorf("%s is not supported on %s", displayName(profile), runtime.GOOS)
+	}
+	return profile, platformExecutableNames(profile), nil
+}
+
+func canonicalProfile(player string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(player)) {
 	case "", "mpv":
-		return "mpv", []string{"mpv", "mpv.exe"}, nil
+		return "mpv", nil
 	case "mpv.net", "mpvnet":
-		return "mpv.net", []string{"mpvnet", "mpvnet.exe", "mpvnet.com"}, nil
+		return "mpv.net", nil
 	case "iina":
-		return "iina", []string{"iina-cli"}, nil
+		return "iina", nil
 	case "memento":
-		return "memento", []string{"memento", "memento.exe"}, nil
+		return "memento", nil
 	case "vlc":
-		return "vlc", []string{"vlc", "cvlc", "vlc.exe"}, nil
+		return "vlc", nil
 	default:
-		return "", nil, fmt.Errorf("unsupported player %q", player)
+		return "", fmt.Errorf("unsupported player %q", player)
 	}
 }
 

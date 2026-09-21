@@ -24,6 +24,9 @@ func (s *Service) Connect(request ConnectionRequest) error {
 	if strings.TrimSpace(request.Name) == "" {
 		return errors.New("name is required")
 	}
+	if err := validatePlayer(request.Player); err != nil {
+		return err
+	}
 	if request.ClientVersion == "" {
 		request.ClientVersion = buildinfo.EffectiveVersion()
 	}

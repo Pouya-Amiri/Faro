@@ -435,7 +435,7 @@ func TestIndexingSavedDirectoryStartsPlayerForSelectedRemoteItem(t *testing.T) {
 		starts++
 		return guestPlayer, nil
 	}
-	if err := guest.Connect(ConnectionRequest{Invite: status.ShareInvite, Name: "Guest", Player: "mpv.net"}); err != nil {
+	if err := guest.Connect(ConnectionRequest{Invite: status.ShareInvite, Name: "Guest", Player: "mpv"}); err != nil {
 		t.Fatal(err)
 	}
 	if starts != 0 {

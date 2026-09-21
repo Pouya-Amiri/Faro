@@ -377,6 +377,25 @@ function hydrateConnectForms() {
   $("host-room").value = preferences.room;
 }
 
+async function configurePlayerOptions() {
+  if (!hasBackend) return;
+  let supported;
+  try {
+    supported = new Set((await invoke("SupportedPlayers")).map((player) => player.toLowerCase()));
+  } catch (_) {
+    return;
+  }
+  for (const prefix of ["join", "host"]) {
+    const select = $(`${prefix}-player`);
+    [...select.options].forEach((option) => {
+      if (!supported.has(option.value.toLowerCase())) option.remove();
+    });
+  }
+  if (!supported.has(String(preferences.player || "").toLowerCase())) {
+    preferences = { ...preferences, player: "mpv", executable: "", playerArgs: "" };
+  }
+}
+
 const playerDetectionSequence = { join: 0, host: 0 };
 async function detectPlayer(prefix, force) {
   const input = $(`${prefix}-executable`);
@@ -1926,6 +1945,7 @@ setInterval(() => {
   $("current-time").textContent = formatTime(projected);
 }, 250);
 
+await configurePlayerOptions();
 hydrateConnectForms();
 enhanceAllSelects();
 applyPreferences();

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
@@ -10,6 +11,16 @@ import (
 	"github.com/Pouya-Amiri/Faro/internal/syncer"
 	"github.com/Pouya-Amiri/Faro/internal/youtube"
 )
+
+func TestValidatePlayerRejectsProfilesFromOtherPlatforms(t *testing.T) {
+	if err := validatePlayer("mpv"); err != nil {
+		t.Fatalf("mpv should be supported on %s: %v", runtime.GOOS, err)
+	}
+	unsupported := map[string]string{"darwin": "mpv.net", "windows": "iina", "linux": "iina"}[runtime.GOOS]
+	if unsupported != "" && validatePlayer(unsupported) == nil {
+		t.Fatalf("%s should not be supported on %s", unsupported, runtime.GOOS)
+	}
+}
 
 type sponsorClient struct {
 	snapshot protocol.Snapshot

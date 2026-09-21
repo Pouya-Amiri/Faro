@@ -18,7 +18,20 @@ import (
 // DetectPlayer returns the launcher Faro would use for the selected player.
 func DetectPlayer(name string) (string, error) { return discovery.Find(name) }
 
+// SupportedPlayers returns the player profiles available on this platform.
+func SupportedPlayers() []string { return discovery.SupportedPlayers() }
+
+func validatePlayer(name string) error {
+	if !discovery.Supported(name) {
+		return fmt.Errorf("media player %q is not supported on this platform", name)
+	}
+	return nil
+}
+
 func startPlayer(ctx context.Context, request ConnectionRequest) (player.Player, error) {
+	if err := validatePlayer(request.Player); err != nil {
+		return nil, err
+	}
 	switch strings.ToLower(strings.TrimSpace(request.Player)) {
 	case "mpv", "":
 		return mpv.Start(ctx, mpv.Config{Profile: mpv.ProfileMPV, Executable: request.Executable, ExtraArgs: request.PlayerArgs}, "")

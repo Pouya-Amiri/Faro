@@ -31,10 +31,30 @@ func TestFindUsesSelectedPlayersPathLauncher(t *testing.T) {
 }
 
 func TestExecutableNamesAcceptFrontendPlayerValues(t *testing.T) {
-	for _, player := range []string{"mpv", "mpv.net", "IINA", "Memento", "VLC"} {
+	supported := SupportedPlayers()
+	for _, player := range supported {
 		if _, names, err := executableNames(player); err != nil || len(names) == 0 {
 			t.Fatalf("executableNames(%q) = %v, %v", player, names, err)
 		}
+	}
+	for _, player := range []string{"mpv", "mpv.net", "iina", "memento", "vlc"} {
+		if slices.Contains(supported, player) {
+			continue
+		}
+		if _, _, err := executableNames(player); err == nil || !strings.Contains(err.Error(), "not supported") {
+			t.Fatalf("executableNames(%q) should reject this platform, got %v", player, err)
+		}
+	}
+}
+
+func TestSupportedPlayersMatchPlatform(t *testing.T) {
+	want := map[string][]string{
+		"darwin":  {"mpv", "iina", "memento", "vlc"},
+		"windows": {"mpv", "mpv.net", "memento", "vlc"},
+		"linux":   {"mpv", "memento", "vlc"},
+	}[runtime.GOOS]
+	if want != nil && !slices.Equal(SupportedPlayers(), want) {
+		t.Fatalf("SupportedPlayers() = %v, want %v", SupportedPlayers(), want)
 	}
 }
 

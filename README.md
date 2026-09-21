@@ -81,6 +81,10 @@ JavaScript runtime installed on the computer. Faro detects common install
 locations and configures the runtime automatically; `Deno 2.3+` is recommended.
 Restart Faro after installing either dependency.
 
+Flatpak builds of media players are not currently supported. Their sandbox does
+not expose the local control endpoint Faro uses; install the player from a
+native package or its official standalone distribution instead.
+
 ## Privacy and security
 
 Faro connections use TLS 1.3 from the first byte, and invites pin the host's

@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -85,12 +86,7 @@ func Start(ctx context.Context, cfg Config, initialSource string) (*VLC, error) 
 
 func launchArguments(operatingSystem string, address string, extra []string, initialSource string) []string {
 	args := make([]string, 0, len(extra)+7)
-	for _, argument := range extra {
-		if argument == "--rc-quiet" {
-			continue
-		}
-		args = append(args, argument)
-	}
+	args = append(args, safeExtraArguments(extra)...)
 	// Target the Lua "cli" interface explicitly. The plain "rc" shortcut is
 	// registered by two different implementations: the C oldrc module on
 	// Windows and the Lua cli elsewhere. oldrc never prints the "> " prompt
@@ -111,6 +107,32 @@ func launchArguments(operatingSystem string, address string, extra []string, ini
 		args = append(args, initialSource)
 	}
 	return args
+}
+
+func safeExtraArguments(values []string) []string {
+	result := make([]string, 0, len(values))
+	for index := 0; index < len(values); index++ {
+		value := values[index]
+		key := strings.ToLower(strings.SplitN(value, "=", 2)[0])
+		consumesValue := false
+		if len(value) > 2 && strings.EqualFold(value[:2], "-I") && value[1] != '-' {
+			continue
+		}
+		switch key {
+		case "-i", "--intf", "--extraintf", "--lua-intf", "--cli-host", "--rc-host":
+			consumesValue = strings.EqualFold(value, key)
+		case "--no-extraintf", "--rc-quiet", "--no-rc-quiet",
+			"--one-instance", "--no-one-instance",
+			"--one-instance-when-started-from-file", "--no-one-instance-when-started-from-file":
+		default:
+			result = append(result, value)
+			continue
+		}
+		if consumesValue && index+1 < len(values) {
+			index++
+		}
+	}
+	return result
 }
 
 func reserveAddress() (string, error) {
@@ -234,6 +256,9 @@ func (v *VLC) Open(ctx context.Context, source string) error {
 	// VLC's CLI interface does not strip shell-style quotes: `add "file:///x"`
 	// attempts to open an MRL whose first and last characters are literal quotes.
 	// A percent-encoded MRL is safe to send as the command's unquoted argument.
+	if _, err := v.command(ctx, "stop"); err != nil {
+		return fmt.Errorf("stop current VLC input: %w", err)
+	}
 	if _, err := v.command(ctx, "clear"); err != nil {
 		return fmt.Errorf("clear VLC playlist: %w", err)
 	}
@@ -245,6 +270,9 @@ func (v *VLC) Open(ctx context.Context, source string) error {
 	v.state.Paused = true
 	v.state.ObservedAt = time.Now()
 	v.stateMu.Unlock()
+	if err := validateLocalSource(source); err != nil {
+		return err
+	}
 	if _, err := v.command(ctx, "add "+mrl); err != nil {
 		return err
 	}
@@ -258,6 +286,23 @@ func (v *VLC) Open(ctx context.Context, source string) error {
 	state := v.state
 	v.stateMu.Unlock()
 	v.emit(player.Event{Kind: player.EventMedia, State: state})
+	return nil
+}
+
+func validateLocalSource(source string) error {
+	if !filepath.IsAbs(source) {
+		parsed, err := url.Parse(source)
+		if err == nil && parsed.Scheme != "" {
+			return nil
+		}
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return fmt.Errorf("open local media %q: %w", source, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("open local media %q: path is a directory", source)
+	}
 	return nil
 }
 

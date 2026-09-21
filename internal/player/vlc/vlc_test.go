@@ -42,6 +42,27 @@ func TestLaunchArgumentsTargetTheLuaCliInterface(t *testing.T) {
 	}
 }
 
+func TestLaunchArgumentsRejectControlChannelOverrides(t *testing.T) {
+	args := launchArguments("windows", "127.0.0.1:1234", []string{
+		"--lua-intf=dummy", "--cli-host", "127.0.0.1:9999", "--extraintf=http",
+		"-I", "dummy", "-Ihttp", "--one-instance", "--no-audio",
+	}, "")
+	for _, forbidden := range []string{
+		"--lua-intf=dummy", "127.0.0.1:9999", "--extraintf=http", "-I", "dummy", "-Ihttp", "--one-instance",
+	} {
+		if containsArgument(args, forbidden) {
+			t.Fatalf("VLC arguments retained protected override %q: %q", forbidden, args)
+		}
+	}
+	for _, required := range []string{
+		"--lua-intf=cli", "--cli-host=127.0.0.1:1234", "--extraintf=luaintf", "--no-one-instance", "--no-audio",
+	} {
+		if !containsArgument(args, required) {
+			t.Fatalf("VLC arguments dropped required option %q: %q", required, args)
+		}
+	}
+}
+
 func TestParsePlaybackStateDistinguishesPausedFromPlaying(t *testing.T) {
 	for name, response := range map[string]string{
 		"playing": "status change: ( audio volume: 1.000000 )\n( state playing )",
@@ -136,6 +157,15 @@ func TestVLCMRLPreservesStreamURLs(t *testing.T) {
 func TestVLCMRLRejectsRCCommandInjection(t *testing.T) {
 	if _, err := vlcMRL("movie.mkv\nquit"); err == nil {
 		t.Fatal("VLC MRL accepted a line break")
+	}
+}
+
+func TestValidateLocalSourceRejectsMissingFilesButAllowsURLs(t *testing.T) {
+	if err := validateLocalSource(filepath.Join(t.TempDir(), "missing.mkv")); err == nil {
+		t.Fatal("missing local file was accepted")
+	}
+	if err := validateLocalSource("https://media.example/movie.mkv"); err != nil {
+		t.Fatalf("remote URL was rejected: %v", err)
 	}
 }
 

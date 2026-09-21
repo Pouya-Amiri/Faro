@@ -47,6 +47,8 @@ func (d *Desktop) LegalInfo() legal.Information {
 
 func (d *Desktop) DetectPlayer(player string) (string, error) { return app.DetectPlayer(player) }
 
+func (d *Desktop) SupportedPlayers() []string { return app.SupportedPlayers() }
+
 func (d *Desktop) Connect(request app.ConnectionRequest) error {
 	request.ClientVersion = buildinfo.EffectiveVersion()
 	return d.service.Connect(request)
