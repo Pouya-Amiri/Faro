@@ -14,8 +14,11 @@ import (
 )
 
 var (
-	versionPattern   = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
-	configPattern    = regexp.MustCompile(`(?m)^  version: [^\r\n]+$`)
+	versionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
+	// Do not anchor at the end of the line: on a CRLF checkout the value is
+	// followed by \r before \n. The character class stops before either line
+	// ending, so replacing the match preserves the file's original EOL style.
+	configPattern    = regexp.MustCompile(`(?m)^  version: [^\r\n]+`)
 	appstreamPattern = regexp.MustCompile(`<release version="[^"]+" date="[^"]+">`)
 )
 

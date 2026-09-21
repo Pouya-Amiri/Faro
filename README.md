@@ -35,7 +35,7 @@ ad-hoc signed so its bundle integrity can be checked locally.
 ## What Faro does
 
 - Synchronizes play, pause, seeking, and playback position
-- Supports shared playlists, chat, readiness, and moderated rooms
+- Supports shared playlists, chat, and moderated rooms
 - Works with local files, HTTP(S) streams, and YouTube links
 - Matches local copies without sharing anyone's filesystem paths
 - Can securely stream a selected file directly to friends who do not have it
@@ -73,7 +73,7 @@ Faro detects standard player installations automatically. Custom executable
 paths and launch arguments can be configured in the connection screen. YouTube
 playback requires [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and a supported
 JavaScript runtime installed on the computer. Faro detects common install
-locations and configures the runtime automatically; Deno 2.3+ is recommended.
+locations and configures the runtime automatically; `Deno 2.3+` is recommended.
 Restart Faro after installing either dependency.
 
 ## Privacy and security

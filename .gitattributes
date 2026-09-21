@@ -1,0 +1,7 @@
+# Keep scripts and metadata deterministic across Linux, macOS, and Windows
+# checkouts. The release tooling also accepts CRLF defensively.
+* text=auto eol=lf
+
+*.icns binary
+*.ico binary
+*.png binary

@@ -22,7 +22,7 @@
     <id>io.github.pouya_amiri.Faro.desktop</id>
   </provides>
   <releases>
-    <release version="1.0.0" date="2026-09-21">
+    <release version="1.0.1" date="2026-09-21">
       <description>
         <p>Improves desktop packaging, synchronized playback, playlists, and direct peer-to-peer media sharing.</p>
       </description>
