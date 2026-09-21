@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "1.0.0"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "1.0.0",
+			"CompanyName": "Faro contributors",
+			"FileDescription": "Secure synchronized media playback",
+			"LegalCopyright": "Copyright Faro contributors",
+			"ProductName": "Faro",
+			"Comments": "Secure synchronized media playback"
+		}
+	}
+}

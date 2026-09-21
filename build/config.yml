@@ -1,0 +1,38 @@
+version: "3"
+
+info:
+  companyName: Faro contributors
+  productName: Faro
+  # Apple bundle IDs reject underscores. Linux uses the Flathub-required
+  # io.github.pouya_amiri.Faro spelling for the same GitHub namespace.
+  productIdentifier: io.github.pouya-amiri.Faro
+  description: Secure synchronized media playback
+  copyright: Copyright Faro contributors
+  comments: Secure synchronized media playback
+  # Generated from internal/buildinfo/version.go by `wails3 task sync:version`.
+  # Do not edit this field by hand.
+  version: 1.0.0
+
+dev_mode:
+  root_path: .
+  log_level: warn
+  debounce: 500
+  ignore:
+    dir:
+      - .git
+      - build/bin
+      - dist_actions
+    file:
+      - .DS_Store
+      - "*_test.go"
+    watched_extension:
+      - "*.go"
+      - "*.html"
+      - "*.css"
+      - "*.js"
+    git_ignore: true
+  executes:
+    - cmd: wails3 build DEV=true
+      type: blocking
+    - cmd: wails3 task run
+      type: primary

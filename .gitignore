@@ -1,0 +1,58 @@
+# Faro ignore rules (Wails v3 layout).
+
+# Editor and OS noise.
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.log
+
+# --- Wails build inputs -----------------------------------------------------
+# build/ holds per-platform metadata that is committed on purpose. Everything
+# else Wails generates inside it stays out of the repository.
+!/build/
+/build/*
+!/build/appicon.png
+!/build/config.yml
+!/build/darwin/
+/build/darwin/*
+!/build/darwin/Info.plist
+!/build/windows/
+/build/windows/*
+!/build/windows/icon.ico
+!/build/windows/info.json
+!/build/windows/wails.exe.manifest
+
+# --- Generated build output -------------------------------------------------
+# build/bin, build/ios, build/linux and build/windows/nsis are generated and
+# already covered by the /build/* rule above. The .syso below is written to the
+# repository root by `wails3 generate syso` during Windows builds.
+/build/bin/
+wails_windows_*.syso
+wails_linux_*.syso
+wails_darwin_*.syso
+/Faro
+/Faro.exe
+/faro
+/faro-server
+/faro-server.exe
+
+# --- Frontend ---------------------------------------------------------------
+# frontend/dist is Faro's embedded, dependency-free frontend and is committed.
+# Generated bindings are unused: app.js calls wails.Call.ByName directly.
+/frontend/bindings
+/frontend/wailsjs
+
+# --- Release output ---------------------------------------------------------
+/dist
+/dist_actions
+/coverage.out
+
+# --- Local-only files -------------------------------------------------------
+AGENTS.md
+.env
+.env.*
+!.env.example
+.task/

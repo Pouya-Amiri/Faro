@@ -1,0 +1,42 @@
+/* Wails platform integration */
+/* Faro is frameless: window controls are embedded in the app toolbar and the
+   platform owns dragging through the --wails-draggable regions below. */
+.window-titlebar,
+.app-command-bar,
+.sidebar-brand {
+  --wails-draggable: drag;
+}
+
+.window-controls,
+.window-control,
+.room-selector-btn,
+.btn,
+button,
+input,
+select,
+details,
+dialog,
+.popover-menu,
+.custom-select-menu {
+  --wails-draggable: no-drag;
+}
+
+/* Faro is frameless on Linux too. The GTK4 toplevel is made transparent and
+   clipped to the rounded window shape by the desktop adapter, including the
+   flush shape used while maximised, fullscreen or tiled. The page therefore
+   must not round or clip itself: the window shape has exactly one owner
+   (surface_linux.go). */
+
+/* macOS draws its own inset traffic lights over the command bar. */
+body[data-platform="mac"] .window-controls { display: none; }
+body[data-platform="mac"] .app-command-bar { padding-left: 82px; padding-right: 12px; }
+body[data-platform="mac"] .sidebar-brand { padding-left: 82px; }
+
+/* Reserve the top-right corner for the embedded window controls. */
+body:not([data-platform="mac"]) .app-command-bar { padding-right: 148px; }
+body:not([data-platform="mac"]) .connect-main-panel { padding-top: 30px; }
+
+@media (max-width: 1100px) {
+  .workspace-grid { grid-template-columns: minmax(0, 1fr) 330px; }
+  .connect-shell { grid-template-columns: 230px minmax(0, 1fr); }
+}

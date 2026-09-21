@@ -1,0 +1,63 @@
+# NFPM Configuration for Faro (.deb and .rpm)
+# Reference: https://nfpm.goreleaser.com/configuration/
+
+name: "faro"
+# VERSION and ARCH come from the source-versioned `package:linux` task.
+arch: "${ARCH}"
+platform: "linux"
+version: "${VERSION}"
+release: "1"
+section: "video"
+priority: "optional"
+maintainer: "Faro"
+description: |
+  Synchronize media playback across the mpv family and VLC over the Internet.
+  Faro synchronises the position and play state of multiple media players so that
+  the viewers can watch the same thing at the same time.
+vendor: "Faro"
+license: "MPL-2.0"
+
+suggests:
+  - mpv
+  - vlc
+
+contents:
+  - src: ./build/bin/faro
+    dst: /usr/bin/faro
+    file_info:
+      mode: 0755
+  - src: ./LICENSE
+    dst: /usr/share/licenses/faro/LICENSE
+  - src: ./THIRD_PARTY_NOTICES.txt
+    dst: /usr/share/licenses/faro/THIRD_PARTY_NOTICES.txt
+
+  # Desktop Integration
+  - src: ./packaging/linux/faro.desktop
+    dst: /usr/share/applications/io.github.pouya_amiri.Faro.desktop
+  - src: ./packaging/linux/io.github.pouya_amiri.Faro.metainfo.xml
+    dst: /usr/share/metainfo/io.github.pouya_amiri.Faro.metainfo.xml
+  # Icons
+  - src: ./build/appicon.png
+    dst: /usr/share/pixmaps/faro.png
+  - src: ./packaging/assets/hicolor/16x16/apps/Faro.png
+    dst: /usr/share/icons/hicolor/16x16/apps/faro.png
+  - src: ./packaging/assets/hicolor/24x24/apps/Faro.png
+    dst: /usr/share/icons/hicolor/24x24/apps/faro.png
+  - src: ./packaging/assets/hicolor/32x32/apps/Faro.png
+    dst: /usr/share/icons/hicolor/32x32/apps/faro.png
+  - src: ./packaging/assets/hicolor/48x48/apps/Faro.png
+    dst: /usr/share/icons/hicolor/48x48/apps/faro.png
+  - src: ./packaging/assets/hicolor/64x64/apps/Faro.png
+    dst: /usr/share/icons/hicolor/64x64/apps/faro.png
+  - src: ./packaging/assets/hicolor/96x96/apps/Faro.png
+    dst: /usr/share/icons/hicolor/96x96/apps/faro.png
+  - src: ./packaging/assets/hicolor/128x128/apps/Faro.png
+    dst: /usr/share/icons/hicolor/128x128/apps/faro.png
+  - src: ./packaging/assets/hicolor/256x256/apps/Faro.png
+    dst: /usr/share/icons/hicolor/256x256/apps/faro.png
+  - src: ./build/appicon.png
+    dst: /usr/share/icons/hicolor/512x512/apps/faro.png
+
+rpm:
+  summary: "Synchronize media playback across mpv-family players and VLC"
+  group: "Applications/Multimedia"

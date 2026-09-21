@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.pouya_amiri.Faro</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MPL-2.0</project_license>
+  <name>Faro</name>
+  <developer id="io.github.pouya_amiri">
+    <name>Faro contributors</name>
+  </developer>
+  <summary>Synchronize media playback across multiple media players over the Internet</summary>
+  <url type="homepage">https://github.com/Pouya-Amiri/Faro</url>
+  <url type="bugtracker">https://github.com/Pouya-Amiri/Faro/issues</url>
+  <description>
+    <p>
+      Faro synchronises the position and play state of multiple media players so that
+      viewers can watch the same thing at the same time. Pausing, resuming, seeking,
+      and changing playback speed are replicated across players connected to the same room.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.pouya_amiri.Faro.desktop</launchable>
+  <provides>
+    <id>io.github.pouya_amiri.Faro.desktop</id>
+  </provides>
+  <releases>
+    <release version="1.0.0" date="2026-09-21">
+      <description>
+        <p>Improves desktop packaging, synchronized playback, playlists, and direct peer-to-peer media sharing.</p>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1" />
+</component>

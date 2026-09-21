@@ -1,0 +1,821 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Faro</title>
+    <script>
+      /* Resolve the stored theme before the first paint. Each palette then has
+         exactly one definition in styles.css; app.js applies the same
+         resolution whenever the preference or the system setting changes. */
+      (function () {
+        var preference = "system";
+        try {
+          preference = JSON.parse(localStorage.getItem("faro.preferences") || "{}").theme || "system";
+        } catch (_) {}
+        var dark = preference === "dark" || (preference === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+        document.documentElement.style.colorScheme = dark ? "dark" : "light";
+      })();
+    </script>
+    <link rel="stylesheet" href="/styles.css?v=24" />
+    <link rel="stylesheet" href="/desktop.css?v=16" />
+  </head>
+  <body>
+    <main id="app">
+      <!-- Native Window Chrome / Titlebar -->
+      <header id="window-titlebar" class="window-titlebar">
+        <div class="window-drag-region" aria-hidden="true">
+          <span id="window-context">Watch together</span>
+        </div>
+        <div class="window-controls" aria-label="Window controls">
+          <button id="window-minimise" class="window-control" type="button" aria-label="Minimise window" title="Minimise">
+            <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          </button>
+          <button id="window-maximise" class="window-control" type="button" aria-label="Maximise window" title="Maximise">
+            <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>
+          </button>
+          <button id="window-close" class="window-control close" type="button" aria-label="Close window" title="Close">
+            <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 2.5L9.5 9.5M9.5 2.5L2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- 1. Connection Hub / Launcher Screen -->
+      <section id="connect-view" class="view connect-view">
+        <div class="connect-shell">
+          <!-- Launcher Sidebar Rail -->
+          <aside class="connect-sidebar">
+            <div class="sidebar-brand">
+              <div class="sidebar-brand-text">
+                <span class="sidebar-title">Faro</span>
+                <span class="sidebar-subtitle">Version <span id="version">2</span></span>
+              </div>
+            </div>
+
+            <div class="sidebar-nav-section">
+              <span class="sidebar-section-label">Connection</span>
+              <div class="mode-segmented-control" role="tablist" aria-label="Connection mode">
+                <button id="join-tab" class="mode-btn active" role="tab" aria-selected="true" type="button">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 3.5L10.5 8L6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span>Join room</span>
+                </button>
+                <button id="host-tab" class="mode-btn" role="tab" aria-selected="false" type="button">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="5" cy="8" r="1" fill="currentColor"/><circle cx="8" cy="8" r="1" fill="currentColor"/><circle cx="11" cy="8" r="1" fill="currentColor"/></svg>
+                  <span>Host room</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="sidebar-footer">
+              <button id="welcome-theme" class="btn btn-secondary btn-sidebar-theme" type="button" aria-label="Switch theme" title="Toggle theme">
+                <span class="theme-btn-icon">
+                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M13.5 10.2A6 6 0 0 1 5.8 2.5a6 6 0 1 0 7.7 7.7Z" fill="currentColor"/></svg>
+                </span>
+                <span class="theme-btn-label">Theme</span>
+              </button>
+            </div>
+          </aside>
+
+          <!-- Launcher Main Configuration Panel -->
+          <div class="connect-main-panel">
+            <!-- Join Room Form -->
+            <form id="join-form" class="connect-form">
+              <div class="form-header">
+                <h2>Join room</h2>
+                <p>Enter an invite and choose the player Faro should control.</p>
+              </div>
+
+              <div class="form-group">
+                <label for="join-invite" class="form-label">Invite Link or Token <span class="required">*</span></label>
+                <div class="input-container">
+                  <input id="join-invite" class="form-input" autocomplete="off" spellcheck="false" placeholder="faro://server:8999/room#token" required />
+                </div>
+              </div>
+
+              <div class="form-row two-col">
+                <div class="form-group">
+                  <label for="join-name" class="form-label">Display Name <span class="required">*</span></label>
+                  <input id="join-name" class="form-input" maxlength="64" autocomplete="nickname" placeholder="Your nickname" required />
+                </div>
+                <div class="form-group">
+                  <label for="join-player" class="form-label">Media Player</label>
+                  <select id="join-player" class="form-select">
+                    <option value="mpv">mpv (Recommended)</option>
+                    <option value="mpv.net">mpv.net</option>
+                    <option value="IINA">IINA (macOS)</option>
+                    <option value="Memento">Memento</option>
+                    <option value="VLC">VLC Media Player</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-row two-col">
+                <div class="form-group">
+                  <label for="join-executable" class="form-label">Player Executable Path <span class="optional">(optional)</span></label>
+                  <input id="join-executable" class="form-input" placeholder="Auto-detected binary" />
+                  <small id="join-executable-status" class="field-status" aria-live="polite"></small>
+                </div>
+                <div class="form-group">
+                  <label for="join-args" class="form-label">Extra Arguments <span class="optional">(optional)</span></label>
+                  <input id="join-args" class="form-input" placeholder="e.g. --profile=fast" />
+                </div>
+              </div>
+
+              <div class="form-actions">
+                <div id="join-error" class="form-error" role="alert"></div>
+                <button class="btn btn-primary btn-submit" type="submit">
+                  <span>Connect</span>
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
+            </form>
+
+            <!-- Host Room Form -->
+            <form id="host-form" class="connect-form hidden">
+              <div class="form-header">
+                <h2>Host room</h2>
+                <p>Create a room, copy the invite, and send it to your friends.</p>
+              </div>
+
+              <div class="form-group">
+                <label for="host-mode" class="form-label">Hosting</label>
+                <select id="host-mode" class="form-select">
+                  <option value="peer">Easy · peer to peer</option>
+                  <option value="advanced">Advanced · server address and port</option>
+                </select>
+                <small id="host-mode-hint">No account or port forwarding. Keep Faro open while your friends are watching.</small>
+              </div>
+              <div class="form-row two-col">
+                <div class="form-group">
+                  <label for="host-room" class="form-label">Room Name <span class="required">*</span></label>
+                  <input id="host-room" class="form-input" maxlength="128" value="watch" placeholder="e.g. movie-night" required />
+                </div>
+                <div class="form-group host-advanced hidden">
+                  <label for="host-public" class="form-label">Public Host / Domain <span class="required">*</span></label>
+                  <input id="host-public" class="form-input" value="localhost" placeholder="e.g. watch.example.com" required />
+                </div>
+              </div>
+
+              <div class="form-row two-col">
+                <div class="form-group host-advanced hidden">
+                  <label for="host-listen" class="form-label">Listen Address <span class="required">*</span></label>
+                  <input id="host-listen" class="form-input" value=":8999" placeholder=":8999" required />
+                </div>
+                <div class="form-group host-advanced hidden">
+                  <label class="form-label">Access Protection</label>
+                  <label class="checkbox-row connection-checkbox-row" for="host-protected">
+                    <input id="host-protected" class="form-checkbox" type="checkbox" checked />
+                    <span class="checkbox-content">
+                      <strong>Private room</strong>
+                    </span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="form-row two-col">
+                <div class="form-group">
+                  <label for="host-name" class="form-label">Host Display Name <span class="required">*</span></label>
+                  <input id="host-name" class="form-input" maxlength="64" placeholder="Host nickname" required />
+                </div>
+                <div class="form-group">
+                  <label for="host-player" class="form-label">Media Player</label>
+                  <select id="host-player" class="form-select">
+                    <option value="mpv">mpv (Recommended)</option>
+                    <option value="mpv.net">mpv.net</option>
+                    <option value="IINA">IINA (macOS)</option>
+                    <option value="Memento">Memento</option>
+                    <option value="VLC">VLC Media Player</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-row two-col">
+                <div class="form-group">
+                  <label for="host-executable" class="form-label">Player Executable Path <span class="optional">(optional)</span></label>
+                  <input id="host-executable" class="form-input" placeholder="Auto-detected binary" />
+                  <small id="host-executable-status" class="field-status" aria-live="polite"></small>
+                </div>
+                <div class="form-group">
+                  <label for="host-args" class="form-label">Extra Arguments <span class="optional">(optional)</span></label>
+                  <input id="host-args" class="form-input" placeholder="e.g. --profile=fast" />
+                </div>
+              </div>
+
+              <div class="form-actions">
+                <div id="host-error" class="form-error" role="alert"></div>
+                <button class="btn btn-primary btn-submit" type="submit">
+                  <span>Start and connect</span>
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. Active Session Workspace View -->
+      <section id="room-view" class="view room-view hidden">
+        <!-- Top App Command Bar -->
+        <header class="app-command-bar">
+          <div class="command-bar-left">
+            <button id="room-chip" class="btn btn-secondary room-selector-btn" type="button" aria-haspopup="menu" aria-label="Room options" title="Room actions">
+              <span class="room-hash">#</span>
+              <span id="room-name" class="room-title">room</span>
+              <svg viewBox="0 0 12 12" width="10" height="10" class="dropdown-chevron" aria-hidden="true"><path d="M2.5 4.5L6 8L9.5 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+
+            <span class="command-separator" aria-hidden="true"></span>
+
+            <div class="session-pill" role="group" aria-label="Connection and room exit options">
+              <button id="connection-btn" class="session-pill-btn session-pill-status" type="button" aria-haspopup="menu" aria-label="Connection info and server stats" title="Server info and stats">
+                <span id="connection-state" class="connection-status connected">
+                  <svg class="icon connection-symbol" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 12.5 11 15l4.5-6M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
+                  <span class="status-text">Connected</span>
+                </span>
+              </button>
+              <span class="session-pill-divider" aria-hidden="true">|</span>
+              <button id="leave-room" class="session-pill-btn session-pill-leave" type="button" aria-haspopup="menu" aria-label="Room exit options" title="Leave room">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h5M15 8l4 4-4 4M19 12H8"/></svg>
+                <svg viewBox="0 0 12 12" width="10" height="10" class="dropdown-chevron" aria-hidden="true"><path d="M2.5 4.5L6 8L9.5 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="command-bar-right">
+            <button id="copy-invite" class="btn btn-secondary btn-sm" type="button" title="Copy room invite link">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></svg>
+              <span>Copy invite</span>
+            </button>
+
+            <button id="open-settings" class="btn btn-secondary btn-icon" type="button" aria-label="Preferences" title="Preferences">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h7M15 18h5"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="13" cy="18" r="2"/></svg>
+            </button>
+
+          </div>
+        </header>
+
+        <!-- Main Multi-Pane Workspace -->
+        <div class="workspace-grid">
+          <!-- Primary Column: Now Playing Deck & Shared Queue Table -->
+          <div class="stage-main">
+            <!-- Now Playing Deck -->
+            <article id="now-playing-drop" class="deck-card now-playing-panel" data-file-drop-target>
+              <div class="deck-header">
+                <div class="media-info-block">
+                  <div class="media-badges">
+                    <span id="sync-state" class="badge badge-sync">Waiting for media</span>
+                    <span id="media-kind" class="badge badge-kind">No media loaded</span>
+                  </div>
+                  <h1 id="media-title" class="media-title-heading" title="No media loaded">No media loaded</h1>
+                </div>
+              </div>
+
+              <!-- Media Mismatch Warning -->
+              <div id="media-warning" class="mismatch-banner hidden" role="alert"></div>
+
+              <!-- Timeline Range Scrubber -->
+              <div class="timeline-control-row">
+                <div class="scrubber-wrapper">
+                  <div id="timeline-segments" class="timeline-segments" aria-hidden="true"></div>
+                  <input id="position" type="range" min="0" max="1" step="any" value="0" aria-label="Playback timeline" />
+                </div>
+              </div>
+
+              <!-- Transport Controls Bar -->
+              <div class="transport-deck">
+                <div class="transport-group">
+                  <button id="previous-media" class="btn btn-transport" type="button" title="Previous in queue" aria-label="Previous media">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 20 9 12l10-8v16ZM5 19V5"/></svg>
+                  </button>
+                  <button id="back-ten" class="btn btn-transport skip-btn" type="button" title="Skip backward 10 seconds" aria-label="Back 10 seconds">
+                    <svg class="icon icon-skip" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 4v4h4"/></svg>
+                    <span class="skip-num">10</span>
+                  </button>
+                  <button id="pause" class="btn btn-play-pause" type="button" aria-label="Play / Pause" title="Play / Pause">
+                    <svg class="play-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M8 5v14l11-7L8 5Z" fill="currentColor"/></svg>
+                  </button>
+                  <button id="forward-ten" class="btn btn-transport skip-btn" type="button" title="Skip forward 10 seconds" aria-label="Forward 10 seconds">
+                    <svg class="icon icon-skip" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 4v4h-4"/></svg>
+                    <span class="skip-num">10</span>
+                  </button>
+                  <button id="next-media" class="btn btn-transport" type="button" title="Next in queue" aria-label="Next media">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 4 10 8-10 8V4ZM19 5v14"/></svg>
+                  </button>
+                </div>
+
+                <div class="transport-meta-controls">
+                  <div class="media-clock" aria-label="Playback time">
+                    <span id="current-time">00:00</span>
+                    <span class="clock-divider">/</span>
+                    <span id="duration">--:--</span>
+                  </div>
+                  <div class="inline-select-group rate-group" title="Playback speed">
+                    <span class="select-label">Speed</span>
+                    <div class="rate-stepper" role="group" aria-label="Playback speed">
+                      <button id="rate-decrease" type="button" aria-label="Decrease playback speed" title="Slower"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6h7"/></svg></button>
+                      <button id="playback-rate" class="rate-value" data-value="1" type="button" aria-label="Reset playback speed" title="Reset to normal speed">1×</button>
+                      <button id="rate-increase" type="button" aria-label="Increase playback speed" title="Faster"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6h7M6 2.5v7"/></svg></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <!-- Shared Queue / Playlist Data Grid Table -->
+            <article id="playlist-panel" class="deck-card queue-card" data-file-drop-target>
+              <div class="panel-header-toolbar">
+                <div class="panel-heading">
+                  <span class="panel-title">Queue</span>
+                  <span id="playlist-count" class="counter-badge">0</span>
+                </div>
+                <div class="panel-actions">
+                  <button id="add-file" class="btn btn-primary btn-sm" type="button">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    <span>Add Media</span>
+                  </button>
+                  <button id="add-stream-btn" class="btn btn-secondary btn-sm" type="button">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></svg>
+                    <span>Add URL</span>
+                  </button>
+                  <button id="shuffle-playlist" class="btn btn-secondary btn-sm" type="button" title="Shuffle upcoming items">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5-5 5M21 8h-4c-5 0-5 8-10 8H3M16 21l5-5-5-5M21 16h-4c-1.2 0-2.1-.5-2.9-1.2M3 8h4c1.2 0 2.1.5 2.9 1.2"/></svg>
+                    <span>Shuffle</span>
+                  </button>
+                  <button id="playlist-more" class="btn btn-secondary btn-icon" type="button" aria-haspopup="menu" aria-label="More queue actions" title="Queue Options">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Stream URL Drawer -->
+              <div id="stream-drawer" class="stream-input-drawer hidden">
+                <div class="drawer-fields">
+                  <input id="playlist-source" class="form-input form-input-sm" placeholder="Paste HTTP(S) video or stream URL..." />
+                  <button id="add-playlist" class="btn btn-primary btn-sm" type="button"><span>Add</span></button>
+                  <button id="close-stream-drawer" class="btn btn-ghost btn-icon-sm" type="button" aria-label="Close drawer">
+                    <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 2.5L9.5 9.5M9.5 2.5L2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                  </button>
+                  <small class="stream-input-hint">YouTube playback requires a current yt-dlp installation and Deno 2.3+ or Node.js 22+.</small>
+                </div>
+              </div>
+
+              <!-- Queue Table Header -->
+              <div class="queue-table-header">
+                <span class="th-handle"></span>
+                <span class="th-index">#</span>
+                <span class="th-title">Title</span>
+                <span class="th-duration">Duration</span>
+                <span class="th-actions">Actions</span>
+              </div>
+
+              <!-- Queue Table List Container -->
+              <div class="queue-scroll-container">
+                <div id="playlist-empty" class="queue-empty-placeholder">
+                  <div class="empty-icon-box">
+                    <svg viewBox="0 0 24 24" width="32" height="32" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 9l5 3-5 3V9Z" fill="currentColor"/></svg>
+                  </div>
+                  <h3>Nothing queued</h3>
+                  <p>Drop media here or add files from disk.</p>
+                  <button id="empty-add-file" class="btn btn-secondary btn-sm" type="button">Choose files…</button>
+                </div>
+
+                <ol id="playlist" class="queue-table-list" aria-label="Shared playlist"></ol>
+              </div>
+            </article>
+          </div>
+
+          <!-- Side Stage: persistent people and chat inspector -->
+          <aside class="stage-side">
+            <article class="deck-card inspector-card">
+              <section id="inspector-participants-panel" class="inspector-tab-panel people-panel" aria-labelledby="people-heading">
+                <div class="inspector-section-heading people-heading-row">
+                  <div class="people-heading-primary">
+                    <div class="inspector-title-wrap">
+                      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                      <span id="people-heading">People</span>
+                      <span id="people-count" class="tab-counter">0</span>
+                    </div>
+                  </div>
+                  <select id="room-mode" class="form-select select-compact" aria-label="Playback control mode" title="Who can control playback">
+                    <option value="collaborative">Everyone controls</option>
+                    <option value="moderated">Moderators control</option>
+                  </select>
+                </div>
+
+                <div class="participants-scroll-area">
+                  <ul id="participants" class="participants-list"></ul>
+                </div>
+              </section>
+
+              <section id="inspector-chat-panel" class="inspector-tab-panel chat-panel" aria-labelledby="chat-heading">
+                <div class="chat-toolbar">
+                  <div class="inspector-title-wrap">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8Z"/></svg>
+                    <span id="chat-heading">Chat</span>
+                  </div>
+                  <div class="chat-segmented-filter" role="group" aria-label="Message filter">
+                    <button class="chat-filter active" type="button" data-chat-filter="all" aria-pressed="true">All</button>
+                    <button class="chat-filter" type="button" data-chat-filter="chat" aria-pressed="false">Chat</button>
+                    <button class="chat-filter" type="button" data-chat-filter="activity" aria-pressed="false">Activity</button>
+                  </div>
+                  <button id="clear-chat" class="btn btn-ghost btn-xs" type="button" title="Clear message feed">Clear</button>
+                </div>
+
+                <div id="chat" class="chat-feed-stream" role="log" aria-live="polite"></div>
+
+                <form id="chat-form" class="chat-compose-bar">
+                  <input id="chat-message" class="form-input form-input-sm" autocomplete="off" maxlength="512" placeholder="Message the room" required />
+                  <button class="btn btn-primary btn-sm btn-icon-sm" type="submit" aria-label="Send message" title="Send (Enter)">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4 20-7Z"/><path d="M22 2 11 13"/></svg>
+                  </button>
+                </form>
+              </section>
+            </article>
+          </aside>
+        </div>
+
+        <!-- Popover Menus (Fixed Overlay Anchors) -->
+        <div id="playlist-menu" class="popover-menu hidden" role="menu">
+          <button id="add-stream-focus" class="popover-btn" role="menuitem">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M2 8h12M8 2c2 2 3 4 3 6s-1 4-3 6c-2-2-3-4-3-6s1-4 3-6Z" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+            <span>Add Stream / URL...</span>
+          </button>
+          <button id="add-folder" class="popover-btn" role="menuitem">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2 4a1 1 0 0 1 1-1h3.5l1.5 1.5H13a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4Z" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+            <span>Add Folder Files...</span>
+          </button>
+          <button id="save-playlist" class="popover-btn" role="menuitem">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><rect x="4" y="2" width="8" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M7 5h2M7 8h2M7 11h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+            <span>Copy Queue as Text</span>
+          </button>
+          <button id="undo-playlist" class="popover-btn" type="button" role="menuitem" title="Undo queue modification" disabled>
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M6 10 2.5 6.5 6 3M2.5 6.5h6A4.5 4.5 0 0 1 13 11v1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Undo Last Queue Change</span>
+          </button>
+          <hr class="popover-sep" />
+          <button id="spin-wheel" class="popover-btn" role="menuitem">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 2v12M2 8h12M3.8 3.8l8.4 8.4M3.8 12.2l8.4-8.4" stroke="currentColor" stroke-width="1.1"/></svg>
+            <span>Spin Selection Wheel...</span>
+            <small class="popover-badge">Synced</small>
+          </button>
+          <button id="shuffle-all" class="popover-btn" role="menuitem">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M11 3h3v3M14 3l-5 5M11 13h3v-3M14 13l-5-5M2 3l4 4M2 13l4-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Shuffle Entire Queue</span>
+          </button>
+          <hr class="popover-sep" />
+          <button id="load-playlist-file" class="popover-btn" role="menuitem">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 13h10M8 3v7m-3-3l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Load Playlist File (M3U)...</span>
+          </button>
+          <button id="save-playlist-file" class="popover-btn" role="menuitem">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 13h10M8 10V3m-3 3l3-3 3 3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Save Queue to M3U...</span>
+          </button>
+          <hr class="popover-sep" />
+          <button id="clear-playlist" class="popover-btn danger-item" role="menuitem">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 4h10M6 4V2.5h4V4M5 6v7h6V6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Clear Queue</span>
+          </button>
+        </div>
+
+        <div id="room-menu" class="popover-menu hidden" role="menu">
+          <button id="copy-room-name" class="popover-btn">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><rect x="4" y="4" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 11H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v1" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+            <span>Copy Room Name</span>
+          </button>
+          <button id="owner-invite" class="popover-btn hidden">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 2a3 3 0 0 0-3 3c0 1.2.7 2.2 1.7 2.7L6 14h4l-.7-6.3A3 3 0 0 0 8 2Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Copy Owner Recovery Invite</span>
+          </button>
+          <button id="change-room" class="popover-btn">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2 8h12M10 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Switch to Another Room...</span>
+          </button>
+        </div>
+
+        <div id="server-stats-menu" class="popover-menu server-stats-popover hidden" role="menu" aria-label="Server statistics">
+          <div class="stats-popover-header">
+            <span class="stats-popover-badge">Server &amp; Session</span>
+            <span id="stats-status-pill" class="stats-status-pill connected">Connected</span>
+          </div>
+          <div class="stats-grid">
+            <div class="stats-row">
+              <span class="stats-label">Server</span>
+              <strong id="stats-server-val" class="stats-val">—</strong>
+            </div>
+            <div class="stats-row">
+              <span class="stats-label">Room</span>
+              <strong id="stats-room-val" class="stats-val">—</strong>
+            </div>
+            <div class="stats-row">
+              <span class="stats-label">Player</span>
+              <strong id="stats-player-val" class="stats-val">—</strong>
+            </div>
+            <div class="stats-row">
+              <span class="stats-label">People</span>
+              <strong id="stats-people-val" class="stats-val">—</strong>
+            </div>
+            <div class="stats-row">
+              <span class="stats-label">Security</span>
+              <strong id="stats-cert-val" class="stats-val">—</strong>
+            </div>
+            <div class="stats-row">
+              <span class="stats-label">Client</span>
+              <strong id="stats-client-val" class="stats-val">—</strong>
+            </div>
+          </div>
+          <hr class="popover-divider" />
+          <button id="stats-open-session" class="popover-btn" type="button" role="menuitem">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 2a6 6 0 1 0 6 6A6 6 0 0 0 8 2Zm0 3v3l2 1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Session Settings…</span>
+          </button>
+        </div>
+
+        <div id="session-menu" class="popover-menu hidden" role="menu">
+          <button id="disconnect" class="popover-btn danger-item" type="button" role="menuitem">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M7 3H3v10h4M10 5l3 3-3 3M13 8H6"/></svg>
+            <span>Leave room</span>
+          </button>
+          <button id="stop-server" class="popover-btn danger-item hidden" type="button" role="menuitem">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>
+            <span>Stop local server</span>
+          </button>
+        </div>
+
+        <div id="context-menu" class="popover-menu context-menu hidden" role="menu"></div>
+
+        <!-- Synchronized Desktop Playlist Wheel Dialog -->
+        <dialog id="wheel-dialog" class="desktop-modal wheel-modal">
+          <div class="modal-shell">
+            <header class="modal-header">
+              <div class="modal-title-group">
+                <span class="modal-eyebrow">Queue</span>
+                <h2>Choose at random</h2>
+              </div>
+              <button id="close-wheel" class="btn btn-ghost btn-icon-sm" type="button" aria-label="Close wheel">
+                <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 2.5L9.5 9.5M9.5 2.5L2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+              </button>
+            </header>
+            <div class="wheel-stage-wrapper">
+              <div class="wheel-pointer-needle" aria-hidden="true"></div>
+              <canvas id="wheel-canvas" width="1000" height="1000" aria-label="Playlist selection wheel"></canvas>
+              <div class="wheel-center-hub" aria-hidden="true">
+                <img src="/logo.png" alt="" />
+              </div>
+            </div>
+            <div class="wheel-result-strip" aria-live="polite">
+              <span id="wheel-status">Ready to pick from the shared queue</span>
+              <strong id="wheel-candidate">No spin in progress</strong>
+            </div>
+            <footer class="modal-footer">
+              <span id="wheel-count" class="footer-meta-count">0 items</span>
+              <button id="wheel-spin-again" class="btn btn-primary" type="button">Spin Wheel</button>
+            </footer>
+          </div>
+        </dialog>
+
+        <!-- Desktop Preferences Dialog -->
+        <dialog id="settings-dialog" class="desktop-modal preferences-modal">
+          <form method="dialog" class="modal-shell">
+            <header class="modal-header">
+              <div class="modal-title-group">
+                <h2>Preferences</h2>
+                <span class="modal-subtitle">Faro</span>
+              </div>
+              <button id="close-settings" class="btn btn-ghost btn-icon-sm" value="cancel" aria-label="Close preferences">
+                <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 2.5L9.5 9.5M9.5 2.5L2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+              </button>
+            </header>
+
+            <div class="preferences-grid">
+              <nav class="preferences-nav" aria-label="Settings categories">
+                <button type="button" class="pref-nav-btn active" data-settings="appearance">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 2v12a6 6 0 0 0 0-12Z" fill="currentColor"/></svg>
+                  <span>Appearance</span>
+                </button>
+                <button type="button" class="pref-nav-btn" data-settings="playback">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><polygon points="5,3 13,8 5,13" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+                  <span>Playback &amp; Sync</span>
+                </button>
+                <button type="button" class="pref-nav-btn" data-settings="media">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2 4a1 1 0 0 1 1-1h4l2 2h4a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4Z" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+                  <span>Media Library</span>
+                </button>
+                <button type="button" class="pref-nav-btn" data-settings="session">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 1v2m0 10v2M1 8h2m10 0h2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                  <span>Session &amp; Server</span>
+                </button>
+                <button type="button" class="pref-nav-btn pref-nav-legal" data-settings="legal">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.5h6l2 2V13.5H4V2.5Z" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10 2.5v2h2M6 7h4M6 9.5h4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                  <span>Legal</span>
+                </button>
+              </nav>
+
+              <div class="preferences-content">
+                <!-- Page: Appearance -->
+                <section data-page="appearance" class="pref-page">
+                  <div class="pref-section-head">
+                    <h3>Appearance &amp; Density</h3>
+                    <p>Theme, density, and motion.</p>
+                  </div>
+
+                  <div class="form-group">
+                    <label for="theme-select" class="form-label">Color Theme</label>
+                    <select id="theme-select" class="form-select">
+                      <option value="system">Follow System</option>
+                      <option value="dark">Dark</option>
+                      <option value="light">Light</option>
+                    </select>
+                  </div>
+
+                  <label class="checkbox-row" for="compact-mode">
+                    <input id="compact-mode" class="form-checkbox" type="checkbox" />
+                    <span class="checkbox-content">
+                      <strong>Compact queue rows</strong>
+                      <small>Show more queue items at once</small>
+                    </span>
+                  </label>
+
+                  <label class="checkbox-row" for="reduce-motion">
+                    <input id="reduce-motion" class="form-checkbox" type="checkbox" />
+                    <span class="checkbox-content">
+                      <strong>Reduce motion</strong>
+                      <small>Turn off interface animations</small>
+                    </span>
+                  </label>
+                </section>
+
+                <!-- Page: Playback -->
+                <section data-page="playback" class="pref-page hidden">
+                  <div class="pref-section-head">
+                    <h3>Playback &amp; Controls</h3>
+                    <p>Player controls and synchronization behavior.</p>
+                  </div>
+
+                  <div class="form-group">
+                    <label for="skip-seconds" class="form-label">Skip Interval (seconds)</label>
+                    <div class="number-stepper" role="group" aria-label="Skip interval in seconds">
+                      <button id="skip-decrease" type="button" aria-label="Decrease skip interval">−</button>
+                      <input id="skip-seconds" type="number" min="1" max="120" value="10" class="form-input" />
+                      <button id="skip-increase" type="button" aria-label="Increase skip interval">+</button>
+                    </div>
+                  </div>
+
+                  <label class="checkbox-row" for="pause-on-leave">
+                    <input id="pause-on-leave" class="form-checkbox" type="checkbox" />
+                    <span class="checkbox-content">
+                      <strong>Pause on Disconnect</strong>
+                      <small>Automatically pause media playback before leaving a room</small>
+                    </span>
+                  </label>
+
+                  <label class="checkbox-row" for="sponsorblock-enabled">
+                    <input id="sponsorblock-enabled" class="form-checkbox" type="checkbox" checked />
+                    <span class="checkbox-content">
+                      <strong>SponsorBlock</strong>
+                      <small>Skip sponsored segments in YouTube streams</small>
+                    </span>
+                  </label>
+
+                  <label class="checkbox-row" for="wheel-sound-enabled">
+                    <input id="wheel-sound-enabled" class="form-checkbox" type="checkbox" checked />
+                    <span class="checkbox-content">
+                      <strong>Wheel sound</strong>
+                      <small>Play quiet mechanical ticks while the selection wheel spins</small>
+                    </span>
+                  </label>
+                </section>
+
+                <!-- Page: Media Library -->
+                <section data-page="media" class="pref-page hidden">
+                  <div class="pref-section-head">
+                    <h3>Indexed Media Directories</h3>
+                    <p>Folders used to match local copies of queued media. File paths are not shared.</p>
+                  </div>
+
+                  <button id="add-media-directory" class="btn btn-secondary btn-sm" type="button">
+                    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                    <span>Add Media Folder...</span>
+                  </button>
+                  <ul id="media-directories" class="media-directories-list"></ul>
+                </section>
+
+                <!-- Page: Session -->
+                <section data-page="session" class="pref-page hidden">
+                  <div class="pref-section-head">
+                    <h3>Session Management</h3>
+                    <p>Invites and connection controls for the current room.</p>
+                  </div>
+
+                  <div class="pref-button-cluster">
+                    <button id="reconnect" class="btn btn-secondary" type="button">Reconnect Current Session</button>
+                    <button id="settings-copy-invite" class="btn btn-secondary" type="button">Copy Invite</button>
+                    <button id="settings-owner-invite" class="btn btn-secondary hidden" type="button">Copy Owner Recovery Invite</button>
+                  </div>
+
+                  <div class="session-info-list" aria-label="Connection information">
+                    <div><span>Client</span><strong id="info-client-version">Faro</strong></div>
+                    <div><span>Player</span><strong id="info-player">—</strong></div>
+                    <div><span>Room</span><strong id="info-room">—</strong></div>
+                    <div><span>Connection</span><strong id="info-connection">Disconnected</strong></div>
+                    <div><span>Server</span><strong id="info-server">—</strong></div>
+                    <div><span>Certificate</span><strong id="info-certificate">Pinned by invite</strong></div>
+                  </div>
+
+                  <hr class="pref-divider" />
+                  <button id="settings-leave" class="btn btn-danger" type="button">Disconnect &amp; Leave Room</button>
+                </section>
+
+                <!-- Page: Legal -->
+                <section data-page="legal" class="pref-page hidden">
+                  <div class="pref-section-head">
+                    <h3>Legal &amp; Open Source</h3>
+                    <p>Licenses, dependency notices, and corresponding source.</p>
+                  </div>
+
+                  <div class="legal-overview">
+                    <div>
+                      <strong>Faro <span id="legal-version"></span></strong>
+                      <p>Licensed under the Mozilla Public License 2.0.</p>
+                    </div>
+                    <button id="legal-source" class="btn btn-secondary btn-sm" type="button">View source for this release</button>
+                  </div>
+
+                  <details class="legal-disclosure">
+                    <summary>Mozilla Public License 2.0</summary>
+                    <pre id="legal-project-license" tabindex="0">Loading license…</pre>
+                  </details>
+
+                  <details class="legal-disclosure">
+                    <summary>Third-party notices</summary>
+                    <pre id="legal-third-party" tabindex="0">Loading notices…</pre>
+                  </details>
+                </section>
+              </div>
+            </div>
+          </form>
+        </dialog>
+
+        <dialog id="confirm-dialog" class="desktop-modal compact-modal">
+          <form method="dialog" class="modal-shell compact-modal-shell">
+            <header class="modal-header">
+              <div class="modal-title-group">
+                <h2 id="confirm-title">Confirm</h2>
+                <span id="confirm-message" class="modal-subtitle"></span>
+              </div>
+            </header>
+            <footer class="modal-footer">
+              <button id="confirm-cancel" class="btn btn-secondary" value="cancel">Cancel</button>
+              <button id="confirm-accept" class="btn btn-danger" value="accept">Continue</button>
+            </footer>
+          </form>
+        </dialog>
+
+        <dialog id="room-change-dialog" class="desktop-modal compact-modal">
+          <form id="room-change-form" class="modal-shell compact-modal-shell">
+            <header class="modal-header">
+              <div class="modal-title-group">
+                <h2>Switch room</h2>
+                <span class="modal-subtitle">Enter the room name to move this session.</span>
+              </div>
+              <button id="room-change-cancel" class="btn btn-ghost btn-icon-sm" type="button" aria-label="Cancel">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+              </button>
+            </header>
+            <div class="compact-modal-body">
+              <label for="room-change-input" class="form-label">Room name</label>
+              <input id="room-change-input" class="form-input" maxlength="128" autocomplete="off" required />
+            </div>
+            <footer class="modal-footer">
+              <button class="btn btn-secondary" type="button" id="room-change-cancel-footer">Cancel</button>
+              <button class="btn btn-primary" type="submit">Switch room</button>
+            </footer>
+          </form>
+        </dialog>
+      </section>
+    </main>
+
+    <!-- Toast Notifications Popup -->
+    <div id="toast" class="toast-popup" role="status" aria-live="polite">
+      <span id="toast-icon" class="toast-status-icon">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 8.5L6.5 12L13 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </span>
+      <span id="toast-message" class="toast-message-text"></span>
+    </div>
+
+    <!-- External File Drop Overlay -->
+    <div class="drop-overlay" aria-hidden="true">
+      <div class="drop-modal-box">
+        <div class="drop-box-icon">
+          <svg viewBox="0 0 24 24" width="44" height="44" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <strong>Drop media file or folder</strong>
+        <small>Adds items to the shared queue or opens immediately</small>
+      </div>
+    </div>
+
+    <script type="module" src="/app.js?v=17"></script>
+  </body>
+</html>

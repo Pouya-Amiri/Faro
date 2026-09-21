@@ -1,0 +1,134 @@
+package vlc
+
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestLaunchArgumentsTargetTheLuaCliInterface(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		args := launchArguments(goos, "127.0.0.1:1234", nil, "movie.mkv")
+		if !containsArgument(args, "--extraintf=luaintf") || !containsArgument(args, "--lua-intf=cli") {
+			t.Fatalf("%s arguments do not target the Lua cli interface: %q", goos, args)
+		}
+		if containsArgument(args, "--rc-quiet") {
+			t.Fatalf("%s arguments contain --rc-quiet: %q", goos, args)
+		}
+	}
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		args := launchArguments(goos, "127.0.0.1:1234", []string{"--rc-quiet", "--no-audio"}, "movie.mkv")
+		if containsArgument(args, "--rc-quiet") {
+			t.Fatalf("%s arguments kept a configured --rc-quiet: %q", goos, args)
+		}
+		if !containsArgument(args, "--no-audio") || args[len(args)-1] != "movie.mkv" {
+			t.Fatalf("%s arguments lost configured values: %q", goos, args)
+		}
+	}
+}
+
+func TestParsePlaybackStateDistinguishesPausedFromPlaying(t *testing.T) {
+	for name, response := range map[string]string{
+		"playing": "status change: ( audio volume: 1.000000 )\n( state playing )",
+		"paused":  "( state paused )",
+		"stopped": "( state stopped )",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := parsePlaybackState(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]playbackState{"playing": playbackPlaying, "paused": playbackPaused, "stopped": playbackStopped}[name]
+			if got != want {
+				t.Fatalf("parsePlaybackState() = %v, want %v", got, want)
+			}
+		})
+	}
+	if _, err := parsePlaybackState("status change: ( stop state: 0 )"); err == nil {
+		t.Fatal("parsePlaybackState accepted a response without a playback state")
+	}
+}
+
+func TestSeekArgumentUsesVLCWholeSecondSyntax(t *testing.T) {
+	for input, want := range map[float64]string{-1: "0", 1.25: "1", 1.75: "2"} {
+		got, err := seekArgument(input)
+		if err != nil || got != want {
+			t.Fatalf("seekArgument(%v) = %q, %v; want %q", input, got, err, want)
+		}
+	}
+}
+
+func TestResponseErrorRejectsVLCFailures(t *testing.T) {
+	for _, response := range []string{
+		"Unknown command `rate'. Type `help' for help.",
+		"seek: returned -1 (generic error)",
+		"Error in `add file:///missing.mkv' command",
+	} {
+		if err := responseError("test", response); err == nil {
+			t.Fatalf("responseError accepted %q", response)
+		}
+	}
+	if err := responseError("test", "rate: returned 0 (no error)"); err != nil {
+		t.Fatalf("responseError rejected success: %v", err)
+	}
+}
+
+func TestParseNumberResponseIgnoresNumbersInsideStatusLines(t *testing.T) {
+	got, err := parseNumberResponse("status change: ( audio volume: 38.0 )\n12")
+	if err != nil || got != 12 {
+		t.Fatalf("parseNumberResponse() = %v, %v; want 12", got, err)
+	}
+}
+
+func TestHasRCCommandParsesHelpTable(t *testing.T) {
+	help := "+----[ Remote control commands ]\n| rate [playback rate]\n| seek X"
+	if !hasRCCommand(help, "rate") || hasRCCommand(help, "chapter") {
+		t.Fatalf("hasRCCommand parsed help incorrectly")
+	}
+}
+
+func containsArgument(arguments []string, target string) bool {
+	for _, argument := range arguments {
+		if argument == target {
+			return true
+		}
+	}
+	return false
+}
+
+func TestVLCMRLPercentEncodesLocalPathsWithoutQuotes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "A movie #1.mkv")
+	mrl, err := vlcMRL(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(mrl, "file:///") || strings.ContainsAny(mrl, ` "`) {
+		t.Fatalf("vlcMRL(%q) returned unsafe MRL %q", path, mrl)
+	}
+	if !strings.Contains(mrl, "A%20movie%20%231.mkv") {
+		t.Fatalf("VLC MRL was not percent encoded: %q", mrl)
+	}
+}
+
+func TestVLCMRLPreservesStreamURLs(t *testing.T) {
+	const source = "https://media.example/movie.mp4?token=one%20two&part=1"
+	mrl, err := vlcMRL(source)
+	if err != nil || mrl != source {
+		t.Fatalf("vlcMRL(%q) = %q, %v", source, mrl, err)
+	}
+}
+
+func TestVLCMRLRejectsRCCommandInjection(t *testing.T) {
+	if _, err := vlcMRL("movie.mkv\nquit"); err == nil {
+		t.Fatal("VLC MRL accepted a line break")
+	}
+}
+
+func TestLocalVLCMRLHandlesWindowsDriveAndUNCPaths(t *testing.T) {
+	if got := localVLCMRL(`C:\Users\Ada\My Movie.mkv`, "windows"); got != "file:///C:/Users/Ada/My%20Movie.mkv" {
+		t.Fatalf("Windows drive MRL = %q", got)
+	}
+	if got := localVLCMRL(`\\server\media\My Movie.mkv`, "windows"); got != "file://server/media/My%20Movie.mkv" {
+		t.Fatalf("Windows UNC MRL = %q", got)
+	}
+}
