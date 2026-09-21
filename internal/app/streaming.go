@@ -238,9 +238,6 @@ func (s *Service) reconcilePlaylistStreams(ctx context.Context, client *faroclie
 	}
 	localSource := s.sources[selectedFingerprint]
 	s.mu.RUnlock()
-	if playerDismissed {
-		return
-	}
 
 	offeredItemPresent := offeredItemID == ""
 	for _, item := range snapshot.Playlist.Items {
@@ -261,6 +258,12 @@ func (s *Service) reconcilePlaylistStreams(ctx context.Context, client *faroclie
 		_ = s.StopStreaming()
 		hasPending = false
 	}
+	// Closing the player suppresses automatic playback, but it must not suppress
+	// lifecycle cleanup. Otherwise a removed queue item keeps its offer and any
+	// active transfer alive indefinitely, preventing a replacement offer.
+	if playerDismissed {
+		return
+	}
 	if selectedFingerprint == "" || localSource != "" || receiving != nil || hasPending {
 		return
 	}
@@ -279,6 +282,7 @@ func (s *Service) StopStreaming() error {
 	}
 	s.mu.Lock()
 	gateway, requestID := s.streamGateway, s.streamRequestID
+	receiveItemID := s.streamReceiveItemID
 	activationCancel := s.streamActivationCancel
 	s.streamActivationCancel = nil
 	s.streamActivation = nil
@@ -291,6 +295,12 @@ func (s *Service) StopStreaming() error {
 		}
 	}
 	s.streamGateway, s.streamRequestID, s.streamReceiveItemID, s.streamIdentity = nil, "", "", nil
+	if gateway != nil && s.currentSource == gateway.URL() {
+		s.currentSource, s.currentPlayerSource = "", ""
+	}
+	if receiveItemID != "" && s.selectedItem == receiveItemID {
+		s.selectedItem = ""
+	}
 	s.mu.Unlock()
 	if activationCancel != nil {
 		activationCancel()
@@ -487,7 +497,14 @@ func (s *Service) handleStreamRevoked(client *faroclient.Client, revoked protoco
 	var gateway *mediastream.Gateway
 	if s.streamRequestID == revoked.RequestID {
 		gateway = s.streamGateway
+		receiveItemID := s.streamReceiveItemID
 		s.streamGateway, s.streamRequestID, s.streamReceiveItemID, s.streamIdentity = nil, "", "", nil
+		if gateway != nil && s.currentSource == gateway.URL() {
+			s.currentSource, s.currentPlayerSource = "", ""
+		}
+		if receiveItemID != "" && s.selectedItem == receiveItemID {
+			s.selectedItem = ""
+		}
 	}
 	s.mu.Unlock()
 	if publisher != nil && capability != "" {

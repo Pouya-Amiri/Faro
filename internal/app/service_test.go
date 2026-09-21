@@ -261,6 +261,41 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 		viewer.mu.RUnlock()
 		return hostStopped && viewerStopped
 	})
+	viewer.mu.RLock()
+	staleSource, staleSelection := viewer.currentSource, viewer.selectedItem
+	viewer.mu.RUnlock()
+	if staleSource != "" || staleSelection != "" {
+		t.Fatalf("removed stream retained playback identity: source=%q selected=%q", staleSource, staleSelection)
+	}
+	// Re-add the same queue identity, stream it again, and stop the offer
+	// explicitly. This covers the revocation path as well as removal cleanup.
+	if err := host.SetPlaylist([]PlaylistInput{
+		{ID: snapshot.Playlist.Items[1].ID, Label: snapshot.Playlist.Items[1].Label,
+			URL: snapshot.Playlist.Items[1].URL, Media: snapshot.Playlist.Items[1].Media},
+		{ID: snapshot.Playlist.Items[0].ID, Label: snapshot.Playlist.Items[0].Label,
+			URL: snapshot.Playlist.Items[0].URL, Media: snapshot.Playlist.Items[0].Media},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SelectPlaylist(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.OfferPlaylistStream(snapshot.Playlist.Items[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	waitForState("viewer did not reconnect after the file was added back", func() bool {
+		viewer.mu.RLock()
+		defer viewer.mu.RUnlock()
+		return viewer.streamGateway != nil
+	})
+	if err := host.StopOfferingStream(); err != nil {
+		t.Fatal(err)
+	}
+	waitForState("viewer retained the explicitly stopped stream", func() bool {
+		viewer.mu.RLock()
+		defer viewer.mu.RUnlock()
+		return viewer.streamGateway == nil && viewer.currentSource == "" && viewer.selectedItem == ""
+	})
 	if err := host.SelectPlaylist(0); err != nil {
 		t.Fatal(err)
 	}
@@ -274,6 +309,55 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 		state, stateErr := mediaPlayer.State(context.Background())
 		return stateErr == nil && state.Source == nextURL
 	})
+}
+
+func TestRemovedPlaylistOfferIsWithdrawnAfterPlayerWasClosed(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	network := streamtransport.NewFakeNetwork()
+	host := New(context.Background(), nil)
+	host.streamFactory = network
+	status, err := host.StartServer(ServerRequest{Mode: "advanced",
+		ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie",
+		StreamingDERPMapURL: "https://derp.example.test/map.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	host.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	if err := host.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Host", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 1000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := host.Snapshot()
+	if err := host.OfferPlaylistStream(snapshot.Playlist.Items[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	host.playerDismissed = true
+	host.mu.Unlock()
+	if err := host.SetPlaylist(nil); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		host.mu.RLock()
+		stopped := host.streamPublisher == nil && host.streamOfferID == "" && host.streamOfferItemID == ""
+		host.mu.RUnlock()
+		if stopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("removed playlist item remained offered after the player was closed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestEmbeddedServerWildcardListenAddressUsesLocalhost(t *testing.T) {
