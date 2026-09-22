@@ -38,7 +38,6 @@ type Event struct {
 	Activity        *protocol.ActivityMessage `json:"activity,omitempty"`
 	Error           *protocol.Error           `json:"error,omitempty"`
 	Connection      *ConnectionStatus         `json:"connection,omitempty"`
-	OwnerToken      string                    `json:"ownerToken,omitempty"`
 	Wheel           *protocol.PlaylistWheel   `json:"wheel,omitempty"`
 	Stream          *StreamStatus             `json:"stream,omitempty"`
 	ServerNowUnixMs int64                     `json:"serverNowUnixMs,omitempty"`

@@ -119,7 +119,7 @@ func (s *session) run() {
 		}
 		if err := s.handle(envelope); err != nil {
 			s.commandFailure(envelope.ID, err)
-		} else if envelope.Type != protocol.TypePing && envelope.Type != protocol.TypeRoomMove && envelope.Type != protocol.TypeStreamRequest {
+		} else if envelope.Type != protocol.TypePing && envelope.Type != protocol.TypeStreamRequest {
 			s.sendMessage(protocol.TypeCommandOK, "", envelope.ID, protocol.CommandOK{})
 		}
 	}
@@ -178,28 +178,6 @@ func (s *session) handle(envelope protocol.Envelope) error {
 			ClientTimeUnixMs: request.ClientTimeUnixMs,
 			ServerTimeUnixMs: time.Now().UnixMilli(),
 		})
-		return nil
-	case protocol.TypeRoomMove:
-		request, err := decode[protocol.RoomMove](envelope)
-		if err != nil {
-			return err
-		}
-		result, err := s.server.hub.move(s.participant, request)
-		if err != nil {
-			return err
-		}
-		s.participant = result.participant
-		s.sendMessage(protocol.TypeRoomMoved, "", envelope.ID, protocol.RoomMoved{RoomID: result.room.state.ID, OwnerToken: result.ownerToken})
-		snapshot, err := s.server.hub.snapshot(result.participant)
-		if err != nil {
-			return err
-		}
-		participants, err := s.server.hub.participants(result.participant)
-		if err != nil {
-			return err
-		}
-		s.sendMessage(protocol.TypeStateSnapshot, "", "", snapshot)
-		broadcast(result.existing, protocol.TypeParticipantsUpdated, participants)
 		return nil
 	case protocol.TypeRoomModeSet:
 		request, err := decode[protocol.RoomModeSet](envelope)

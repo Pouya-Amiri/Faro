@@ -1344,7 +1344,6 @@ async function leaveRoom() {
   seekCommandPending = false;
   clearTimeout(seekReleaseTimer);
   $("settings-dialog").close();
-  if ($("room-change-dialog").open) $("room-change-dialog").close();
   if ($("wheel-dialog").open) $("wheel-dialog").close();
   activeWheel = null;
   cancelAnimationFrame(wheelAnimation);
@@ -1709,26 +1708,6 @@ document.addEventListener("keydown", (event) => {
 });
 $("room-chip").onclick = (event) => { event.stopPropagation(); togglePopover($("room-menu"), $("room-chip")); };
 $("copy-room-name").onclick = () => { closePopovers(); copyText(snapshot.room.id, "Room name copied"); };
-$("change-room").onclick = () => {
-  closePopovers();
-  $("room-change-input").value = snapshot.room.id;
-  $("room-change-dialog").showModal();
-  requestAnimationFrame(() => $("room-change-input").select());
-};
-$("room-change-cancel").onclick = () => $("room-change-dialog").close();
-$("room-change-cancel-footer").onclick = () => $("room-change-dialog").close();
-$("room-change-dialog").addEventListener("click", (event) => { if (event.target === $("room-change-dialog")) $("room-change-dialog").close(); });
-$("room-change-form").onsubmit = async (event) => {
-  event.preventDefault();
-  const room = $("room-change-input").value.trim();
-  if (!room || room === snapshot.room.id) { $("room-change-dialog").close(); return; }
-  const button = event.submitter || $("room-change-form").querySelector("[type=submit]");
-  await withButtonLoading(button, async () => {
-    await invoke("MoveRoom", room);
-    $("room-change-dialog").close();
-    showToast(`Moved to #${room}`);
-  }, "Switching").catch(showError);
-};
 $("open-settings").onclick = () => { renderConnectionInfo(); $("settings-dialog").showModal(); };
 $("settings-dialog").addEventListener("click", (event) => { if (event.target === $("settings-dialog")) $("settings-dialog").close(); });
 document.querySelectorAll("[data-settings]").forEach((button) => {

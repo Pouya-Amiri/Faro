@@ -950,7 +950,6 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
 .pref-section-head p { font-size: 13px; }
 .compact-modal { width: min(430px, calc(100vw - 44px)); }
 .compact-modal-shell { width: 100%; }
-.compact-modal-body { display: flex; flex-direction: column; gap: 7px; padding: 20px 18px 24px; }
 .compact-modal .modal-footer { justify-content: flex-end; }
 
 .toast-popup { min-height: 40px; padding: 0 14px; border-radius: 10px; font-size: 13px; backdrop-filter: blur(20px); }

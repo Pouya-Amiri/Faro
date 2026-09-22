@@ -30,7 +30,6 @@ type Event struct {
 	Error         *protocol.Error
 	Chat          *protocol.ChatMessage
 	Activity      *protocol.ActivityMessage
-	OwnerToken    string
 	Wheel         *protocol.PlaylistWheel
 	StreamRequest *protocol.MediaStreamRequested
 	StreamGrant   *protocol.MediaStreamGranted
@@ -168,8 +167,8 @@ func (c *Client) readLoop() {
 }
 
 func (c *Client) apply(envelope protocol.Envelope) {
-	if envelope.ReplyTo != "" && (envelope.Type == protocol.TypeCommandOK || envelope.Type == protocol.TypeError || envelope.Type == protocol.TypeRoomMoved || envelope.Type == protocol.TypeStreamRequestAccepted) {
-		if c.deliverReply(envelope) && envelope.Type != protocol.TypeRoomMoved {
+	if envelope.ReplyTo != "" && (envelope.Type == protocol.TypeCommandOK || envelope.Type == protocol.TypeError || envelope.Type == protocol.TypeStreamRequestAccepted) {
+		if c.deliverReply(envelope) {
 			return
 		}
 	}
@@ -254,13 +253,6 @@ func (c *Client) apply(envelope protocol.Envelope) {
 			return
 		}
 		c.welcome = value
-		event.OwnerToken = value.OwnerToken
-	case protocol.TypeRoomMoved:
-		value, err := protocol.DecodePayload[protocol.RoomMoved](envelope)
-		if err != nil {
-			return
-		}
-		event.OwnerToken = value.OwnerToken
 	case protocol.TypeChatMessage:
 		value, err := protocol.DecodePayload[protocol.ChatMessage](envelope)
 		if err != nil {
@@ -341,9 +333,6 @@ func (c *Client) Events() <-chan Event { return c.events }
 
 func (c *Client) Done() <-chan struct{} { return c.done }
 
-func (c *Client) MoveRoom(value protocol.RoomMove) error {
-	return c.command(protocol.TypeRoomMove, value)
-}
 func (c *Client) SetRoomMode(value protocol.RoomModeSet) error {
 	return c.command(protocol.TypeRoomModeSet, value)
 }

@@ -72,8 +72,6 @@ func (d *Desktop) Seek(seconds float64) error { return d.service.Seek(seconds) }
 
 func (d *Desktop) SetRate(rate float64) error { return d.service.SetRate(rate) }
 
-func (d *Desktop) MoveRoom(room string) error { return d.service.MoveRoom(room) }
-
 func (d *Desktop) StopOfferingStream() error { return d.service.StopOfferingStream() }
 
 func (d *Desktop) StreamingAvailable() bool { return d.service.StreamingAvailable() }

@@ -71,7 +71,7 @@ func (s *Service) Connect(request ConnectionRequest) error {
 	go s.reconcilePlaylistStreams(ctx, client)
 	go s.syncLoop(ctx)
 	s.emitConnection("connected", 0, "")
-	s.emitSnapshot("")
+	s.emitSnapshot()
 	return nil
 }
 
@@ -132,7 +132,7 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 			if event.Wheel != nil {
 				s.sink(Event{Kind: "wheel", Wheel: event.Wheel, ServerNowUnixMs: client.ServerNow().UnixMilli()})
 			}
-			s.emitSnapshot(event.OwnerToken)
+			s.emitSnapshot()
 		case <-client.Done():
 			if ctx.Err() == nil {
 				s.reconnect(ctx, client)
@@ -295,7 +295,7 @@ func (s *Service) reconnect(ctx context.Context, failed *faroclient.Client) {
 		if streamInterrupted {
 			s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "stream_unavailable", Message: "The connection changed, so the media stream must be requested again."}})
 		}
-		s.emitSnapshot(welcome.OwnerToken)
+		s.emitSnapshot()
 		go s.consumeClient(ctx, client)
 		go s.applySelectedPlaylist(ctx, client)
 		return
@@ -443,7 +443,7 @@ func (s *Service) releasePlayer(target player.Player, message string) {
 	}
 }
 
-func (s *Service) emitSnapshot(ownerToken string) {
+func (s *Service) emitSnapshot() {
 	s.mu.RLock()
 	client := s.client
 	s.mu.RUnlock()
@@ -451,7 +451,7 @@ func (s *Service) emitSnapshot(ownerToken string) {
 		return
 	}
 	snapshot := localClockSnapshot(client)
-	s.sink(Event{Kind: "snapshot", Snapshot: &snapshot, OwnerToken: ownerToken, ServerNowUnixMs: client.ServerNow().UnixMilli()})
+	s.sink(Event{Kind: "snapshot", Snapshot: &snapshot, ServerNowUnixMs: client.ServerNow().UnixMilli()})
 }
 
 func localClockSnapshot(client *faroclient.Client) protocol.Snapshot {

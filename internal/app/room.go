@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/Pouya-Amiri/Faro/internal/invite"
@@ -137,18 +136,6 @@ func (s *Service) SetRate(rate float64) error {
 		return err
 	}
 	return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: state.PositionSeconds, Paused: state.Paused, Rate: rate})
-}
-
-func (s *Service) MoveRoom(room string) error {
-	room = strings.TrimSpace(room)
-	if room == "" {
-		return errors.New("room name is required")
-	}
-	client, err := s.connected()
-	if err != nil {
-		return err
-	}
-	return client.MoveRoom(protocol.RoomMove{Room: room})
 }
 
 func (s *Service) OwnerInvite() (string, error) {

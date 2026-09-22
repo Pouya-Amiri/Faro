@@ -17,8 +17,6 @@ const (
 	TypePing                  MessageType = "ping"
 	TypePong                  MessageType = "pong"
 	TypeStateSnapshot         MessageType = "state.snapshot"
-	TypeRoomMove              MessageType = "room.move"
-	TypeRoomMoved             MessageType = "room.moved"
 	TypeRoomModeSet           MessageType = "room.mode.set"
 	TypeRoomUpdated           MessageType = "room.updated"
 	TypeRoomRoleSet           MessageType = "room.role.set"
@@ -305,16 +303,6 @@ type MediaStreamRevoked struct {
 	RequestID string `json:"requestId"`
 	OfferID   string `json:"offerId"`
 	Reason    string `json:"reason"`
-}
-
-type RoomMove struct {
-	Room       string `json:"room"`
-	OwnerToken string `json:"ownerToken,omitempty"`
-}
-
-type RoomMoved struct {
-	RoomID     string `json:"roomId"`
-	OwnerToken string `json:"ownerToken,omitempty"`
 }
 
 type RoomModeSet struct {
