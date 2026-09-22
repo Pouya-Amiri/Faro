@@ -32,6 +32,7 @@ func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.
 	}
 	playlist := client.Snapshot().Playlist
 	if playlist.Selected < 0 || playlist.Selected >= len(playlist.Items) {
+		s.stopSelectedPlayback(client, "")
 		return
 	}
 	item := playlist.Items[playlist.Selected]
@@ -47,6 +48,7 @@ func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.
 	}
 	s.mu.Unlock()
 	if source == "" {
+		s.stopSelectedPlayback(client, "")
 		s.sink(Event{Kind: "error", Error: &protocol.Error{
 			Code: "media_missing", Message: fmt.Sprintf("Locate a local copy of %q before playing it", item.Label),
 		}})
@@ -73,6 +75,9 @@ func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.
 	if ctx.Err() != nil || latest.Selected < 0 || latest.Selected >= len(latest.Items) || latest.Items[latest.Selected].ID != item.ID || playlistItemIdentity(latest.Items[latest.Selected]) != identity {
 		cancel()
 		s.endMediaTransition()
+		if ctx.Err() == nil {
+			s.releasePlayerWithDismissal(mediaPlayer, "", false)
+		}
 		return
 	}
 	playback := localClockSnapshot(client).Playback
@@ -97,6 +102,7 @@ func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.
 	s.mu.Lock()
 	s.selectedItem = item.ID
 	s.selectedItemIdentity = identity
+	s.manualSource = ""
 	s.mu.Unlock()
 	// Playback may have changed while loading (notably when Pause is pressed
 	// just after a wheel spin). Re-read the authoritative state at the last
@@ -106,6 +112,16 @@ func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.
 		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "player_sync", Message: err.Error()}})
 	}
 	cancel()
+}
+
+func (s *Service) stopSelectedPlayback(client *faroclient.Client, expectedID string) {
+	s.mu.RLock()
+	selected, mediaPlayer := s.client == client && s.selectedItem != "" && (expectedID == "" || s.selectedItem == expectedID), s.player
+	s.mu.RUnlock()
+	if selected && mediaPlayer != nil {
+		// A queue item that lost selection or its source no longer owns playback.
+		s.releasePlayerWithDismissal(mediaPlayer, "", false)
+	}
 }
 
 func (s *Service) SetPlaylist(inputs []PlaylistInput) error {
@@ -134,8 +150,27 @@ func (s *Service) SetPlaylist(inputs []PlaylistInput) error {
 	if err := client.SetPlaylist(protocol.PlaylistSet{Items: items}); err != nil {
 		return err
 	}
-	// The playlist update event performs the same reconciliation for every
-	// participant; doing it here also closes a removed provider stream promptly.
+	s.mediaLoadMu.Lock()
+	s.mu.RLock()
+	selectedID := s.selectedItem
+	s.mu.RUnlock()
+	if selectedID != "" {
+		present := false
+		for _, item := range items {
+			if item.ID == selectedID {
+				present = true
+				break
+			}
+		}
+		if !present {
+			s.stopSelectedPlayback(client, selectedID)
+		}
+	}
+	s.mediaLoadMu.Unlock()
+	if err := s.withdrawMissingOffer(client, items); err != nil {
+		return err
+	}
+	// The event performs the same transfer reconciliation for every participant.
 	go s.reconcilePlaylistStreams(s.root, client)
 	return nil
 }
@@ -153,16 +188,7 @@ func (s *Service) SpinPlaylistWheel() error {
 	if err != nil {
 		return err
 	}
-	if err := client.SpinPlaylistWheel(); err != nil {
-		return err
-	}
-	// A local wheel spin is an explicit request to play its winner. Allow the
-	// resulting server-authored selection to reopen a player that the user had
-	// previously closed. Closing it again during the spin restores dismissal.
-	s.mu.Lock()
-	s.playerDismissed = false
-	s.mu.Unlock()
-	return nil
+	return client.SpinPlaylistWheel()
 }
 
 func (s *Service) OpenMedia(source string) error {
@@ -210,6 +236,12 @@ func (s *Service) OpenMedia(source string) error {
 		return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: 0, Paused: paused, Rate: normalizedRate(state.Rate), Seek: true})
 	})
 	finished = true
+	if err == nil {
+		s.mu.Lock()
+		s.selectedItem, s.selectedItemIdentity = "", ""
+		s.manualSource = source
+		s.mu.Unlock()
+	}
 	return err
 }
 
@@ -229,6 +261,8 @@ func (s *Service) reopenMediaAtRoomClock(source string, paused bool) error {
 		identity.Media = *s.streamIdentity
 	}
 	s.mu.RUnlock()
+	initialPlaylist := client.Snapshot().Playlist
+	queueSource := initialPlaylist.Selected >= 0 && initialPlaylist.Selected < len(initialPlaylist.Items) && s.sourceForPlayback(client) == source
 	playback := localClockSnapshot(client).Playback
 	ctx, cancel := s.mediaOperationContext(s.root)
 	defer cancel()
@@ -269,6 +303,26 @@ func (s *Service) reopenMediaAtRoomClock(source string, paused bool) error {
 		})
 	})
 	finished = true
+	if err == nil {
+		playlist := client.Snapshot().Playlist
+		itemID, itemIdentity := "", ""
+		if playlist.Selected >= 0 && playlist.Selected < len(playlist.Items) && s.sourceForPlayback(client) == source {
+			item := playlist.Items[playlist.Selected]
+			itemID, itemIdentity = item.ID, playlistItemIdentity(item)
+		}
+		s.mu.Lock()
+		s.selectedItem, s.selectedItemIdentity = itemID, itemIdentity
+		if itemID == "" && !queueSource {
+			s.manualSource = source
+		} else {
+			s.manualSource = ""
+		}
+		s.mu.Unlock()
+		if queueSource && itemID == "" {
+			s.releasePlayerWithDismissal(mediaPlayer, "", false)
+			return errors.New("selected item changed while opening media")
+		}
+	}
 	return err
 }
 
@@ -725,10 +779,13 @@ func (s *Service) IndexMediaDirectory(directory string) (int, error) {
 }
 
 func playlistItemIdentity(item protocol.PlaylistItem) string {
+	if item.URL != "" {
+		return "url:" + item.URL
+	}
 	if item.Media != nil && item.Media.Fingerprint != "" {
 		return "media:" + item.Media.Fingerprint
 	}
-	return "url:" + item.URL
+	return ""
 }
 
 func isMediaExtension(extension string) bool {

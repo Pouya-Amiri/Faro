@@ -15,6 +15,7 @@ import (
 	faroclient "github.com/Pouya-Amiri/Faro/internal/client"
 	"github.com/Pouya-Amiri/Faro/internal/invite"
 	"github.com/Pouya-Amiri/Faro/internal/player"
+	"github.com/Pouya-Amiri/Faro/internal/protocol"
 	"github.com/Pouya-Amiri/Faro/internal/streamtransport"
 	"github.com/Pouya-Amiri/Faro/internal/syncer"
 )
@@ -485,7 +486,7 @@ func TestPlayAfterRemovingClosedPlayerSourceOpensSelectedItem(t *testing.T) {
 	}
 }
 
-func TestLocalWheelSpinAllowsDismissedPlayerToReopenForWinner(t *testing.T) {
+func TestLocalWheelSpinPreservesDismissalUntilWinner(t *testing.T) {
 	t.Setenv("FARO_TLS_DIR", t.TempDir())
 	service := New(context.Background(), nil)
 	status, err := service.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie"})
@@ -511,8 +512,216 @@ func TestLocalWheelSpinAllowsDismissedPlayerToReopenForWinner(t *testing.T) {
 	service.mu.RLock()
 	dismissed := service.playerDismissed
 	service.mu.RUnlock()
-	if dismissed {
-		t.Fatal("local wheel spin left automatic winner playback dismissed")
+	if !dismissed {
+		t.Fatal("wheel spin cleared dismissal before a winner was chosen")
+	}
+}
+
+func TestWheelWinnerReopensDismissedPlayersButCancellationDoesNot(t *testing.T) {
+	for _, phase := range []protocol.PlaylistWheelPhase{protocol.PlaylistWheelCompleted, protocol.PlaylistWheelCancelled} {
+		s := New(context.Background(), nil)
+		s.playerDismissed = true
+		s.applyWheelPlaybackIntent(protocol.PlaylistWheel{ID: "wheel", Phase: protocol.PlaylistWheelStarted})
+		s.applyWheelPlaybackIntent(protocol.PlaylistWheel{ID: "wheel", Phase: phase})
+		if got, want := s.playerDismissed, phase == protocol.PlaylistWheelCancelled; got != want {
+			t.Fatalf("phase %s: dismissed=%t, want %t", phase, got, want)
+		}
+	}
+	s := New(context.Background(), nil)
+	s.playerDismissed = true
+	s.applyWheelPlaybackIntent(protocol.PlaylistWheel{ID: "wheel", Phase: protocol.PlaylistWheelStarted})
+	s.playerCloseGeneration++
+	s.applyWheelPlaybackIntent(protocol.PlaylistWheel{ID: "wheel", Phase: protocol.PlaylistWheelCompleted})
+	if !s.playerDismissed {
+		t.Fatal("closing the player during a spin did not preserve dismissal")
+	}
+}
+
+func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	s := New(context.Background(), nil)
+	status, err := s.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Shutdown)
+	var starts int
+	s.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) {
+		starts++
+		return newLifecyclePlayer(), nil
+	}
+	if err := s.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Host", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "removed.mkv")
+	if err := os.WriteFile(path, []byte("removed file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPlaylist([]PlaylistInput{{Label: "Removed", Source: path}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SelectPlaylist(0); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		s.mu.RLock()
+		selected, open := s.selectedItem, s.player != nil
+		s.mu.RUnlock()
+		if selected != "" && open {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("selected file did not open")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := s.SetPaused(false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPlaylist(nil); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		s.mu.RLock()
+		open := s.player != nil
+		s.mu.RUnlock()
+		if !open {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("removed selected file kept its player open")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	client, _ := s.connected()
+	if source := s.sourceForPlayback(client); source != "" {
+		t.Fatalf("removed selection resolved stale source %q", source)
+	}
+	snapshot, err := s.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Playback.Paused {
+		t.Fatal("room continued playing after selected file was removed")
+	}
+	if err := s.SetPaused(false); err == nil {
+		t.Fatal("Play reopened a removed file")
+	}
+	if starts != 1 {
+		t.Fatalf("started %d players after removal, want 1", starts)
+	}
+	if err := s.SetPlaylist([]PlaylistInput{{Label: "Returned", Source: path}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SelectPlaylist(0); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	var selectedPlayer player.Player
+	for selectedPlayer == nil {
+		s.mu.RLock()
+		if s.selectedItem != "" {
+			selectedPlayer = s.player
+		}
+		s.mu.RUnlock()
+		if time.Now().After(deadline) {
+			t.Fatal("returned selection did not open")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	s.releasePlayer(selectedPlayer, "")
+	if err := s.SetPaused(false); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.RLock()
+	reopenedItem := s.selectedItem
+	s.mu.RUnlock()
+	if reopenedItem == "" {
+		t.Fatal("explicit Play did not retain queue ownership")
+	}
+	if err := s.SetPlaylist(nil); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.RLock()
+	reopenedPlayer := s.player
+	s.mu.RUnlock()
+	if reopenedPlayer != nil {
+		t.Fatal("removal kept a queue item reopened by Play")
+	}
+}
+
+func TestExplicitPlayRequestsAvailableStreamForDismissedViewer(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	network := streamtransport.NewFakeNetwork()
+	host, viewer := New(context.Background(), nil), New(context.Background(), nil)
+	host.streamFactory, viewer.streamFactory = network, network
+	status, err := host.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie", StreamingDERPMapURL: "https://derp.example.test/map.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	t.Cleanup(viewer.Shutdown)
+	host.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	viewer.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	for index, s := range []*Service{host, viewer} {
+		name := "Host"
+		if index == 1 {
+			name = "Viewer"
+		}
+		if err := s.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: name, Player: "mpv"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "shared.mkv")
+	if err := os.WriteFile(path, []byte(strings.Repeat("shared-media-", 1000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Shared", Source: path}}); err != nil {
+		t.Fatal(err)
+	}
+	viewer.mu.Lock()
+	viewer.playerDismissed = true
+	viewer.mu.Unlock()
+	if err := host.SelectPlaylist(0); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := host.Snapshot()
+	if err := host.OfferPlaylistStream(snapshot.Playlist.Items[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		snapshot, _ = viewer.Snapshot()
+		if snapshot.Playlist.Selected == 0 && len(snapshot.StreamOffers) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("viewer did not receive the selected stream offer")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	viewer.mu.RLock()
+	activeBeforePlay := viewer.streamGateway != nil || viewer.player != nil
+	viewer.mu.RUnlock()
+	if activeBeforePlay {
+		t.Fatal("dismissed viewer started streaming before explicit Play")
+	}
+	if err := viewer.SetPaused(false); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		viewer.mu.RLock()
+		active := viewer.streamGateway != nil && viewer.player != nil
+		viewer.mu.RUnlock()
+		if active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("explicit Play did not activate the stream")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -674,18 +883,50 @@ func TestRemovedPlaylistOfferIsWithdrawnAfterPlayerWasClosed(t *testing.T) {
 	if err := host.SetPlaylist(nil); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		host.mu.RLock()
-		stopped := host.streamPublisher == nil && host.streamOfferID == "" && host.streamOfferItemID == ""
-		host.mu.RUnlock()
-		if stopped {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("removed playlist item remained offered after the player was closed")
-		}
-		time.Sleep(10 * time.Millisecond)
+	host.mu.RLock()
+	stopped := host.streamPublisher == nil && host.streamOfferID == "" && host.streamOfferItemID == ""
+	host.mu.RUnlock()
+	if !stopped {
+		t.Fatal("SetPlaylist returned before withdrawing the removed offer")
+	}
+	other := filepath.Join(t.TempDir(), "other.mkv")
+	if err := os.WriteFile(other, []byte("another file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Other", Source: other}}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ = host.Snapshot()
+	if err := host.OfferPlaylistStream(snapshot.Playlist.Items[0].ID); err != nil {
+		t.Fatalf("replacement offer failed after playlist cleanup: %v", err)
+	}
+	host.mu.RLock()
+	offerID := host.streamOfferID
+	host.mu.RUnlock()
+	client, _ := host.connected()
+	if err := client.WithdrawStreamOffer(offerID); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.StopOfferingStream(); err != nil {
+		t.Fatalf("already withdrawn offer retained the local publisher: %v", err)
+	}
+	if err := host.OfferPlaylistStream(snapshot.Playlist.Items[0].ID); err != nil {
+		t.Fatalf("already withdrawn offer blocked a new offer: %v", err)
+	}
+}
+
+func TestOfferPresenceRequiresMatchingMedia(t *testing.T) {
+	s := New(context.Background(), nil)
+	s.streamOfferID = "offer"
+	s.streamOfferItemID = "reused"
+	s.streamOfferMedia = &protocol.Media{Fingerprint: "file-v1:old"}
+	items := []protocol.PlaylistItem{{ID: "reused", Label: "New", Media: &protocol.Media{Fingerprint: "file-v1:new"}}}
+	if !s.offeredItemMissing(items) {
+		t.Fatal("reused item ID retained an offer for different media")
+	}
+	items[0].Media.Fingerprint = "file-v1:old"
+	if s.offeredItemMissing(items) {
+		t.Fatal("matching item and media incorrectly withdrew the offer")
 	}
 }
 

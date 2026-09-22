@@ -44,14 +44,9 @@ func (s *Service) OfferPlaylistStream(itemID string) error {
 		if path == "" {
 			return errors.New("locate your copy before sharing it")
 		}
-		if err := s.offerStream(path, 0); err != nil {
+		if err := s.offerStreamForItem(path, 0, item.ID); err != nil {
 			return err
 		}
-		s.mu.Lock()
-		if s.streamOfferMedia != nil && s.streamOfferMedia.Fingerprint == item.Media.Fingerprint {
-			s.streamOfferItemID = item.ID
-		}
-		s.mu.Unlock()
 		return nil
 	}
 	return errors.New("playlist item is no longer available")

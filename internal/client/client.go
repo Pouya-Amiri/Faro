@@ -25,6 +25,15 @@ type commandReply struct {
 	err      error
 }
 
+// CommandError preserves a server rejection code for callers that need to
+// distinguish an already-completed operation from an actionable failure.
+type CommandError struct {
+	Code    string
+	Message string
+}
+
+func (e *CommandError) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message) }
+
 type Event struct {
 	Type          protocol.MessageType
 	Error         *protocol.Error
@@ -415,7 +424,7 @@ func (c *Client) commandEnvelope(messageType protocol.MessageType, payload any) 
 			if err != nil {
 				return protocol.Envelope{}, err
 			}
-			return protocol.Envelope{}, fmt.Errorf("%s: %s", failure.Code, failure.Message)
+			return protocol.Envelope{}, &CommandError{Code: failure.Code, Message: failure.Message}
 		}
 		return reply.envelope, nil
 	case <-timer.C:

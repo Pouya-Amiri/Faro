@@ -36,6 +36,12 @@ func (s *Service) StreamingAvailable() bool {
 // Product entry points must resolve the path through OfferPlaylistStream so an
 // arbitrary file can never be offered outside the queue.
 func (s *Service) offerStream(path string, maxViewers int) error {
+	return s.offerStreamForItem(path, maxViewers, "")
+}
+
+func (s *Service) offerStreamForItem(path string, maxViewers int, itemID string) error {
+	s.streamOfferMu.Lock()
+	defer s.streamOfferMu.Unlock()
 	client, err := s.connected()
 	if err != nil {
 		return err
@@ -52,7 +58,7 @@ func (s *Service) offerStream(path string, maxViewers int) error {
 		return errors.New("only a selected regular local file can be offered")
 	}
 	s.mu.RLock()
-	existing := s.streamPublisher
+	existing, staleOfferID := s.streamPublisher, s.streamOfferID
 	ctx := s.sessionCtx
 	current := s.client == client && ctx != nil
 	snapshot := client.Snapshot()
@@ -62,6 +68,11 @@ func (s *Service) offerStream(path string, maxViewers int) error {
 	}
 	if existing != nil {
 		return errors.New("stop the current stream offer before offering another file")
+	}
+	if staleOfferID != "" {
+		if err := s.stopOfferingStream(client); err != nil {
+			return fmt.Errorf("finish withdrawing the previous stream offer: %w", err)
+		}
 	}
 	for _, participant := range snapshot.Participants {
 		if participant.ID == snapshot.SelfID && participant.Media != nil && participant.Media.Fingerprint == identity.Media.Fingerprint {
@@ -101,31 +112,82 @@ func (s *Service) offerStream(path string, maxViewers int) error {
 		publisher.Close()
 		return err
 	}
+	s.mu.Lock()
+	if s.streamPublisher == publisher {
+		s.streamOfferItemID = itemID
+	}
+	s.mu.Unlock()
 	return nil
 }
 
 func (s *Service) StopOfferingStream() error {
+	s.streamOfferMu.Lock()
+	defer s.streamOfferMu.Unlock()
 	client, err := s.connected()
 	if err != nil {
 		return err
 	}
+	return s.stopOfferingStream(client)
+}
+
+// stopOfferingStream releases the publisher even when the server reply is
+// uncertain. Its offer ID is retained so the next attempt can finish cleanup.
+// The caller holds streamOfferMu.
+func (s *Service) stopOfferingStream(client *faroclient.Client) error {
 	s.mu.RLock()
 	publisher, offerID := s.streamPublisher, s.streamOfferID
 	s.mu.RUnlock()
-	if publisher == nil || offerID == "" {
+	if publisher == nil && offerID == "" {
 		return errors.New("no media stream is being offered")
 	}
-	if err := client.WithdrawStreamOffer(offerID); err != nil {
-		return err
+	var withdrawErr error
+	if offerID != "" {
+		withdrawErr = client.WithdrawStreamOffer(offerID)
+		var commandErr *faroclient.CommandError
+		if errors.As(withdrawErr, &commandErr) && commandErr.Code == "stream_offer_not_found" {
+			withdrawErr = nil
+		}
 	}
 	s.mu.Lock()
-	if s.streamPublisher == publisher {
-		s.streamPublisher, s.streamOfferID, s.streamOfferMedia = nil, "", nil
-		s.streamOfferItemID = ""
+	if s.client == client && s.streamPublisher == publisher && s.streamOfferID == offerID {
+		s.streamPublisher = nil
 		clear(s.streamCapabilities)
+		if withdrawErr == nil {
+			s.streamOfferID, s.streamOfferMedia, s.streamOfferItemID = "", nil, ""
+		}
 	}
 	s.mu.Unlock()
-	return publisher.Close()
+	if publisher != nil {
+		closeErr := publisher.Close()
+		if withdrawErr == nil {
+			return closeErr
+		}
+	}
+	return withdrawErr
+}
+
+func (s *Service) offeredItemMissing(items []protocol.PlaylistItem) bool {
+	s.mu.RLock()
+	offerID, itemID, media := s.streamOfferID, s.streamOfferItemID, cloneStreamMedia(s.streamOfferMedia)
+	s.mu.RUnlock()
+	if offerID == "" || itemID == "" || media == nil {
+		return false
+	}
+	for _, item := range items {
+		if item.ID == itemID && item.Media != nil && item.Media.Fingerprint == media.Fingerprint {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Service) withdrawMissingOffer(client *faroclient.Client, items []protocol.PlaylistItem) error {
+	s.streamOfferMu.Lock()
+	defer s.streamOfferMu.Unlock()
+	if !s.offeredItemMissing(items) {
+		return nil
+	}
+	return s.stopOfferingStream(client)
 }
 
 // StreamFromOffer prepares an ephemeral Tailcat identity before requesting the
@@ -202,12 +264,6 @@ func (s *Service) reconcilePlaylistStreams(ctx context.Context, client *faroclie
 		return
 	}
 	snapshot := client.Snapshot()
-	allMedia := make(map[string]bool, len(snapshot.Playlist.Items))
-	for _, item := range snapshot.Playlist.Items {
-		if item.Media != nil && item.Media.Fingerprint != "" {
-			allMedia[item.Media.Fingerprint] = true
-		}
-	}
 	var selectedFingerprint, selectedItemID string
 	if snapshot.Playlist.Selected >= 0 && snapshot.Playlist.Selected < len(snapshot.Playlist.Items) {
 		selected := snapshot.Playlist.Items[snapshot.Playlist.Selected]
@@ -222,7 +278,6 @@ func (s *Service) reconcilePlaylistStreams(ctx context.Context, client *faroclie
 		s.mu.RUnlock()
 		return
 	}
-	offeredItemID := s.streamOfferItemID
 	receiving := cloneStreamMedia(s.streamIdentity)
 	receivingItemID := s.streamReceiveItemID
 	activation := s.streamActivation
@@ -233,27 +288,20 @@ func (s *Service) reconcilePlaylistStreams(ctx context.Context, client *faroclie
 	for _, pending := range s.pendingStreams {
 		// Requests made outside playlist playback are intentionally unbound and
 		// retain the explicit StreamFromOffer/StopStreaming API semantics.
-		if pending.playlistItemID != "" && pending.playlistItemID != selectedItemID {
+		if pending.playlistItemID != "" && (pending.playlistItemID != selectedItemID || pending.media.Fingerprint != selectedFingerprint) {
 			pendingSelectionInvalid = true
 		}
 	}
-	if activation != nil && activation.playlistItemID != "" && activation.playlistItemID != selectedItemID {
+	if activation != nil && activation.playlistItemID != "" && (activation.playlistItemID != selectedItemID || activation.media.Fingerprint != selectedFingerprint) {
 		pendingSelectionInvalid = true
 	}
 	localSource := s.sources[selectedFingerprint]
 	s.mu.RUnlock()
 
-	offeredItemPresent := offeredItemID == ""
-	for _, item := range snapshot.Playlist.Items {
-		if item.ID == offeredItemID {
-			offeredItemPresent = true
-			break
-		}
+	if err := s.withdrawMissingOffer(client, snapshot.Playlist.Items); err != nil {
+		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "stream_offer_withdraw", Message: err.Error()}})
 	}
-	if !offeredItemPresent {
-		_ = s.StopOfferingStream()
-	}
-	if receiving != nil && receivingItemID != "" && (!allMedia[receiving.Fingerprint] || receivingItemID != selectedItemID) {
+	if receiving != nil && receivingItemID != "" && (receivingItemID != selectedItemID || receiving.Fingerprint != selectedFingerprint) {
 		_ = s.StopStreaming()
 		receiving = nil
 		hasPending = false
@@ -450,6 +498,7 @@ func (s *Service) activateStream(ctx context.Context, client *faroclient.Client,
 	previous := s.streamGateway
 	identity := pending.media
 	s.streamGateway, s.streamRequestID, s.streamReceiveItemID, s.streamIdentity = gateway, grant.RequestID, pending.playlistItemID, &identity
+	s.manualSource = ""
 	playlist := client.Snapshot().Playlist
 	if playlist.Selected >= 0 && playlist.Selected < len(playlist.Items) {
 		item := playlist.Items[playlist.Selected]

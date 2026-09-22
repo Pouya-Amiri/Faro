@@ -49,6 +49,8 @@ func (s *Service) Connect(request ConnectionRequest) error {
 	s.playerCancel = nil
 	s.playerContext = nil
 	s.playerDismissed = false
+	s.playerCloseGeneration = 0
+	s.wheelID = ""
 	s.invite = parsed
 	s.ownerToken = welcome.OwnerToken
 	if s.ownerToken == "" {
@@ -59,6 +61,7 @@ func (s *Service) Connect(request ConnectionRequest) error {
 	s.expectedPause, s.expectedSeek, s.expectedRate = nil, nil, nil
 	s.selectedItem, s.selectedItemIdentity = "", ""
 	s.currentSource = ""
+	s.manualSource = ""
 	s.sponsorSegments = nil
 	s.lastSponsorEnd = 0
 	s.openingMedia = false
@@ -130,6 +133,7 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 				s.sink(Event{Kind: "error", Error: event.Error})
 			}
 			if event.Wheel != nil {
+				s.applyWheelPlaybackIntent(*event.Wheel)
 				s.sink(Event{Kind: "wheel", Wheel: event.Wheel, ServerNowUnixMs: client.ServerNow().UnixMilli()})
 			}
 			s.emitSnapshot()
@@ -340,6 +344,25 @@ const (
 
 var errPlayerDismissed = errors.New("player was closed; press Play to open it again")
 
+func (s *Service) applyWheelPlaybackIntent(wheel protocol.PlaylistWheel) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch wheel.Phase {
+	case protocol.PlaylistWheelStarted:
+		s.wheelID = wheel.ID
+		s.wheelCloseGeneration = s.playerCloseGeneration
+	case protocol.PlaylistWheelCompleted:
+		if s.wheelID != wheel.ID || s.wheelCloseGeneration == s.playerCloseGeneration {
+			s.playerDismissed = false
+		}
+		s.wheelID = ""
+	case protocol.PlaylistWheelCancelled:
+		if s.wheelID == wheel.ID {
+			s.wheelID = ""
+		}
+	}
+}
+
 func (s *Service) ensurePlayer(intent playerStartIntent) (*faroclient.Client, player.Player, error) {
 	s.playerLifecycleMu.Lock()
 	defer s.playerLifecycleMu.Unlock()
@@ -405,6 +428,10 @@ func (s *Service) ensurePlayer(intent playerStartIntent) (*faroclient.Client, pl
 }
 
 func (s *Service) releasePlayer(target player.Player, message string) {
+	s.releasePlayerWithDismissal(target, message, true)
+}
+
+func (s *Service) releasePlayerWithDismissal(target player.Player, message string, dismissed bool) {
 	s.playerLifecycleMu.Lock()
 	s.mu.Lock()
 	if s.player != target {
@@ -415,8 +442,15 @@ func (s *Service) releasePlayer(target player.Player, message string) {
 	client, cancel := s.client, s.playerCancel
 	s.player, s.playerCancel, s.sync = nil, nil, nil
 	s.playerContext = nil
-	s.playerDismissed = true
+	s.playerDismissed = dismissed
+	if dismissed {
+		s.playerCloseGeneration++
+	}
 	s.selectedItem, s.selectedItemIdentity = "", ""
+	if !dismissed {
+		s.currentSource, s.currentPlayerSource = "", ""
+		s.manualSource = ""
+	}
 	s.localPlaybackPending = false
 	s.lastPlayer = player.State{}
 	s.lastRemoteRevision = 0

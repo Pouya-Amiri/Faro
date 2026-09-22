@@ -185,6 +185,34 @@ func TestPlaylistReorderKeepsSelectedItemIdentity(t *testing.T) {
 	}
 }
 
+func TestPlaylistRemovalAndSourceReplacementResetPlayback(t *testing.T) {
+	for _, replacement := range [][]protocol.PlaylistItem{
+		nil,
+		{{ID: "one", Label: "Other file", Media: &protocol.Media{Title: "Other file", Fingerprint: "file-v1:new"}}},
+	} {
+		h := newHub(1, 2)
+		joined, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		original := protocol.PlaylistItem{ID: "one", Label: "File", Media: &protocol.Media{Title: "File", Fingerprint: "file-v1:old"}}
+		if err := h.setPlaylist(joined.participant, protocol.PlaylistSet{Items: []protocol.PlaylistItem{original}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.selectPlaylist(joined.participant, 0); err != nil {
+			t.Fatal(err)
+		}
+		joined.room.playback = protocol.Playback{Revision: 7, PositionSeconds: 20, Paused: false, Rate: 1.5}
+		if err := h.setPlaylist(joined.participant, protocol.PlaylistSet{Items: replacement}); err != nil {
+			t.Fatal(err)
+		}
+		playback := joined.room.playback
+		if !playback.Paused || playback.PositionSeconds != 0 || playback.Rate != 1 || playback.Revision != 8 {
+			t.Fatalf("playlist source change retained playback: %#v", playback)
+		}
+	}
+}
+
 func TestPlaylistWheelUsesServerWinnerAndStartsItFromZero(t *testing.T) {
 	h := newHub(1, 2)
 	joined, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})

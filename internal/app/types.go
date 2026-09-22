@@ -99,6 +99,7 @@ type Service struct {
 	sink EventSink
 
 	playerLifecycleMu  sync.Mutex
+	streamOfferMu      sync.Mutex
 	mediaTransitionMu  sync.Mutex
 	mediaLoadMu        sync.Mutex
 	availabilityMu     sync.Mutex
@@ -114,6 +115,9 @@ type Service struct {
 	playerCancel           context.CancelFunc
 	playerContext          context.Context
 	playerDismissed        bool
+	playerCloseGeneration  uint64
+	wheelID                string
+	wheelCloseGeneration   uint64
 	sync                   *syncer.Controller
 	invite                 invite.Invite
 	ownerToken             string
@@ -130,6 +134,7 @@ type Service struct {
 	selectedItemIdentity   string
 	lastRemoteRevision     uint64
 	currentSource          string
+	manualSource           string
 	currentPlayerSource    string
 	youtubeQualities       map[string]int
 	sponsorBlock           bool

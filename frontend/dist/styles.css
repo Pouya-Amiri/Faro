@@ -1,9 +1,11 @@
 /* ==========================================================================
    Theme tokens. One definition per theme:
-     dark  - the original Faro dark palette, reproduced value for value
-     light - warm paper (charcoal ink on unbleached white)
-     sage  - vintage LCD calculator (crisp charcoal ink on pale olive-sage glass with terracotta accents)
-   The stored preference ("system" | "dark" | "light") is resolved to a
+     dark     - the original Faro dark palette, reproduced value for value
+     midnight - deep oceanic maritime night with lighthouse amber beacon accents
+     pine     - botanical evergreen dark glass with jade and warm copper accents
+     light    - warm paper (charcoal ink on unbleached white)
+     sage     - vintage LCD calculator (crisp charcoal ink on pale olive-sage glass with terracotta accents)
+   The stored preference ("system" | "dark" | "midnight" | "pine" | "light" | "sage") is resolved to a
    concrete data-theme by app.js and by the boot script in index.html, before
    first paint, so neither palette is repeated inside a prefers-color-scheme
    query. Every token below is the single source of truth for its role; no
@@ -75,6 +77,134 @@
   --shadow-dock: 0 -8px 28px rgba(0, 0, 0, .12);
 
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%23b3b5bc' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round' d='M2.5 4.5L6 8L9.5 4.5'/%3E%3C/svg%3E");
+}
+
+html[data-theme="midnight"] {
+  color-scheme: dark;
+
+  /* Oceanic midnight surfaces. */
+  --bg: #0C1017;
+  --panel: #121824;
+  --panel-alt: #172030;
+  --panel-raised: #1E293D;
+  --field: rgba(255, 255, 255, .055);
+  --shell: var(--panel);
+  --hover: rgba(255, 255, 255, .075);
+  --pressed: rgba(255, 255, 255, .04);
+  --fill-quiet: rgba(255, 255, 255, .03);
+  --fill-soft: rgba(255, 255, 255, .04);
+  --fill: rgba(255, 255, 255, .07);
+  --fill-strong: rgba(255, 255, 255, .11);
+  --fill-active: rgba(255, 255, 255, .095);
+  --sunken: rgba(0, 0, 0, .24);
+  --edge-hi: rgba(255, 255, 255, .075);
+  --field-shadow: inset 0 .5px rgba(255, 255, 255, .05);
+
+  /* Hairlines: cool maritime slate. */
+  --line-faint: rgba(180, 200, 225, .09);
+  --line: rgba(180, 200, 225, .11);
+  --line-strong: rgba(180, 200, 225, .18);
+  --line-hover: rgba(180, 200, 225, .26);
+  --line-row: color-mix(in srgb, var(--line), transparent 34%);
+
+  /* Ink: oceanic silver-white. */
+  --text: #F0F4F8;
+  --text-dim: #CAD5E2;
+  --text-muted: #8292A6;
+  --text-quiet: #9FB2C8;
+  --text-hint: #8292A6;
+
+  /* Accents: warm lighthouse amber beacon. */
+  --accent: #E5A93C;
+  --accent-hover: #F0B855;
+  --accent-text: #0C1017;
+  --accent-soft: rgba(229, 169, 60, .15);
+  --focus-ring: #E5A93C;
+  --focus: color-mix(in srgb, var(--focus-ring) 38%, transparent);
+  --success: #34D399;
+  --warning: #FBBF24;
+  --danger: #F87171;
+  --danger-bg: rgba(248, 113, 113, .12);
+  --selection: rgba(229, 169, 60, .28);
+  --selection-text: #FFFFFF;
+  --chapter: #38BDF8;       /* ocean cyan chapter markers */
+  --flag-tint: rgba(248, 113, 113, .12);
+  --close-hover-bg: #DC2626;
+
+  /* Elevation: oceanic depth. */
+  --scrim: rgba(4, 7, 12, .6);
+  --shade-1: rgba(4, 7, 12, .24);
+  --shade-2: rgba(4, 7, 12, .38);
+  --shade-3: rgba(4, 7, 12, .52);
+  --shadow-menu: 0 18px 55px rgba(2, 5, 10, .6), 0 0 0 .5px rgba(180, 200, 225, .12);
+  --shadow-modal: 0 28px 90px rgba(2, 5, 10, .7);
+  --shadow-dock: 0 -8px 28px rgba(2, 5, 10, .18);
+
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%238292A6' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round' d='M2.5 4.5L6 8L9.5 4.5'/%3E%3C/svg%3E");
+}
+
+html[data-theme="pine"] {
+  color-scheme: dark;
+
+  /* Nordic spruce charcoal surfaces (deep and clean, avoiding muddy green wash). */
+  --bg: #111513;
+  --panel: #171C19;
+  --panel-alt: #1E2420;
+  --panel-raised: #262E29;
+  --field: rgba(255, 255, 255, .055);
+  --shell: var(--panel);
+  --hover: rgba(255, 255, 255, .075);
+  --pressed: rgba(255, 255, 255, .04);
+  --fill-quiet: rgba(255, 255, 255, .03);
+  --fill-soft: rgba(255, 255, 255, .04);
+  --fill: rgba(255, 255, 255, .07);
+  --fill-strong: rgba(255, 255, 255, .11);
+  --fill-active: rgba(255, 255, 255, .095);
+  --sunken: rgba(0, 0, 0, .24);
+  --edge-hi: rgba(255, 255, 255, .075);
+  --field-shadow: inset 0 .5px rgba(255, 255, 255, .05);
+
+  /* Hairlines: clean, subtle white-mist hairlines. */
+  --line-faint: rgba(255, 255, 255, .075);
+  --line: rgba(255, 255, 255, .10);
+  --line-strong: rgba(255, 255, 255, .17);
+  --line-hover: rgba(255, 255, 255, .25);
+  --line-row: color-mix(in srgb, var(--line), transparent 34%);
+
+  /* Ink: crisp off-white and cool forest mist. */
+  --text: #F3F5F3;
+  --text-dim: #D1D7D2;
+  --text-muted: #8A968E;
+  --text-quiet: #9DA8A0;
+  --text-hint: #8A968E;
+
+  /* Accents: warm terracotta copper cutting through the evergreen backdrop. */
+  --accent: #D66230;
+  --accent-hover: #E4703E;
+  --accent-text: #FFFFFF;
+  --accent-soft: rgba(214, 98, 48, .16);
+  --focus-ring: #D66230;
+  --focus: color-mix(in srgb, var(--focus-ring) 38%, transparent);
+  --success: #4ADE80;
+  --warning: #F59E0B;
+  --danger: #EF4444;
+  --danger-bg: rgba(239, 68, 68, .12);
+  --selection: rgba(214, 98, 48, .26);
+  --selection-text: #FFFFFF;
+  --chapter: #4ADE80;       /* fresh spruce green chapter markers */
+  --flag-tint: rgba(239, 68, 68, .12);
+  --close-hover-bg: #DC2626;
+
+  /* Elevation: forest depth. */
+  --scrim: rgba(4, 7, 5, .6);
+  --shade-1: rgba(4, 7, 5, .24);
+  --shade-2: rgba(4, 7, 5, .38);
+  --shade-3: rgba(4, 7, 5, .52);
+  --shadow-menu: 0 18px 55px rgba(2, 5, 3, .6), 0 0 0 .5px rgba(255, 255, 255, .1);
+  --shadow-modal: 0 28px 90px rgba(2, 5, 3, .7);
+  --shadow-dock: 0 -8px 28px rgba(2, 5, 3, .18);
+
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%238A968E' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round' d='M2.5 4.5L6 8L9.5 4.5'/%3E%3C/svg%3E");
 }
 
 html[data-theme="sage"] {
@@ -212,9 +342,12 @@ html, body {
   background: var(--bg); color: var(--text); font: 13px/1.35 var(--font-sans);
   -webkit-font-smoothing: antialiased; user-select: none;
 }
-/* The paper theme highlights selections so they stay warm on paper; the dark
-   theme keeps the platform selection it has always used. */
-html[data-theme="light"] ::selection, html[data-theme="sage"] ::selection { background: var(--selection); color: var(--selection-text); }
+/* The paper, sage, midnight, and pine themes highlight selections so they stay
+   harmonious with their palettes; the original dark theme keeps the platform selection. */
+html[data-theme="light"] ::selection,
+html[data-theme="sage"] ::selection,
+html[data-theme="midnight"] ::selection,
+html[data-theme="pine"] ::selection { background: var(--selection); color: var(--selection-text); }
 button, input, select { font: inherit; }
 button { color: inherit; }
 svg { display: block; flex: 0 0 auto; }

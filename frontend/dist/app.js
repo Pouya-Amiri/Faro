@@ -113,6 +113,48 @@ const wheelThemes = {
     separator: "rgba(34, 41, 34, 0.3)",
     rim: "rgba(34, 41, 34, 0.18)",
     empty: "#E2E7DC"
+  },
+  midnight: {
+    segments: [
+      "#1D4ED8", // Deep blue
+      "#D97706", // Lighthouse amber
+      "#0E7490", // Ocean cyan
+      "#DC2626", // Signal red
+      "#4338CA", // Deep indigo
+      "#059669", // Emerald buoy
+      "#CA8A04", // Maritime gold
+      "#7C3AED", // Deep violet
+      "#0284C7", // Sky blue
+      "#EA580C", // Port orange
+      "#0F766E", // Deep teal
+      "#BE185D"  // Beacon rose
+    ],
+    // High-contrast silver-white ink with subtle drop shadow on deep maritime segments
+    label: () => ({ color: "#F0F4F8", shadow: "rgba(0, 0, 0, 0.75)" }),
+    separator: "rgba(12, 16, 23, 0.45)",
+    rim: "rgba(180, 200, 225, 0.3)",
+    empty: "#0C1017"
+  },
+  pine: {
+    segments: [
+      "#D66230", // Terracotta copper
+      "#15803D", // Deep pine green
+      "#D97706", // Forest amber
+      "#C2410C", // Clay rust
+      "#0D9488", // Spruce teal
+      "#E11D48", // Lingonberry red
+      "#059669", // Emerald moss
+      "#7C3AED", // Wild heather / plum
+      "#CA8A04", // Golden lichen
+      "#2563EB", // Mountain lake blue
+      "#65A30D", // Birch lime
+      "#BE185D"  // Forest rose
+    ],
+    // High-contrast clean mist ink with drop shadow on botanical segments
+    label: () => ({ color: "#F3F5F3", shadow: "rgba(0, 0, 0, 0.75)" }),
+    separator: "rgba(17, 21, 19, 0.45)",
+    rim: "rgba(255, 255, 255, 0.2)",
+    empty: "#111513"
   }
 };
 function wheelTheme() {
@@ -356,19 +398,20 @@ function savePreferences(values = {}) {
 function applyPreferences() {
   const systemDark = matchMedia("(prefers-color-scheme: dark)").matches;
   const resolved = preferences.theme === "system" ? (systemDark ? "dark" : "light") : preferences.theme;
+  const isDark = resolved === "dark" || resolved === "midnight" || resolved === "pine";
   // data-theme carries the resolved theme, never the preference, so styles.css
   // defines each palette once.
   document.documentElement.dataset.theme = resolved;
-  document.documentElement.style.colorScheme = resolved === "dark" ? "dark" : "light";
+  document.documentElement.style.colorScheme = isDark ? "dark" : "light";
   document.body.classList.toggle("compact", Boolean(preferences.compact));
   document.body.classList.toggle("reduce-motion", Boolean(preferences.reduceMotion));
   const themeButton = $("welcome-theme");
   if (themeButton) {
     const iconSpan = themeButton.querySelector(".theme-btn-icon");
     if (iconSpan) {
-      iconSpan.innerHTML = resolved === "dark" ? sunIcon : moonIcon;
+      iconSpan.innerHTML = isDark ? sunIcon : moonIcon;
     } else {
-      themeButton.innerHTML = resolved === "dark" ? sunIcon : moonIcon;
+      themeButton.innerHTML = isDark ? sunIcon : moonIcon;
     }
   }
   if ($("theme-select")) {
@@ -1784,7 +1827,7 @@ document.querySelectorAll("[data-update-notice]").forEach((notice) => {
 
 function cycleTheme() {
   // data-theme is already resolved, so the toggle never needs the system query.
-  const order = ["dark", "light", "sage"];
+  const order = ["dark", "midnight", "pine", "light", "sage"];
   const next = order[(order.indexOf(document.documentElement.dataset.theme) + 1) % order.length];
   savePreferences({ theme: next });
 }

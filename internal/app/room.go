@@ -52,6 +52,32 @@ func (s *Service) SetPaused(paused bool) error {
 			return err
 		}
 		source := s.sourceForPlayback(client)
+		if !paused && source == "" {
+			snapshot := client.Snapshot()
+			if snapshot.Playlist.Selected < 0 || snapshot.Playlist.Selected >= len(snapshot.Playlist.Items) {
+				s.mu.RLock()
+				source = s.manualSource
+				s.mu.RUnlock()
+			} else {
+				item := snapshot.Playlist.Items[snapshot.Playlist.Selected]
+				if item.Media == nil {
+					return errors.New("locate a playable copy of the selected item")
+				}
+				s.mu.Lock()
+				s.playerDismissed = false
+				s.mu.Unlock()
+				s.reconcilePlaylistStreams(s.root, client)
+				s.mu.RLock()
+				requesting := len(s.pendingStreams) != 0 || s.streamActivation != nil || s.streamActivationCancel != nil
+				s.mu.RUnlock()
+				if !requesting {
+					return errors.New("locate a local copy or ask someone to offer the selected item")
+				}
+			}
+		}
+		if !paused && source == "" && client.Snapshot().Playlist.Selected < 0 {
+			return errors.New("select an item before playing")
+		}
 		if !paused && source != "" {
 			if err := s.reopenMediaAtRoomClock(source, paused); err != nil {
 				return err
@@ -94,9 +120,8 @@ func (s *Service) SetPaused(paused bool) error {
 	return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: state.PositionSeconds, Paused: paused, Rate: normalizedRate(state.Rate)})
 }
 
-// sourceForPlayback prefers the room's selected queue item over the last
-// source opened by a now-closed player. The latter may have been removed from
-// the queue while the player was dismissed.
+// sourceForPlayback resolves only the room's current queue selection. Explicit
+// media opened outside the queue is tracked separately by manualSource.
 func (s *Service) sourceForPlayback(client *faroclient.Client) string {
 	playlist := client.Snapshot().Playlist
 	s.mu.RLock()
@@ -116,7 +141,7 @@ func (s *Service) sourceForPlayback(client *faroclient.Client) string {
 		}
 		return ""
 	}
-	return s.currentSource
+	return ""
 }
 
 func (s *Service) Seek(seconds float64) error {

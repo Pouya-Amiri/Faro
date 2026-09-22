@@ -334,8 +334,11 @@ func (h *hub) setPlaylist(p *participant, request protocol.PlaylistSet) error {
 	}
 	cancelled := cancelWheelLocked(r, "The queue changed before the spin finished")
 	selectedID := ""
+	var previousItem *protocol.PlaylistItem
 	if r.playlist.Selected >= 0 && r.playlist.Selected < len(r.playlist.Items) {
-		selectedID = r.playlist.Items[r.playlist.Selected].ID
+		item := r.playlist.Items[r.playlist.Selected]
+		selectedID = item.ID
+		previousItem = &item
 	}
 	r.playlist.Revision++
 	r.playlist.Items = items
@@ -348,6 +351,18 @@ func (h *hub) setPlaylist(p *participant, request protocol.PlaylistSet) error {
 			}
 		}
 	}
+	selectionChanged := previousItem != nil && (r.playlist.Selected < 0 || !samePlaylistSource(*previousItem, items[r.playlist.Selected]))
+	var playback protocol.Playback
+	if selectionChanged {
+		r.playback.Revision++
+		r.playback.PositionSeconds = 0
+		r.playback.Paused = true
+		r.playback.Rate = 1
+		r.playback.UpdatedAtUnixMs = time.Now().UnixMilli()
+		r.playback.SetBy = p.state.ID
+		r.playback.Seek = true
+		playback = r.playback
+	}
 	recipients, playlist := sessionsOf(r), clonePlaylist(r.playlist)
 	participantID, participantName := p.state.ID, p.state.Name
 	h.mu.Unlock()
@@ -355,8 +370,18 @@ func (h *hub) setPlaylist(p *participant, request protocol.PlaylistSet) error {
 		broadcast(recipients, protocol.TypePlaylistWheelUpdated, *cancelled)
 	}
 	broadcast(recipients, protocol.TypePlaylistUpdated, playlist)
+	if selectionChanged {
+		broadcast(recipients, protocol.TypePlaybackUpdated, playback)
+	}
 	broadcast(recipients, protocol.TypeActivityMessage, activityMessage(participantID, participantName, protocol.ActivityPlaylistUpdated, 0, 0, "", len(playlist.Items)))
 	return nil
+}
+
+func samePlaylistSource(a, b protocol.PlaylistItem) bool {
+	if a.URL != "" || b.URL != "" {
+		return a.URL == b.URL
+	}
+	return a.Media != nil && b.Media != nil && a.Media.Fingerprint == b.Media.Fingerprint
 }
 
 func (h *hub) selectPlaylist(p *participant, index int) error {
