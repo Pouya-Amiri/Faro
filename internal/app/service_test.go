@@ -405,6 +405,117 @@ func TestSelectedPlaylistItemReloadsWhenIdentityChanges(t *testing.T) {
 	waitForSource(second)
 }
 
+func TestPlayAfterRemovingClosedPlayerSourceOpensSelectedItem(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	service := New(context.Background(), nil)
+	status, err := service.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Shutdown)
+	var playersMu sync.Mutex
+	var players []*lifecyclePlayer
+	service.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) {
+		mediaPlayer := newLifecyclePlayer()
+		playersMu.Lock()
+		players = append(players, mediaPlayer)
+		playersMu.Unlock()
+		return mediaPlayer, nil
+	}
+	if err := service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Host", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	removed := filepath.Join(directory, "removed.mkv")
+	winner := filepath.Join(directory, "winner.mkv")
+	for path, contents := range map[string]string{removed: "removed media", winner: "winning media"} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.SetPlaylist([]PlaylistInput{{Label: "Removed", Source: removed}, {Label: "Winner", Source: winner}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SelectPlaylist(0); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var first *lifecyclePlayer
+	for first == nil {
+		playersMu.Lock()
+		if len(players) > 0 {
+			first = players[0]
+		}
+		playersMu.Unlock()
+		if first != nil {
+			state, _ := first.State(context.Background())
+			if state.Source == removed {
+				break
+			}
+			first = nil
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first playlist item did not open")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	service.releasePlayer(first, "")
+	if err := service.SetPlaylist([]PlaylistInput{{Label: "Winner", Source: winner}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SelectPlaylist(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetPaused(false); err != nil {
+		t.Fatal(err)
+	}
+	playersMu.Lock()
+	if len(players) != 2 {
+		playersMu.Unlock()
+		t.Fatalf("started %d players, want 2", len(players))
+	}
+	second := players[1]
+	playersMu.Unlock()
+	state, err := second.State(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Source != winner {
+		t.Fatalf("reopened stale source %q, want selected item %q", state.Source, winner)
+	}
+}
+
+func TestLocalWheelSpinAllowsDismissedPlayerToReopenForWinner(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	service := New(context.Background(), nil)
+	status, err := service.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Shutdown)
+	if err := service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Host", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetPlaylist([]PlaylistInput{
+		{Label: "One", Source: "https://example.com/one.mp4"},
+		{Label: "Two", Source: "https://example.com/two.mp4"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service.mu.Lock()
+	service.playerDismissed = true
+	service.mu.Unlock()
+	if err := service.SpinPlaylistWheel(); err != nil {
+		t.Fatal(err)
+	}
+	service.mu.RLock()
+	dismissed := service.playerDismissed
+	service.mu.RUnlock()
+	if dismissed {
+		t.Fatal("local wheel spin left automatic winner playback dismissed")
+	}
+}
+
 func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 	t.Setenv("FARO_TLS_DIR", t.TempDir())
 	network := streamtransport.NewFakeNetwork()

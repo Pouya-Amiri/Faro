@@ -153,7 +153,16 @@ func (s *Service) SpinPlaylistWheel() error {
 	if err != nil {
 		return err
 	}
-	return client.SpinPlaylistWheel()
+	if err := client.SpinPlaylistWheel(); err != nil {
+		return err
+	}
+	// A local wheel spin is an explicit request to play its winner. Allow the
+	// resulting server-authored selection to reopen a player that the user had
+	// previously closed. Closing it again during the spin restores dismissal.
+	s.mu.Lock()
+	s.playerDismissed = false
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Service) OpenMedia(source string) error {

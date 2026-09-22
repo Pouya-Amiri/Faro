@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	faroclient "github.com/Pouya-Amiri/Faro/internal/client"
 	"github.com/Pouya-Amiri/Faro/internal/invite"
 	"github.com/Pouya-Amiri/Faro/internal/protocol"
 )
@@ -50,9 +51,7 @@ func (s *Service) SetPaused(paused bool) error {
 		if err != nil {
 			return err
 		}
-		s.mu.RLock()
-		source := s.currentSource
-		s.mu.RUnlock()
+		source := s.sourceForPlayback(client)
 		if !paused && source != "" {
 			if err := s.reopenMediaAtRoomClock(source, paused); err != nil {
 				return err
@@ -93,6 +92,31 @@ func (s *Service) SetPaused(paused bool) error {
 		return err
 	}
 	return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: state.PositionSeconds, Paused: paused, Rate: normalizedRate(state.Rate)})
+}
+
+// sourceForPlayback prefers the room's selected queue item over the last
+// source opened by a now-closed player. The latter may have been removed from
+// the queue while the player was dismissed.
+func (s *Service) sourceForPlayback(client *faroclient.Client) string {
+	playlist := client.Snapshot().Playlist
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if playlist.Selected >= 0 && playlist.Selected < len(playlist.Items) {
+		item := playlist.Items[playlist.Selected]
+		if item.URL != "" {
+			return item.URL
+		}
+		if item.Media != nil {
+			if source := s.sources[item.Media.Fingerprint]; source != "" {
+				return source
+			}
+			if s.streamGateway != nil && s.streamIdentity != nil && s.streamIdentity.Fingerprint == item.Media.Fingerprint {
+				return s.streamGateway.URL()
+			}
+		}
+		return ""
+	}
+	return s.currentSource
 }
 
 func (s *Service) Seek(seconds float64) error {
