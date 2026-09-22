@@ -127,6 +127,7 @@ type Service struct {
 	openingMedia           bool
 	transitionPaused       *bool
 	selectedItem           string
+	selectedItemIdentity   string
 	lastRemoteRevision     uint64
 	currentSource          string
 	currentPlayerSource    string

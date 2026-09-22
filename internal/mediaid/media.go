@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/Pouya-Amiri/Faro/internal/protocol"
@@ -41,7 +42,7 @@ func Inspect(source, title string, durationSeconds float64) (Result, error) {
 
 	path := source
 	if parsed, err := url.Parse(source); err == nil && parsed.Scheme == "file" {
-		path, err = url.PathUnescape(parsed.Path)
+		path, err = localPathFromFileURL(parsed, runtime.GOOS)
 		if err != nil {
 			return Result{}, fmt.Errorf("decode file URL: %w", err)
 		}
@@ -67,6 +68,36 @@ func Inspect(source, title string, durationSeconds float64) (Result, error) {
 	return Result{Media: protocol.Media{
 		Title: title, DurationSeconds: durationSeconds, SizeBytes: info.Size(), Fingerprint: fingerprint,
 	}, Path: absolute}, nil
+}
+
+func localPathFromFileURL(parsed *url.URL, operatingSystem string) (string, error) {
+	escapedPath := parsed.EscapedPath()
+	if escapedPath == "" && parsed.Opaque != "" {
+		escapedPath = parsed.Opaque
+	}
+	path, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		return "", err
+	}
+	host := parsed.Host
+	if operatingSystem == "windows" {
+		path = strings.ReplaceAll(path, "/", `\`)
+		if host != "" && !strings.EqualFold(host, "localhost") {
+			return `\\` + host + `\` + strings.TrimLeft(path, `\`), nil
+		}
+		if len(path) >= 3 && path[0] == '\\' && isASCIILetter(path[1]) && path[2] == ':' {
+			path = path[1:]
+		}
+		return path, nil
+	}
+	if host != "" && !strings.EqualFold(host, "localhost") {
+		return "//" + host + "/" + strings.TrimLeft(path, "/"), nil
+	}
+	return filepath.FromSlash(path), nil
+}
+
+func isASCIILetter(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
 }
 
 func canonicalRemoteURL(source string) (string, bool) {

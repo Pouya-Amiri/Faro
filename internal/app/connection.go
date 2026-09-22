@@ -57,7 +57,7 @@ func (s *Service) Connect(request ConnectionRequest) error {
 	s.lastPlayer = player.State{}
 	s.lastRemoteRevision = 0
 	s.expectedPause, s.expectedSeek, s.expectedRate = nil, nil, nil
-	s.selectedItem = ""
+	s.selectedItem, s.selectedItemIdentity = "", ""
 	s.currentSource = ""
 	s.sponsorSegments = nil
 	s.lastSponsorEnd = 0
@@ -266,7 +266,7 @@ func (s *Service) reconnect(ctx context.Context, failed *faroclient.Client) {
 		}
 		s.client = client
 		mediaPlayer := s.player
-		if mediaPlayer != nil && !streamInterrupted {
+		if mediaPlayer != nil {
 			s.sync = syncer.New(&trackedPlayer{Player: mediaPlayer, service: s}, client, client.ServerNow)
 		} else {
 			s.sync = nil
@@ -275,7 +275,7 @@ func (s *Service) reconnect(ctx context.Context, failed *faroclient.Client) {
 			s.ownerToken = welcome.OwnerToken
 		}
 		s.mu.Unlock()
-		if mediaPlayer != nil {
+		if mediaPlayer != nil && !streamInterrupted {
 			stateCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			state, stateErr := mediaPlayer.State(stateCtx)
 			cancel()
@@ -298,6 +298,7 @@ func (s *Service) reconnect(ctx context.Context, failed *faroclient.Client) {
 		s.emitSnapshot()
 		go s.consumeClient(ctx, client)
 		go s.applySelectedPlaylist(ctx, client)
+		go s.reconcilePlaylistStreams(ctx, client)
 		return
 	}
 }
@@ -365,7 +366,7 @@ func (s *Service) ensurePlayer(intent playerStartIntent) (*faroclient.Client, pl
 		s.player, s.playerCancel, s.sync = nil, nil, nil
 		s.playerContext = nil
 		s.playerDismissed = intent == playerStartAutomatic
-		s.selectedItem = ""
+		s.selectedItem, s.selectedItemIdentity = "", ""
 		s.mu.Unlock()
 		if oldCancel != nil {
 			oldCancel()
@@ -415,7 +416,7 @@ func (s *Service) releasePlayer(target player.Player, message string) {
 	s.player, s.playerCancel, s.sync = nil, nil, nil
 	s.playerContext = nil
 	s.playerDismissed = true
-	s.selectedItem = ""
+	s.selectedItem, s.selectedItemIdentity = "", ""
 	s.localPlaybackPending = false
 	s.lastPlayer = player.State{}
 	s.lastRemoteRevision = 0
@@ -486,6 +487,10 @@ func (s *Service) Disconnect() {
 }
 
 func (s *Service) Shutdown() {
+	s.LeaveRoom()
+}
+
+func (s *Service) LeaveRoom() {
 	s.Disconnect()
 	s.StopServer()
 }

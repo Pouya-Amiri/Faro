@@ -35,8 +35,9 @@ func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.
 		return
 	}
 	item := playlist.Items[playlist.Selected]
+	identity := playlistItemIdentity(item)
 	s.mu.Lock()
-	if item.ID == s.selectedItem {
+	if item.ID == s.selectedItem && identity == s.selectedItemIdentity {
 		s.mu.Unlock()
 		return
 	}
@@ -69,7 +70,7 @@ func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.
 	}
 	state := s.waitForPlayerMedia(openCtx, mediaPlayer, info.Duration)
 	latest := client.Snapshot().Playlist
-	if ctx.Err() != nil || latest.Selected < 0 || latest.Selected >= len(latest.Items) || latest.Items[latest.Selected].ID != item.ID {
+	if ctx.Err() != nil || latest.Selected < 0 || latest.Selected >= len(latest.Items) || latest.Items[latest.Selected].ID != item.ID || playlistItemIdentity(latest.Items[latest.Selected]) != identity {
 		cancel()
 		s.endMediaTransition()
 		return
@@ -95,6 +96,7 @@ func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.
 	}
 	s.mu.Lock()
 	s.selectedItem = item.ID
+	s.selectedItemIdentity = identity
 	s.mu.Unlock()
 	// Playback may have changed while loading (notably when Pause is pressed
 	// just after a wheel spin). Re-read the authoritative state at the last
@@ -296,7 +298,7 @@ func (s *Service) LocatePlaylistItem(itemID, source string) error {
 	}
 	if snapshot.Playlist.Selected >= 0 && snapshot.Playlist.Selected < len(snapshot.Playlist.Items) && snapshot.Playlist.Items[snapshot.Playlist.Selected].ID == itemID {
 		s.mu.Lock()
-		s.selectedItem = ""
+		s.selectedItem, s.selectedItemIdentity = "", ""
 		s.mu.Unlock()
 		s.applySelectedPlaylist(s.root, client)
 	}
@@ -706,11 +708,18 @@ func (s *Service) IndexMediaDirectory(directory string) (int, error) {
 	// than requiring an already-open player.
 	if client, connectionErr := s.connected(); connectionErr == nil {
 		s.mu.Lock()
-		s.selectedItem = ""
+		s.selectedItem, s.selectedItemIdentity = "", ""
 		s.mu.Unlock()
 		s.applySelectedPlaylist(s.root, client)
 	}
 	return count, nil
+}
+
+func playlistItemIdentity(item protocol.PlaylistItem) string {
+	if item.Media != nil && item.Media.Fingerprint != "" {
+		return "media:" + item.Media.Fingerprint
+	}
+	return "url:" + item.URL
 }
 
 func isMediaExtension(extension string) bool {

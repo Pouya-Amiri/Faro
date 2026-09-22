@@ -54,8 +54,12 @@ func (s *Service) offerStream(path string, maxViewers int) error {
 	s.mu.RLock()
 	existing := s.streamPublisher
 	ctx := s.sessionCtx
+	current := s.client == client && ctx != nil
 	snapshot := client.Snapshot()
 	s.mu.RUnlock()
+	if !current {
+		return errors.New("connection changed while preparing stream offer")
+	}
 	if existing != nil {
 		return errors.New("stop the current stream offer before offering another file")
 	}
@@ -299,7 +303,7 @@ func (s *Service) StopStreaming() error {
 		s.currentSource, s.currentPlayerSource = "", ""
 	}
 	if receiveItemID != "" && s.selectedItem == receiveItemID {
-		s.selectedItem = ""
+		s.selectedItem, s.selectedItemIdentity = "", ""
 	}
 	s.mu.Unlock()
 	if activationCancel != nil {
@@ -451,6 +455,7 @@ func (s *Service) activateStream(ctx context.Context, client *faroclient.Client,
 		item := playlist.Items[playlist.Selected]
 		if item.Media != nil && item.Media.Fingerprint == identity.Fingerprint {
 			s.selectedItem = item.ID
+			s.selectedItemIdentity = playlistItemIdentity(item)
 		}
 	}
 	s.mu.Unlock()
@@ -503,7 +508,7 @@ func (s *Service) handleStreamRevoked(client *faroclient.Client, revoked protoco
 			s.currentSource, s.currentPlayerSource = "", ""
 		}
 		if receiveItemID != "" && s.selectedItem == receiveItemID {
-			s.selectedItem = ""
+			s.selectedItem, s.selectedItemIdentity = "", ""
 		}
 	}
 	s.mu.Unlock()
@@ -561,7 +566,8 @@ func (s *Service) detachStreamingLocked() streamingResources {
 	s.pendingStreams = make(map[string]*pendingStream)
 	s.pendingRequestOffers = make(map[string]string)
 	if resources.gateway != nil {
-		s.currentSource = ""
+		s.currentSource, s.currentPlayerSource = "", ""
+		s.selectedItem, s.selectedItemIdentity = "", ""
 	}
 	return resources
 }

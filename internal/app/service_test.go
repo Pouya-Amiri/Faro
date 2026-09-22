@@ -187,6 +187,224 @@ func TestAppStreamsOfferedFileThroughFakeTransport(t *testing.T) {
 	}
 }
 
+func TestStreamInterruptedReconnectRestoresSyncWithoutPublishingDeadGateway(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	network := streamtransport.NewFakeNetwork()
+	host, viewer := New(context.Background(), nil), New(context.Background(), nil)
+	host.streamFactory, viewer.streamFactory = network, network
+	status, err := host.StartServer(ServerRequest{Mode: "advanced",
+		ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie",
+		StreamingDERPMapURL: "https://derp.example.test/map.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	t.Cleanup(viewer.Shutdown)
+	host.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	viewerPlayer := newLifecyclePlayer()
+	viewer.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return viewerPlayer, nil }
+	if err := host.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Host", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := viewer.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Viewer", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 1000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SelectPlaylist(0); err != nil {
+		t.Fatal(err)
+	}
+	wait := func(message string, check func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(8 * time.Second)
+		for !check() {
+			if time.Now().After(deadline) {
+				t.Fatal(message)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	wait("viewer did not receive playlist", func() bool {
+		snapshot, snapshotErr := viewer.Snapshot()
+		return snapshotErr == nil && snapshot.Playlist.Selected == 0 && len(snapshot.Playlist.Items) == 1
+	})
+	snapshot, _ := host.Snapshot()
+	itemID := snapshot.Playlist.Items[0].ID
+	if err := host.OfferPlaylistStream(itemID); err != nil {
+		t.Fatal(err)
+	}
+	var deadGatewayURL string
+	wait("viewer did not start initial stream", func() bool {
+		viewer.mu.RLock()
+		defer viewer.mu.RUnlock()
+		if viewer.streamGateway == nil {
+			return false
+		}
+		deadGatewayURL = viewer.streamGateway.URL()
+		return viewer.sync != nil
+	})
+	viewer.mu.RLock()
+	failed := viewer.client
+	viewer.mu.RUnlock()
+	if err := failed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wait("viewer did not detach interrupted stream", func() bool {
+		viewer.mu.RLock()
+		defer viewer.mu.RUnlock()
+		return viewer.client == nil && viewer.streamGateway == nil
+	})
+	if err := host.StopOfferingStream(); err != nil {
+		t.Fatal(err)
+	}
+	wait("viewer did not reconnect", func() bool {
+		viewer.mu.RLock()
+		defer viewer.mu.RUnlock()
+		return viewer.client != nil && viewer.client != failed
+	})
+	viewer.mu.RLock()
+	controller := viewer.sync
+	currentSource, currentPlayerSource := viewer.currentSource, viewer.currentPlayerSource
+	selectedItem, selectedIdentity := viewer.selectedItem, viewer.selectedItemIdentity
+	viewer.mu.RUnlock()
+	if controller == nil {
+		t.Fatal("reconnect left the existing player without a sync controller")
+	}
+	if currentSource != "" || currentPlayerSource != "" || selectedItem != "" || selectedIdentity != "" {
+		t.Fatalf("reconnect retained dead stream state: source=%q playerSource=%q item=%q identity=%q", currentSource, currentPlayerSource, selectedItem, selectedIdentity)
+	}
+	viewerSnapshot, err := viewer.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, participant := range viewerSnapshot.Participants {
+		if participant.ID == viewerSnapshot.SelfID && participant.Media != nil {
+			t.Fatalf("reconnect published dead gateway identity: %#v", participant.Media)
+		}
+	}
+	state, err := viewerPlayer.State(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Source != deadGatewayURL {
+		t.Fatalf("test player source = %q, want interrupted gateway %q", state.Source, deadGatewayURL)
+	}
+	if err := host.OfferPlaylistStream(itemID); err != nil {
+		t.Fatal(err)
+	}
+	wait("viewer did not reacquire stream after reconnect", func() bool {
+		viewer.mu.RLock()
+		defer viewer.mu.RUnlock()
+		return viewer.streamGateway != nil
+	})
+	if err := host.Seek(37); err != nil {
+		t.Fatal(err)
+	}
+	wait("remote seek was not applied after stream reacquisition", func() bool {
+		state, stateErr := viewerPlayer.State(context.Background())
+		return stateErr == nil && state.PositionSeconds == 37
+	})
+}
+
+func TestOfferStreamRejectsConnectionWithoutSessionContext(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	service := New(context.Background(), nil)
+	service.streamFactory = streamtransport.NewFakeNetwork()
+	status, err := service.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Shutdown)
+	if err := service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Host"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(path, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service.mu.Lock()
+	service.sessionCtx = nil
+	service.mu.Unlock()
+	if err := service.offerStream(path, 1); err == nil || !strings.Contains(err.Error(), "connection changed") {
+		t.Fatalf("offerStream with detached session context returned %v", err)
+	}
+}
+
+func TestLeaveRoomStopsEmbeddedServer(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	service := New(context.Background(), nil)
+	status, err := service.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Shutdown)
+	if err := service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Host"}); err != nil {
+		t.Fatal(err)
+	}
+	service.LeaveRoom()
+	if service.ServerStatus().Running {
+		t.Fatal("embedded server remained active after leaving its room")
+	}
+	if _, err := service.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "next"}); err != nil {
+		t.Fatalf("hosting again after leaving failed: %v", err)
+	}
+}
+
+func TestSelectedPlaylistItemReloadsWhenIdentityChanges(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	service := New(context.Background(), nil)
+	status, err := service.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Shutdown)
+	mediaPlayer := newLifecyclePlayer()
+	service.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return mediaPlayer, nil }
+	if err := service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Host", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(t.TempDir(), "first.mkv")
+	second := filepath.Join(t.TempDir(), "second.mkv")
+	if err := os.WriteFile(first, []byte("first media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("different media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const stableID = "same-item"
+	if err := service.SetPlaylist([]PlaylistInput{{ID: stableID, Label: "Movie", Source: first}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SelectPlaylist(0); err != nil {
+		t.Fatal(err)
+	}
+	waitForSource := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			state, stateErr := mediaPlayer.State(context.Background())
+			if stateErr == nil && state.Source == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("player source did not become %q; last state=%#v error=%v", want, state, stateErr)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitForSource(first)
+	if err := service.SetPlaylist([]PlaylistInput{{ID: stableID, Label: "Replacement", Source: second}}); err != nil {
+		t.Fatal(err)
+	}
+	waitForSource(second)
+}
+
 func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 	t.Setenv("FARO_TLS_DIR", t.TempDir())
 	network := streamtransport.NewFakeNetwork()

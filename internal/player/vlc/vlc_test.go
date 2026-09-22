@@ -154,6 +154,14 @@ func TestVLCMRLPreservesStreamURLs(t *testing.T) {
 	}
 }
 
+func TestVLCMRLPreservesWindowsFileURLs(t *testing.T) {
+	const source = "file:///C:/Movies/My%20Film.mkv"
+	mrl, err := vlcMRL(source)
+	if err != nil || mrl != source {
+		t.Fatalf("vlcMRL(%q) = %q, %v", source, mrl, err)
+	}
+}
+
 func TestVLCMRLRejectsRCCommandInjection(t *testing.T) {
 	if _, err := vlcMRL("movie.mkv\nquit"); err == nil {
 		t.Fatal("VLC MRL accepted a line break")

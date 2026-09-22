@@ -25,8 +25,6 @@ const (
 	TypePlaybackUpdated       MessageType = "playback.updated"
 	TypeMediaSet              MessageType = "media.set"
 	TypeMediaUpdated          MessageType = "media.updated"
-	TypeReadinessSet          MessageType = "readiness.set"
-	TypeReadinessUpdated      MessageType = "readiness.updated"
 	TypePlaylistSet           MessageType = "playlist.set"
 	TypePlaylistSelect        MessageType = "playlist.select"
 	TypePlaylistUpdated       MessageType = "playlist.updated"
@@ -138,7 +136,6 @@ type Participant struct {
 	ID             string   `json:"id"`
 	Name           string   `json:"name"`
 	Role           Role     `json:"role"`
-	Ready          bool     `json:"ready"`
 	Media          *Media   `json:"media,omitempty"`
 }
 
@@ -331,10 +328,6 @@ type MediaAvailabilitySet struct {
 
 type MediaSet struct {
 	Media *Media `json:"media"`
-}
-
-type ReadinessSet struct {
-	Ready bool `json:"ready"`
 }
 
 type PlaylistSet struct {

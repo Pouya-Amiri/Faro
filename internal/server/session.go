@@ -209,12 +209,6 @@ func (s *session) handle(envelope protocol.Envelope) error {
 			return err
 		}
 		return s.server.hub.setMedia(s.participant, request)
-	case protocol.TypeReadinessSet:
-		request, err := decode[protocol.ReadinessSet](envelope)
-		if err != nil {
-			return err
-		}
-		return s.server.hub.setReadiness(s.participant, request.Ready)
 	case protocol.TypePlaylistSet:
 		request, err := decode[protocol.PlaylistSet](envelope)
 		if err != nil {

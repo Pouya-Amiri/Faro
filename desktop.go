@@ -54,7 +54,7 @@ func (d *Desktop) Connect(request app.ConnectionRequest) error {
 	return d.service.Connect(request)
 }
 
-func (d *Desktop) Disconnect() { d.service.Disconnect() }
+func (d *Desktop) LeaveRoom() { d.service.LeaveRoom() }
 
 func (d *Desktop) Snapshot() (protocol.Snapshot, error) { return d.service.Snapshot() }
 

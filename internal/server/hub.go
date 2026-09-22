@@ -321,20 +321,6 @@ func (h *hub) setMedia(p *participant, request protocol.MediaSet) error {
 	return nil
 }
 
-func (h *hub) setReadiness(p *participant, ready bool) error {
-	h.mu.Lock()
-	r := h.roomForLocked(p)
-	if r == nil {
-		h.mu.Unlock()
-		return invalid("not_joined", "the participant is not in a room")
-	}
-	p.state.Ready = ready
-	recipients, participants := sessionsOf(r), participantsOf(r)
-	h.mu.Unlock()
-	broadcast(recipients, protocol.TypeReadinessUpdated, participants)
-	return nil
-}
-
 func (h *hub) setPlaylist(p *participant, request protocol.PlaylistSet) error {
 	items, err := validatePlaylist(request.Items)
 	if err != nil {

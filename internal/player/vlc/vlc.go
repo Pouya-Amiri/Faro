@@ -61,6 +61,7 @@ func Start(ctx context.Context, cfg Config, initialSource string) (*VLC, error) 
 	connection, err := waitForRC(ctx, address)
 	if err != nil {
 		_ = command.Process.Kill()
+		_ = command.Wait()
 		return nil, err
 	}
 	initialState := player.State{Paused: true, Rate: 1, ObservedAt: time.Now()}

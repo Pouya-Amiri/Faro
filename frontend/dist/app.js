@@ -305,7 +305,15 @@ function playlistInputs() { return (snapshot?.playlist?.items || []).map(({ id, 
 
 function normalizeSnapshot(value) {
   if (!value) return null;
-  value.participants = Array.isArray(value.participants) ? value.participants : [];
+  value.participants = Array.isArray(value.participants)
+    ? value.participants.filter((person) => person && typeof person === "object").map((person) => ({
+      ...person,
+      id: typeof person.id === "string" ? person.id : "",
+      name: typeof person.name === "string" && person.name ? person.name : "Unknown participant",
+      role: typeof person.role === "string" ? person.role : "member",
+      availableMedia: Array.isArray(person.availableMedia) ? person.availableMedia : []
+    }))
+    : [];
   value.playlist ||= { revision: 0, selected: -1, items: [] };
   value.playlist.items = Array.isArray(value.playlist.items) ? value.playlist.items : [];
   value.playback ||= { positionSeconds: 0, paused: true, rate: 1, updatedAtUnixMs: Date.now() };
@@ -1332,10 +1340,11 @@ function askConfirmation(title, message, acceptLabel = "Continue") {
 }
 
 async function leaveRoom() {
-  try {
-    if (preferences.pauseOnLeave && canControl() && snapshot && !snapshot.playback.paused) await invoke("SetPaused", true);
-    await invoke("Disconnect");
-  } catch (error) { showError(error); }
+  if (preferences.pauseOnLeave && canControl() && snapshot && !snapshot.playback.paused) {
+    try { await invoke("SetPaused", true); } catch (error) { showError(error); }
+  }
+  await invoke("LeaveRoom");
+  hosted = { running: false };
   snapshot = null; timeline = []; playlistHistory = [];
   streamingAvailable = false;
   streamState = { state: "idle", offerId: "", route: "" };
@@ -1390,6 +1399,7 @@ $("host-form").onsubmit = async (event) => {
   event.preventDefault(); $("host-error").textContent = "";
   const button = event.submitter || $("host-form").querySelector("[type=submit]");
   await withButtonLoading(button, async () => {
+    let startedServer = false;
     try {
       rememberConnectPreferences("host");
       hosted = await invoke("StartServer", {
@@ -1399,8 +1409,15 @@ $("host-form").onsubmit = async (event) => {
         room: $("host-room").value.trim(),
         protected: $("host-protected").checked
       });
+      startedServer = true;
       await enterRoom(connectionRequest("host", hosted.localInvite));
-    } catch (error) { $("host-error").textContent = error?.message || String(error); try { await invoke("StopServer"); } catch (_) {} }
+    } catch (error) {
+      $("host-error").textContent = error?.message || String(error);
+      if (startedServer) {
+        try { await invoke("StopServer"); } catch (_) {}
+        hosted = { running: false };
+      }
+    }
   }, "Starting");
 };
 
@@ -1476,7 +1493,7 @@ $("copy-invite").onclick = () => hosted.running && hosted.shareInvite ? copyText
 $("settings-copy-invite").onclick = () => $("copy-invite").click();
 $("owner-invite").onclick = () => copyInvite(true);
 $("settings-owner-invite").onclick = () => copyInvite(true);
-$("stop-server").onclick = async () => { closePopovers(); try { await invoke("StopServer"); await leaveRoom(); hosted = { running: false }; } catch (error) { showError(error); } };
+$("stop-server").onclick = () => { closePopovers(); leaveRoom().catch(showError); };
 
 // Playlist wiring
 $("add-file").onclick = () => chooseFiles($("add-file"));

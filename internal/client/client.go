@@ -188,7 +188,7 @@ func (c *Client) apply(envelope protocol.Envelope) {
 			return
 		}
 		c.snapshot.Room = value
-	case protocol.TypeParticipantsUpdated, protocol.TypeMediaUpdated, protocol.TypeReadinessUpdated:
+	case protocol.TypeParticipantsUpdated, protocol.TypeMediaUpdated:
 		value, err := protocol.DecodePayload[[]protocol.Participant](envelope)
 		if err != nil {
 			return
