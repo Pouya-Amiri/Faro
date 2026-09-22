@@ -35,6 +35,7 @@ let streamingAvailable = false;
 let streamState = { state: "idle", offerId: "", route: "" };
 let legalInfoLoaded = false;
 let legalSourceURL = "";
+let updateReleaseURL = "";
 const youtubeInfoCache = new Map();
 // The wheel is drawn on a canvas, so it cannot inherit the CSS tokens; these
 // two palettes mirror them instead. Both keep neighbouring segments in
@@ -147,6 +148,26 @@ let preferences = loadPreferences();
 function invoke(name, ...args) {
   if (!hasBackend) return Promise.reject(new Error("Faro desktop bridge is not ready"));
   return wails.Call.ByName(`main.Desktop.${name}`, ...args);
+}
+
+function presentAvailableUpdate(status) {
+  if (!status?.available || !status.latestVersion || !status.releaseUrl) return;
+  const version = `v${String(status.latestVersion).replace(/^v/i, "")}`;
+  updateReleaseURL = status.releaseUrl;
+  document.querySelectorAll("[data-update-notice]").forEach((notice) => {
+    const versionLabel = notice.querySelector("[data-update-version]");
+    if (versionLabel) versionLabel.textContent = version;
+    notice.setAttribute("aria-label", `Faro ${version} is available. Open the latest release.`);
+    notice.classList.remove("hidden");
+  });
+}
+
+async function checkForUpdates() {
+  try {
+    presentAvailableUpdate(await invoke("CheckForUpdates"));
+  } catch (_) {
+    // Update checks are advisory and must never interrupt the app startup path.
+  }
 }
 
 function showToast(message, type = "success") {
@@ -1755,6 +1776,12 @@ $("legal-source").onclick = async () => {
   if (legalSourceURL) wails?.Browser?.OpenURL(legalSourceURL).catch(showError);
 };
 
+document.querySelectorAll("[data-update-notice]").forEach((notice) => {
+  notice.onclick = () => {
+    if (updateReleaseURL) wails?.Browser?.OpenURL(updateReleaseURL).catch(showError);
+  };
+});
+
 function cycleTheme() {
   // data-theme is already resolved, so the toggle never needs the system query.
   const order = ["dark", "light", "sage"];
@@ -1951,3 +1978,4 @@ if (hasBackend) invoke("Version").then((value) => {
   $("version").textContent = value;
   renderConnectionInfo();
 }).catch(() => {});
+if (hasBackend) void checkForUpdates();

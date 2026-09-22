@@ -11,6 +11,7 @@ import (
 	"github.com/Pouya-Amiri/Faro/internal/buildinfo"
 	"github.com/Pouya-Amiri/Faro/internal/legal"
 	"github.com/Pouya-Amiri/Faro/internal/protocol"
+	"github.com/Pouya-Amiri/Faro/internal/updatecheck"
 	"github.com/Pouya-Amiri/Faro/internal/youtube"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -40,6 +41,10 @@ func (d *Desktop) ServiceShutdown() error {
 }
 
 func (d *Desktop) Version() string { return buildinfo.EffectiveVersion() }
+
+func (d *Desktop) CheckForUpdates() (updatecheck.Status, error) {
+	return updatecheck.Check(context.Background(), buildinfo.EffectiveVersion())
+}
 
 func (d *Desktop) LegalInfo() legal.Information {
 	return legal.Info(buildinfo.EffectiveVersion())

@@ -24,7 +24,7 @@
         document.documentElement.style.colorScheme = resolved === "dark" ? "dark" : "light";
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=26" />
+    <link rel="stylesheet" href="/styles.css?v=27" />
     <link rel="stylesheet" href="/desktop.css?v=16" />
   </head>
   <body>
@@ -73,13 +73,25 @@
               </div>
             </div>
 
-            <div class="sidebar-footer">
-              <button id="welcome-theme" class="btn btn-secondary btn-sidebar-theme" type="button" aria-label="Switch theme" title="Toggle theme">
-                <span class="theme-btn-icon">
-                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M13.5 10.2A6 6 0 0 1 5.8 2.5a6 6 0 1 0 7.7 7.7Z" fill="currentColor"/></svg>
+            <div class="sidebar-bottom">
+              <button class="update-notice update-notice-sidebar hidden" type="button" data-update-notice aria-live="polite">
+                <span class="update-notice-icon" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" width="15" height="15"><path d="M8 2v7m0 0 2.75-2.75M8 9 5.25 6.25M3 11.5v1A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5v-1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </span>
-                <span class="theme-btn-label">Theme</span>
+                <span class="update-notice-copy">
+                  <strong>Update available</strong>
+                  <span>Faro <span data-update-version></span> is ready</span>
+                </span>
+                <svg class="update-notice-arrow" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
+              <div class="sidebar-footer">
+                <button id="welcome-theme" class="btn btn-secondary btn-sidebar-theme" type="button" aria-label="Switch theme" title="Toggle theme">
+                  <span class="theme-btn-icon">
+                    <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M13.5 10.2A6 6 0 0 1 5.8 2.5a6 6 0 1 0 7.7 7.7Z" fill="currentColor"/></svg>
+                  </span>
+                  <span class="theme-btn-label">Theme</span>
+                </button>
+              </div>
             </div>
           </aside>
 
@@ -608,6 +620,16 @@
                   <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 1v2m0 10v2M1 8h2m10 0h2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
                   <span>Session &amp; Server</span>
                 </button>
+                <button class="update-notice update-notice-preferences hidden" type="button" data-update-notice aria-live="polite">
+                  <span class="update-notice-icon" aria-hidden="true">
+                    <svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 2v7m0 0 2.75-2.75M8 9 5.25 6.25M3 11.5v1A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5v-1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </span>
+                  <span class="update-notice-copy">
+                    <strong>Update available</strong>
+                    <span>Faro <span data-update-version></span></span>
+                  </span>
+                  <svg class="update-notice-arrow" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
                 <button type="button" class="pref-nav-btn pref-nav-legal" data-settings="legal">
                   <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.5h6l2 2V13.5H4V2.5Z" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10 2.5v2h2M6 7h4M6 9.5h4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
                   <span>Legal</span>
@@ -797,6 +819,6 @@
       </div>
     </div>
 
-    <script type="module" src="/app.js?v=17"></script>
+    <script type="module" src="/app.js?v=18"></script>
   </body>
 </html>
