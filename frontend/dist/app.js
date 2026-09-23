@@ -137,24 +137,24 @@ const wheelThemes = {
   },
   pine: {
     segments: [
-      "#D66230", // Terracotta copper
-      "#15803D", // Deep pine green
-      "#D97706", // Forest amber
-      "#C2410C", // Clay rust
-      "#0D9488", // Spruce teal
-      "#E11D48", // Lingonberry red
-      "#059669", // Emerald moss
-      "#7C3AED", // Wild heather / plum
-      "#CA8A04", // Golden lichen
-      "#2563EB", // Mountain lake blue
-      "#65A30D", // Birch lime
-      "#BE185D"  // Forest rose
+      "#C6A15B", // Lighthouse brass
+      "#2E8B57", // Deep sea green
+      "#D1AE68", // Polished brass
+      "#C96767", // Signal red
+      "#257A68", // Maritime spruce
+      "#7B61FF", // Atlantic dusk
+      "#65A97D", // Sea glass green
+      "#A98648", // Burnished brass
+      "#2B6CB0", // Deep ocean blue
+      "#A3704C", // Teak wood
+      "#10B981", // Emerald beacon
+      "#9F5874"  // Coastal heather
     ],
-    // High-contrast clean mist ink with drop shadow on botanical segments
-    label: () => ({ color: "#F3F5F3", shadow: "rgba(0, 0, 0, 0.75)" }),
-    separator: "rgba(17, 21, 19, 0.45)",
-    rim: "rgba(255, 255, 255, 0.2)",
-    empty: "#111513"
+    // High-contrast clean mist ink with drop shadow on maritime brass segments
+    label: () => ({ color: "#E8ECE8", shadow: "rgba(0, 0, 0, 0.75)" }),
+    separator: "rgba(17, 23, 19, 0.55)",
+    rim: "#313A33",
+    empty: "#111713"
   }
 };
 function wheelTheme() {

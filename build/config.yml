@@ -11,7 +11,7 @@ info:
   comments: Secure synchronized media playback
   # Generated from internal/buildinfo/version.go by `wails3 task sync:version`.
   # Do not edit this field by hand.
-  version: 1.0.3
+  version: 1.0.4
 
 dev_mode:
   root_path: .
