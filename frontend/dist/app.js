@@ -14,8 +14,8 @@ let draggedPlaylistIndex = -1;
 let toastTimer = 0;
 let lastToast = { message: "", at: 0 };
 let dragDepth = 0;
-let activeSource = "";
 let activeWheel = null;
+let dismissedWheelID = null;
 let wheelAnimation = 0;
 let wheelServerOffsetMs = 0;
 let wheelRotation = 0;
@@ -791,7 +791,7 @@ function animateWheel(wheel) {
   const arc = Math.PI * 2 / Math.max(1, wheel.items?.length || 0);
   lastWheelTick = -1;
   const frame = () => {
-    if (!activeWheel || activeWheel.id !== wheel.id) return;
+    if (!activeWheel || activeWheel.id !== wheel.id || activeWheel.phase !== "started" || !$("wheel-dialog").open || dismissedWheelID === wheel.id) return;
     const serverNow = Date.now() - wheelServerOffsetMs;
     const raw = (serverNow - Number(wheel.startsAtUnixMs)) / Math.max(1, Number(wheel.durationMs));
     const progress = preferences.reduceMotion ? 1 : Math.max(0, Math.min(1, raw));
@@ -799,7 +799,7 @@ function animateWheel(wheel) {
     wheelRotation = target * eased;
     drawWheel(wheel, wheelRotation);
     const tick = Math.floor(Math.abs(wheelRotation) / arc);
-    if (!preferences.reduceMotion && tick !== lastWheelTick) {
+    if (!preferences.reduceMotion && !document.hidden && raw >= 0 && raw < 1 && tick !== lastWheelTick) {
       if (lastWheelTick >= 0) playWheelTick(progress);
       lastWheelTick = tick;
     }
@@ -814,26 +814,29 @@ function showWheel(wheel, serverNowUnixMs = Date.now()) {
   if (!wheel) return;
   wheelServerOffsetMs = Date.now() - Number(serverNowUnixMs || Date.now());
   const dialog = $("wheel-dialog");
-  if (!dialog.open) dialog.showModal();
   $("wheel-count").textContent = `${wheel.items?.length || 0} queue item${wheel.items?.length === 1 ? "" : "s"}`;
   if (wheel.phase === "started") {
     const changed = activeWheel?.id !== wheel.id;
+    if (changed) dismissedWheelID = null;
     activeWheel = wheel;
+    if (dismissedWheelID !== wheel.id && !dialog.open) dialog.showModal();
     $("wheel-status").textContent = `${wheel.requesterName || "A participant"} is spinning…`;
     $("wheel-spin-again").disabled = true;
-    if (changed) animateWheel(wheel);
+    if (changed && dismissedWheelID !== wheel.id) animateWheel(wheel);
   } else if (wheel.phase === "completed") {
     const wasSpinning = activeWheel?.id === wheel.id && activeWheel?.phase === "started";
     activeWheel = wheel;
     cancelAnimationFrame(wheelAnimation);
+    if (dismissedWheelID !== wheel.id && !dialog.open) dialog.showModal();
     wheelRotation = wheelTargetRotation(wheel);
     drawWheel(wheel, wheelRotation, wheel.winner);
     $("wheel-status").textContent = "Selected for the room";
     $("wheel-candidate").textContent = wheel.items?.[wheel.winner]?.label || "Queue item selected";
     $("wheel-spin-again").disabled = !canControl();
-    if (wasSpinning) playWheelResult();
+    if (wasSpinning && dialog.open && !document.hidden && dismissedWheelID !== wheel.id) playWheelResult();
   } else if (wheel.phase === "cancelled") {
     activeWheel = null;
+    dismissedWheelID = null;
     cancelAnimationFrame(wheelAnimation);
     dialog.close();
     showToast(wheel.reason || "The wheel spin was cancelled", "error");
@@ -844,6 +847,8 @@ function openWheelWindow() {
   ensureWheelAudio();
   const dialog = $("wheel-dialog");
   if (!dialog.open) dialog.showModal();
+  dismissedWheelID = null;
+  if (activeWheel?.phase === "started") animateWheel(activeWheel);
   const items = (snapshot?.playlist?.items || []).map(({ id, label }) => ({ id, label }));
   if (!activeWheel) {
     const preview = { items, winner: 0, turns: 0, visualSeed: 0 };
@@ -854,6 +859,12 @@ function openWheelWindow() {
     $("wheel-count").textContent = `${items.length} queue item${items.length === 1 ? "" : "s"}`;
     $("wheel-spin-again").disabled = !canControl() || items.length < 2;
   }
+}
+
+function dismissWheelWindow() {
+  if (activeWheel) dismissedWheelID = activeWheel.id;
+  cancelAnimationFrame(wheelAnimation);
+  if ($("wheel-dialog").open) $("wheel-dialog").close();
 }
 
 function formatBytes(bytes) {
@@ -1063,7 +1074,6 @@ async function playPlaylist(index) {
   if (!item || !canControl()) return;
   try {
     if (item.url) await prepareYouTubeSource(item.url);
-    activeSource = item.url || "";
     await invoke("SelectPlaylist", index);
     await invoke("SetPaused", false);
   } catch (error) { showError(error); }
@@ -1076,7 +1086,9 @@ function friendsMissing(media) {
 function isPlaylistItemPlayable(item) {
   if (!item) return false;
   if (item.url || availability[item.id]) return true;
-  return streamState.state === "active" && (snapshot?.streamOffers || []).some((offer) => offer.id === streamState.offerId && offer.media?.fingerprint === item.media?.fingerprint);
+  return (snapshot?.streamOffers || []).some((offer) => offer.media?.fingerprint === item.media?.fingerprint && (
+    offer.id === streamState.offerId && streamState.state === "active" || offer.providerId !== snapshot.selfId && offer.viewerCount < offer.maxViewers
+  ));
 }
 
 function actionButton(label, action, disabled = false, title = "") {
@@ -1148,7 +1160,7 @@ async function showYouTubeQualityMenu(button, source) {
 
 function selectedSourceURL() {
   const selected = snapshot?.playlist?.selected ?? -1;
-  return selected >= 0 ? snapshot.playlist.items[selected]?.url || "" : activeSource;
+  return selected >= 0 ? snapshot.playlist.items[selected]?.url || "" : "";
 }
 
 async function updatePlaylist(items, remember = true) {
@@ -1248,7 +1260,6 @@ function setConnection(status) {
 
 async function enterRoom(request) {
   lastConnectionRequest = request;
-  activeSource = "";
   await invoke("Connect", request);
   snapshot = normalizeSnapshot(await invoke("Snapshot"));
   hosted = await invoke("ServerStatus");
@@ -1275,7 +1286,8 @@ async function copyText(value, success) {
     if (wails?.Clipboard) await wails.Clipboard.SetText(value);
     else await navigator.clipboard.writeText(value);
     showToast(success);
-  } catch (error) { showError(error); }
+    return true;
+  } catch (error) { showError(error); return false; }
 }
 
 async function copyInvite(owner = false) {
@@ -1419,6 +1431,7 @@ async function leaveRoom() {
   $("settings-dialog").close();
   if ($("wheel-dialog").open) $("wheel-dialog").close();
   activeWheel = null;
+  dismissedWheelID = null;
   cancelAnimationFrame(wheelAnimation);
   $("room-view").classList.add("hidden");
   $("connect-view").classList.remove("hidden");
@@ -1632,7 +1645,16 @@ $("shuffle-all").onclick = () => { closePopovers(); updatePlaylist(shuffled(play
 $("load-playlist-file").onclick = () => loadPlaylistFromFile();
 $("save-playlist-file").onclick = async () => { closePopovers(); try { const path = await invoke("SavePlaylistFile"); if (path) showToast("Playlist saved"); } catch (error) { showError(error); } };
 $("spin-wheel").onclick = () => { closePopovers(); openWheelWindow(); };
-$("close-wheel").onclick = () => $("wheel-dialog").close();
+$("wheel-dialog").addEventListener("cancel", () => {
+  if (activeWheel) dismissedWheelID = activeWheel.id;
+  cancelAnimationFrame(wheelAnimation);
+});
+$("wheel-dialog").addEventListener("close", () => {
+  if ($("wheel-dialog").open) return;
+  if (activeWheel) dismissedWheelID = activeWheel.id;
+  cancelAnimationFrame(wheelAnimation);
+});
+$("close-wheel").onclick = dismissWheelWindow;
 $("wheel-spin-again").onclick = async () => {
   if (!snapshot || !canControl() || snapshot.playlist.items.length < 2) return;
   ensureWheelAudio();
@@ -1860,6 +1882,8 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) syst
 
 function showContextMenu(event, items) {
   const menu = $("context-menu");
+  const container = event.target?.closest?.("dialog[open]") || document.body;
+  if (menu.parentElement !== container) container.append(menu);
   menu.replaceChildren(...items);
   closePopovers();
   menu.classList.remove("hidden");
@@ -1869,23 +1893,33 @@ function showContextMenu(event, items) {
   menu.style.top = `${Math.max(8, Math.min(innerHeight - height - 8, event.clientY))}px`;
 }
 
-async function pasteIntoControl(control) {
+async function pasteIntoControl(control, start, end, originalValue) {
   try {
     const text = wails?.Clipboard ? await wails.Clipboard.Text() : await navigator.clipboard.readText();
-    control.setRangeText(text, control.selectionStart ?? control.value.length, control.selectionEnd ?? control.value.length, "end");
+    if (control.readOnly || control.disabled) return;
+    if (control.value !== originalValue) {
+      start = control.selectionStart ?? control.value.length;
+      end = control.selectionEnd ?? start;
+    }
+    control.setRangeText(text, start, end, "end");
     control.dispatchEvent(new Event("input", { bubbles: true }));
   } catch (error) { showError(error); }
 }
 
 document.addEventListener("contextmenu", (event) => {
-  event.preventDefault();
   const control = event.target.closest("input, textarea");
-  if (control) {
-    const selected = (control.selectionEnd || 0) > (control.selectionStart || 0);
+  const editableText = control instanceof HTMLTextAreaElement || control instanceof HTMLInputElement && ["text", "search", "tel", "url", "password"].includes(control.type);
+  if (editableText) {
+    event.preventDefault();
+    const start = control.selectionStart ?? control.value.length;
+    const end = control.selectionEnd ?? start;
+    const selected = end > start;
+    const writable = !control.readOnly && !control.disabled;
+    const originalValue = control.value;
     showContextMenu(event, [
-      menuButton("Cut", () => { control.focus(); document.execCommand("cut"); closePopovers(); }, { disabled: !selected || control.readOnly }),
-      menuButton("Copy", () => { control.focus(); document.execCommand("copy"); closePopovers(); }, { disabled: !selected }),
-      menuButton("Paste", () => { closePopovers(); pasteIntoControl(control); }, { disabled: control.readOnly }),
+      menuButton("Cut", async () => { closePopovers(); if (await copyText(originalValue.slice(start, end), "Copied") && control.value === originalValue) { control.setRangeText("", start, end, "start"); control.dispatchEvent(new Event("input", { bubbles: true })); } }, { disabled: !selected || !writable }),
+      menuButton("Copy", () => { closePopovers(); copyText(originalValue.slice(start, end), "Copied"); }, { disabled: !selected }),
+      menuButton("Paste", () => { closePopovers(); pasteIntoControl(control, start, end, originalValue); }, { disabled: !writable }),
       menuButton("Select All", () => { control.focus(); control.select(); closePopovers(); })
     ]);
     return;
@@ -1893,23 +1927,61 @@ document.addEventListener("contextmenu", (event) => {
 
   const queueRow = event.target.closest(".queue-item");
   if (queueRow && snapshot) {
+    event.preventDefault();
     const index = Number(queueRow.dataset.index);
     const item = snapshot.playlist.items[index];
-    const controls = [menuButton("Play now", () => { closePopovers(); playPlaylist(index); }, { disabled: !canControl() || !isPlaylistItemPlayable(item) || index === snapshot.playlist.selected })];
+    if (!item) return;
+    const selectedHere = index === snapshot.playlist.selected;
+    const controls = [selectedHere
+      ? menuButton("Resume", () => { closePopovers(); invoke("SetPaused", false).catch(showError); }, { disabled: !canControl() || !snapshot.playback.paused || !isPlaylistItemPlayable(item) })
+      : menuButton("Play now", () => { closePopovers(); playPlaylist(index); }, { disabled: !canControl() || !isPlaylistItemPlayable(item) })];
+    if (!item.url && item.media && !availability[item.id]) controls.push(menuButton("Locate matching file…", () => { closePopovers(); locateItem(item.id); }));
+    const ownOffer = (snapshot.streamOffers || []).find((offer) => offer.providerId === snapshot.selfId);
+    if (ownOffer && item.media && ownOffer.media?.fingerprint === item.media.fingerprint) controls.push(menuButton("Stop sharing file", () => { closePopovers(); invoke("StopOfferingStream").then(() => showToast("File sharing stopped")).catch(showError); }));
+    else if (!ownOffer && !item.url && availability[item.id] && streamingAvailable && friendsMissing(item.media)) controls.push(menuButton("Share file", () => { closePopovers(); invoke("OfferPlaylistStream", item.id).then(() => showToast("File sharing started")).catch(showError); }));
     controls.push(
       menuButton("Move up", () => { closePopovers(); reorderPlaylist(index, index - 1); }, { disabled: !canControl() || index === 0 }),
       menuButton("Move down", () => { closePopovers(); reorderPlaylist(index, index + 1); }, { disabled: !canControl() || index === snapshot.playlist.items.length - 1 }),
+      menuButton("Copy title", () => { closePopovers(); copyText(item.label, "Title copied"); }),
       menuButton("Remove from queue", () => { closePopovers(); removePlaylist(index); }, { disabled: !canControl(), danger: true })
     );
+    if (item.url) controls.splice(controls.length - 1, 0, menuButton("Copy video URL", () => { closePopovers(); copyText(item.url, "URL copied"); }));
     showContextMenu(event, controls);
     return;
   }
 
+  const participantRow = event.target.closest(".participant-row");
+  if (participantRow && snapshot) {
+    const person = snapshot.participants.find((entry) => entry.id === participantRow.dataset.id);
+    if (!person) return;
+    event.preventDefault();
+    const items = [menuButton("Copy name", () => { closePopovers(); copyText(person.name, "Name copied"); })];
+    if (person.media?.title) items.push(menuButton("Copy media title", () => { closePopovers(); copyText(person.media.title, "Title copied"); }));
+    if (self()?.role === "owner" && person.role !== "owner") {
+      const role = person.role === "moderator" ? "member" : "moderator";
+      items.push(menuButton(role === "moderator" ? "Make moderator" : "Make member", () => { closePopovers(); invoke("SetRole", person.id, role).catch(showError); }));
+    }
+    showContextMenu(event, items);
+    return;
+  }
+
+  if (event.target.closest("#now-playing-drop") && snapshot) {
+    event.preventDefault();
+    const title = $("media-title").textContent;
+    const source = selectedSourceURL();
+    const items = [menuButton("Copy media title", () => { closePopovers(); copyText(title, "Title copied"); }, { disabled: title === "No media loaded" })];
+    if (/^https?:\/\//i.test(source)) items.push(menuButton("Copy video URL", () => { closePopovers(); copyText(source, "URL copied"); }));
+    showContextMenu(event, items);
+    return;
+  }
+
   const selectedText = String(getSelection()?.toString() || "").trim();
+  if (!snapshot && !selectedText) return;
+  event.preventDefault();
   const items = [];
   if (selectedText) items.push(menuButton("Copy", () => { copyText(selectedText, "Copied"); closePopovers(); }));
   if (snapshot) items.push(menuButton("Copy invite", () => { $("copy-invite").click(); closePopovers(); }));
-  items.push(menuButton("Preferences…", () => { closePopovers(); renderConnectionInfo(); $("settings-dialog").showModal(); }));
+  if (snapshot) items.push(menuButton("Preferences…", () => { closePopovers(); renderConnectionInfo(); $("settings-dialog").showModal(); }));
   showContextMenu(event, items);
 });
 
@@ -1987,7 +2059,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closePopovers();
     if ($("settings-dialog").open) $("settings-dialog").close();
-    if ($("wheel-dialog").open) $("wheel-dialog").close();
+    dismissWheelWindow();
   }
   if (!snapshot || event.target.matches("input, select, textarea") || event.target.isContentEditable) return;
   if (event.code === "Space" && canControl()) { event.preventDefault(); $("pause").click(); }

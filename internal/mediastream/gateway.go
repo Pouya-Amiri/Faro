@@ -2,6 +2,7 @@ package mediastream
 
 import (
 	"bufio"
+	"container/list"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -21,11 +22,18 @@ import (
 	"github.com/Pouya-Amiri/Faro/internal/streamtransport"
 )
 
+const (
+	defaultGatewayChunk = int64(256 * 1024)
+	defaultGatewayCache = int64(64 * 1024 * 1024)
+	maxGatewayCache     = int64(256 * 1024 * 1024)
+)
+
 type GatewayConfig struct {
 	Viewer     streamtransport.Viewer
 	Capability string
 	Media      protocol.Media
 	ChunkBytes int64
+	CacheBytes int64
 }
 
 type Gateway struct {
@@ -37,11 +45,27 @@ type Gateway struct {
 	listener   net.Listener
 	server     *http.Server
 
-	mu            sync.Mutex
-	currentCancel context.CancelFunc
-	currentID     uint64
-	nextID        uint64
-	closeOnce     sync.Once
+	cacheMu    sync.Mutex
+	cache      map[int64]*list.Element
+	cacheOrder *list.List
+	cacheSize  int64
+	cacheLimit int64
+	inflight   map[int64]*chunkFetch
+	fetchSlots chan struct{}
+	closed     bool
+	closeOnce  sync.Once
+}
+
+type cachedChunk struct {
+	start int64
+	data  []byte
+}
+
+type chunkFetch struct {
+	done  chan struct{}
+	data  []byte
+	err   error
+	retry bool
 }
 
 func NewGateway(cfg GatewayConfig) (*Gateway, error) {
@@ -50,10 +74,17 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 	}
 	chunkBytes := cfg.ChunkBytes
 	if chunkBytes == 0 {
-		chunkBytes = defaultMaxRange
+		chunkBytes = defaultGatewayChunk
 	}
 	if chunkBytes < 1 || chunkBytes > defaultMaxRange {
 		return nil, errors.New("stream gateway chunk size must be between 1 byte and 4 MiB")
+	}
+	cacheBytes := cfg.CacheBytes
+	if cacheBytes == 0 {
+		cacheBytes = defaultGatewayCache
+	}
+	if cacheBytes < chunkBytes || cacheBytes > maxGatewayCache {
+		return nil, errors.New("stream gateway cache must hold at least one chunk and at most 256 MiB")
 	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -66,7 +97,9 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 	}
 	gateway := &Gateway{
 		viewer: cfg.Viewer, capability: cfg.Capability, media: cfg.Media, chunkBytes: chunkBytes,
-		path: "/" + token, listener: listener,
+		path: "/" + token, listener: listener, cacheLimit: cacheBytes,
+		cache: make(map[int64]*list.Element), cacheOrder: list.New(), inflight: make(map[int64]*chunkFetch),
+		fetchSlots: make(chan struct{}, defaultConcurrency),
 	}
 	gateway.server = &http.Server{
 		Handler: gateway, ReadHeaderTimeout: 5 * time.Second,
@@ -81,11 +114,12 @@ func (g *Gateway) URL() string { return "http://" + g.listener.Addr().String() +
 func (g *Gateway) Close() error {
 	var result error
 	g.closeOnce.Do(func() {
-		g.mu.Lock()
-		if g.currentCancel != nil {
-			g.currentCancel()
-		}
-		g.mu.Unlock()
+		g.cacheMu.Lock()
+		g.closed = true
+		clear(g.cache)
+		g.cacheOrder.Init()
+		g.cacheSize = 0
+		g.cacheMu.Unlock()
 		result = errors.Join(g.server.Close(), g.viewer.Close())
 	})
 	return result
@@ -130,72 +164,146 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if flusher, ok := writer.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	ctx, cancel := context.WithCancel(request.Context())
-	g.mu.Lock()
-	if g.currentCancel != nil {
-		g.currentCancel()
-	}
-	g.nextID++
-	requestID := g.nextID
-	g.currentCancel = cancel
-	g.currentID = requestID
-	g.mu.Unlock()
-	defer func() {
-		cancel()
-		g.mu.Lock()
-		if g.currentID == requestID {
-			g.currentCancel = nil
-			g.currentID = 0
-		}
-		g.mu.Unlock()
-	}()
 	for offset := start; offset <= end; {
-		chunkEnd := min(end, offset+g.chunkBytes-1)
-		if err := g.fetchRange(ctx, writer, offset, chunkEnd); err != nil {
+		chunkStart := offset / g.chunkBytes * g.chunkBytes
+		begin := offset - chunkStart
+		count := min(end-offset+1, g.chunkBytes-begin)
+		if err := g.writeChunk(request.Context(), writer, chunkStart, begin, count); err != nil {
 			return
 		}
-		offset = chunkEnd + 1
+		offset += count
 	}
 }
 
-func (g *Gateway) fetchRange(ctx context.Context, destination io.Writer, start, end int64) error {
+func (g *Gateway) writeChunk(ctx context.Context, writer io.Writer, start, begin, count int64) error {
+	for {
+		g.cacheMu.Lock()
+		if g.closed {
+			g.cacheMu.Unlock()
+			return net.ErrClosed
+		}
+		if cached := g.cache[start]; cached != nil {
+			g.cacheOrder.MoveToFront(cached)
+			data := cached.Value.(*cachedChunk).data
+			g.cacheMu.Unlock()
+			return writeGatewayBytes(writer, data[begin:begin+count])
+		}
+		if pending := g.inflight[start]; pending != nil {
+			g.cacheMu.Unlock()
+			select {
+			case <-pending.done:
+				if (errors.Is(pending.err, context.Canceled) || pending.retry) && ctx.Err() == nil {
+					continue
+				}
+				if pending.err != nil {
+					return pending.err
+				}
+				return writeGatewayBytes(writer, pending.data[begin:begin+count])
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		pending := &chunkFetch{done: make(chan struct{})}
+		g.inflight[start] = pending
+		g.cacheMu.Unlock()
+
+		end := min(g.media.SizeBytes-1, start+g.chunkBytes-1)
+		writeFailed := false
+		pending.data, pending.err = g.fetchRange(ctx, start, end, func(offset int64, data []byte) error {
+			first := max(begin, offset)
+			last := min(begin+count, offset+int64(len(data)))
+			if first >= last {
+				return nil
+			}
+			if err := writeGatewayBytes(writer, data[first-offset:last-offset]); err != nil {
+				writeFailed = true
+				return err
+			}
+			return nil
+		})
+		pending.retry = writeFailed
+		if pending.err != nil && ctx.Err() != nil {
+			pending.err = ctx.Err()
+		}
+		g.cacheMu.Lock()
+		delete(g.inflight, start)
+		if pending.err == nil && !g.closed {
+			entry := g.cacheOrder.PushFront(&cachedChunk{start: start, data: pending.data})
+			g.cache[start] = entry
+			g.cacheSize += int64(len(pending.data))
+			for g.cacheSize > g.cacheLimit {
+				oldest := g.cacheOrder.Back()
+				old := oldest.Value.(*cachedChunk)
+				delete(g.cache, old.start)
+				g.cacheOrder.Remove(oldest)
+				g.cacheSize -= int64(len(old.data))
+			}
+		}
+		close(pending.done)
+		g.cacheMu.Unlock()
+		return pending.err
+	}
+}
+
+func writeGatewayBytes(writer io.Writer, data []byte) error {
+	written, err := writer.Write(data)
+	if err == nil && written != len(data) {
+		return io.ErrShortWrite
+	}
+	return err
+}
+
+func (g *Gateway) fetchRange(ctx context.Context, start, end int64, onData func(int64, []byte) error) ([]byte, error) {
+	select {
+	case g.fetchSlots <- struct{}{}:
+		defer func() { <-g.fetchSlots }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	if err := g.viewer.WaitForDirect(ctx); err != nil {
-		return err
+		return nil, err
 	}
 	conn, err := g.viewer.Dial(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer conn.Close()
 	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopClose()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://faro.media"+upstreamPath, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+g.capability)
 	request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	request.Close = true
 	if err := request.Write(conn); err != nil {
-		return err
+		return nil, err
 	}
 	response, err := http.ReadResponse(bufio.NewReader(conn), request)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer response.Body.Close()
 	want := end - start + 1
 	if response.StatusCode != http.StatusPartialContent || response.ContentLength != want {
-		return fmt.Errorf("stream provider returned %s for range %d-%d", response.Status, start, end)
+		return nil, fmt.Errorf("stream provider returned %s for range %d-%d", response.Status, start, end)
 	}
-	written, err := io.CopyN(destination, response.Body, want)
-	if err != nil {
-		return err
+	data := make([]byte, want)
+	for offset := int64(0); offset < want; {
+		batch := min(want-offset, 16*1024)
+		read, err := io.ReadFull(response.Body, data[offset:offset+batch])
+		if read > 0 {
+			if writeErr := onData(offset, data[offset:offset+int64(read)]); writeErr != nil {
+				return nil, writeErr
+			}
+			offset += int64(read)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
-	if written != want {
-		return io.ErrUnexpectedEOF
-	}
-	return nil
+	return data, nil
 }
 
 func parsePlayerRange(value string, size int64) (start, end int64, partial bool, err error) {
