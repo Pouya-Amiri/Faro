@@ -1,7 +1,6 @@
 package mediastream
 
 import (
-	"bufio"
 	"container/list"
 	"context"
 	"crypto/rand"
@@ -23,8 +22,8 @@ import (
 )
 
 const (
-	defaultGatewayChunk = int64(256 * 1024)
-	defaultGatewayCache = int64(64 * 1024 * 1024)
+	defaultGatewayChunk = defaultMaxRange
+	defaultGatewayCache = int64(128 * 1024 * 1024)
 	maxGatewayCache     = int64(256 * 1024 * 1024)
 )
 
@@ -44,6 +43,7 @@ type Gateway struct {
 	path       string
 	listener   net.Listener
 	server     *http.Server
+	transport  *http.Transport
 
 	cacheMu    sync.Mutex
 	cache      map[int64]*list.Element
@@ -62,6 +62,8 @@ type cachedChunk struct {
 }
 
 type chunkFetch struct {
+	start int64
+	end   int64
 	done  chan struct{}
 	data  []byte
 	err   error
@@ -101,6 +103,16 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 		cache: make(map[int64]*list.Element), cacheOrder: list.New(), inflight: make(map[int64]*chunkFetch),
 		fetchSlots: make(chan struct{}, defaultConcurrency),
 	}
+	gateway.transport = &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return gateway.viewer.Dial(ctx)
+		},
+		DisableCompression:  true,
+		MaxConnsPerHost:     defaultConcurrency,
+		MaxIdleConns:        defaultConcurrency,
+		MaxIdleConnsPerHost: defaultConcurrency,
+		IdleConnTimeout:     30 * time.Second,
+	}
 	gateway.server = &http.Server{
 		Handler: gateway, ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 * 1024,
@@ -120,7 +132,9 @@ func (g *Gateway) Close() error {
 		g.cacheOrder.Init()
 		g.cacheSize = 0
 		g.cacheMu.Unlock()
-		result = errors.Join(g.server.Close(), g.viewer.Close())
+		serverErr := g.server.Close()
+		g.transport.CloseIdleConnections()
+		result = errors.Join(serverErr, g.viewer.Close())
 	})
 	return result
 }
@@ -165,30 +179,30 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		flusher.Flush()
 	}
 	for offset := start; offset <= end; {
-		chunkStart := offset / g.chunkBytes * g.chunkBytes
-		begin := offset - chunkStart
-		count := min(end-offset+1, g.chunkBytes-begin)
-		if err := g.writeChunk(request.Context(), writer, chunkStart, begin, count); err != nil {
+		count, err := g.writeChunk(request.Context(), writer, offset, end)
+		if err != nil {
 			return
 		}
 		offset += count
 	}
 }
 
-func (g *Gateway) writeChunk(ctx context.Context, writer io.Writer, start, begin, count int64) error {
+func (g *Gateway) writeChunk(ctx context.Context, writer io.Writer, offset, requestedEnd int64) (int64, error) {
 	for {
 		g.cacheMu.Lock()
 		if g.closed {
 			g.cacheMu.Unlock()
-			return net.ErrClosed
+			return 0, net.ErrClosed
 		}
-		if cached := g.cache[start]; cached != nil {
+		if cached := g.cachedAt(offset); cached != nil {
 			g.cacheOrder.MoveToFront(cached)
-			data := cached.Value.(*cachedChunk).data
+			chunk := cached.Value.(*cachedChunk)
 			g.cacheMu.Unlock()
-			return writeGatewayBytes(writer, data[begin:begin+count])
+			begin := offset - chunk.start
+			count := min(requestedEnd-offset+1, int64(len(chunk.data))-begin)
+			return count, writeGatewayBytes(writer, chunk.data[begin:begin+count])
 		}
-		if pending := g.inflight[start]; pending != nil {
+		if pending := g.inflightAt(offset); pending != nil {
 			g.cacheMu.Unlock()
 			select {
 			case <-pending.done:
@@ -196,26 +210,23 @@ func (g *Gateway) writeChunk(ctx context.Context, writer io.Writer, start, begin
 					continue
 				}
 				if pending.err != nil {
-					return pending.err
+					return 0, pending.err
 				}
-				return writeGatewayBytes(writer, pending.data[begin:begin+count])
+				begin := offset - pending.start
+				count := min(requestedEnd-offset+1, int64(len(pending.data))-begin)
+				return count, writeGatewayBytes(writer, pending.data[begin:begin+count])
 			case <-ctx.Done():
-				return ctx.Err()
+				return 0, ctx.Err()
 			}
 		}
-		pending := &chunkFetch{done: make(chan struct{})}
-		g.inflight[start] = pending
+		fetchEnd := offset + min(g.chunkBytes-1, requestedEnd-offset)
+		pending := &chunkFetch{start: offset, end: fetchEnd, done: make(chan struct{})}
+		g.inflight[offset] = pending
 		g.cacheMu.Unlock()
 
-		end := min(g.media.SizeBytes-1, start+g.chunkBytes-1)
 		writeFailed := false
-		pending.data, pending.err = g.fetchRange(ctx, start, end, func(offset int64, data []byte) error {
-			first := max(begin, offset)
-			last := min(begin+count, offset+int64(len(data)))
-			if first >= last {
-				return nil
-			}
-			if err := writeGatewayBytes(writer, data[first-offset:last-offset]); err != nil {
+		pending.data, pending.err = g.fetchRange(ctx, pending.start, pending.end, func(_ int64, data []byte) error {
+			if err := writeGatewayBytes(writer, data); err != nil {
 				writeFailed = true
 				return err
 			}
@@ -226,10 +237,10 @@ func (g *Gateway) writeChunk(ctx context.Context, writer io.Writer, start, begin
 			pending.err = ctx.Err()
 		}
 		g.cacheMu.Lock()
-		delete(g.inflight, start)
+		delete(g.inflight, pending.start)
 		if pending.err == nil && !g.closed {
-			entry := g.cacheOrder.PushFront(&cachedChunk{start: start, data: pending.data})
-			g.cache[start] = entry
+			entry := g.cacheOrder.PushFront(&cachedChunk{start: pending.start, data: pending.data})
+			g.cache[pending.start] = entry
 			g.cacheSize += int64(len(pending.data))
 			for g.cacheSize > g.cacheLimit {
 				oldest := g.cacheOrder.Back()
@@ -241,8 +252,29 @@ func (g *Gateway) writeChunk(ctx context.Context, writer io.Writer, start, begin
 		}
 		close(pending.done)
 		g.cacheMu.Unlock()
-		return pending.err
+		return int64(len(pending.data)), pending.err
 	}
+}
+
+// cachedAt and inflightAt are called with cacheMu held. A fetch starts at the
+// player's requested offset, so a seek never waits for preceding block bytes.
+func (g *Gateway) cachedAt(offset int64) *list.Element {
+	for entry := g.cacheOrder.Front(); entry != nil; entry = entry.Next() {
+		chunk := entry.Value.(*cachedChunk)
+		if offset >= chunk.start && offset-chunk.start < int64(len(chunk.data)) {
+			return entry
+		}
+	}
+	return nil
+}
+
+func (g *Gateway) inflightAt(offset int64) *chunkFetch {
+	for _, pending := range g.inflight {
+		if offset >= pending.start && offset <= pending.end {
+			return pending
+		}
+	}
+	return nil
 }
 
 func writeGatewayBytes(writer io.Writer, data []byte) error {
@@ -263,24 +295,13 @@ func (g *Gateway) fetchRange(ctx context.Context, start, end int64, onData func(
 	if err := g.viewer.WaitForDirect(ctx); err != nil {
 		return nil, err
 	}
-	conn, err := g.viewer.Dial(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stopClose()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://faro.media"+upstreamPath, nil)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+g.capability)
 	request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
-	request.Close = true
-	if err := request.Write(conn); err != nil {
-		return nil, err
-	}
-	response, err := http.ReadResponse(bufio.NewReader(conn), request)
+	response, err := g.transport.RoundTrip(request)
 	if err != nil {
 		return nil, err
 	}

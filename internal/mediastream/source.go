@@ -142,31 +142,49 @@ func (s *Source) Close() error {
 	return s.file.Close()
 }
 
-// HandleConn serves HTTP/1.1 on one authenticated transport connection. The
-// caller owns accepting connections; no filesystem path is read from requests.
+// HandleConn serves authenticated HTTP/1.1 requests on one transport
+// connection. The caller owns accepting connections; no filesystem path is
+// read from requests.
 func (s *Source) HandleConn(conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-	reader := bufio.NewReader(io.LimitReader(conn, maxRequestBytes))
+	limited := &requestReader{conn: conn}
+	reader := bufio.NewReader(limited)
 	writer := bufio.NewWriter(conn)
-	request, err := http.ReadRequest(reader)
-	if err != nil {
-		return
-	}
-	request.Close = true
-	response := s.response(request)
-	response.Close = true
-	request.Body.Close()
-	if err := response.Write(writer); err != nil {
+	for {
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+		limited.remaining = maxRequestBytes
+		request, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		keepAlive := !request.Close && request.ContentLength <= 0 && len(request.TransferEncoding) == 0
+		response := s.response(request)
+		response.Close = !keepAlive
+		if keepAlive {
+			request.Body.Close()
+		}
+		writeErr := response.Write(writer)
 		if response.Body != nil {
 			response.Body.Close()
 		}
-		return
+		if writeErr != nil || writer.Flush() != nil || !keepAlive {
+			return
+		}
 	}
-	if response.Body != nil {
-		response.Body.Close()
+}
+
+type requestReader struct {
+	conn      net.Conn
+	remaining int64
+}
+
+func (r *requestReader) Read(data []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, errors.New("media stream request exceeds size limit")
 	}
-	_ = writer.Flush()
+	read, err := r.conn.Read(data[:min(int64(len(data)), r.remaining)])
+	r.remaining -= int64(read)
+	return read, err
 }
 
 func (s *Source) response(request *http.Request) *http.Response {

@@ -22,8 +22,14 @@ import (
 type observedViewer struct {
 	streamtransport.Viewer
 	dials        atomic.Int32
+	directChecks atomic.Int32
 	firstStarted chan struct{}
 	releaseFirst chan struct{}
+}
+
+func (v *observedViewer) WaitForDirect(ctx context.Context) error {
+	v.directChecks.Add(1)
+	return v.Viewer.WaitForDirect(ctx)
 }
 
 func (v *observedViewer) Dial(ctx context.Context) (net.Conn, error) {
@@ -117,6 +123,48 @@ func TestSourceRequiresCapabilityAndBoundedSingleRange(t *testing.T) {
 	}
 }
 
+func TestSourceRechecksAuthorizationOnReusedConnection(t *testing.T) {
+	source := newTestSource(t, []byte("abcdefgh"), 8)
+	capability := strings.Repeat("k", 32)
+	if err := source.Authorize(capability, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	client, server := net.Pipe()
+	defer client.Close()
+	go source.HandleConn(server)
+	reader := bufio.NewReader(client)
+	for index, byteRange := range []string{"bytes=0-3", "bytes=4-7"} {
+		request, err := http.NewRequest(http.MethodGet, "http://faro.media"+upstreamPath, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+capability)
+		request.Header.Set("Range", byteRange)
+		if index == 1 {
+			source.Revoke(capability)
+			request.Close = true
+		}
+		if err := request.Write(client); err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.ReadResponse(reader, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index == 0 && (response.StatusCode != http.StatusPartialContent || response.Close || string(body) != "abcd") {
+			t.Fatalf("first request did not keep the authenticated connection: status=%d close=%t body=%q", response.StatusCode, response.Close, body)
+		}
+		if index == 1 && response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("revoked capability remained valid on reused connection: status=%d", response.StatusCode)
+		}
+	}
+}
+
 func TestSourceRejectsSymlink(t *testing.T) {
 	directory := t.TempDir()
 	target := filepath.Join(directory, "movie.mkv")
@@ -207,27 +255,48 @@ func TestLoopbackGatewayStreamsAcrossBoundedUpstreamChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { smallGateway.Close() })
-	for _, start := range []int{0, 32768, 65536, 0} {
+	for index, start := range []int{0, 32768, 65536, 0} {
 		request, err := http.NewRequest(http.MethodGet, smallGateway.URL(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, start+15))
+		request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, start+32767))
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}
 		body, err := io.ReadAll(response.Body)
 		response.Body.Close()
-		if err != nil || string(body) != string(content[start:start+16]) {
+		if err != nil || string(body) != string(content[start:start+32768]) {
 			t.Fatalf("cached range %d failed: bytes=%d error=%v", start, len(body), err)
 		}
+		smallGateway.cacheMu.Lock()
+		pending := smallGateway.inflight[int64(start)]
+		smallGateway.cacheMu.Unlock()
+		if pending != nil {
+			<-pending.done
+		}
+		if index == 2 {
+			smallGateway.cacheMu.Lock()
+			_, stillCached := smallGateway.cache[0]
+			smallGateway.cacheMu.Unlock()
+			if stillCached {
+				t.Fatal("oldest range was not evicted from the bounded cache")
+			}
+		}
 	}
-	if got := observed.dials.Load() - firstDials; got != 4 {
-		t.Fatalf("bounded cache fetched %d chunks, want 4 after eviction", got)
+	if got := observed.dials.Load() - firstDials; got != 1 {
+		t.Fatalf("sequential ranges opened %d provider connections, want 1", got)
 	}
-	if smallGateway.cacheSize > smallGateway.cacheLimit {
-		t.Fatalf("gateway cache grew beyond its limit: %d > %d", smallGateway.cacheSize, smallGateway.cacheLimit)
+	smallGateway.cacheMu.Lock()
+	cacheSize, cacheLimit := smallGateway.cacheSize, smallGateway.cacheLimit
+	_, firstRangeCached := smallGateway.cache[0]
+	smallGateway.cacheMu.Unlock()
+	if !firstRangeCached {
+		t.Fatal("evicted range was not fetched again")
+	}
+	if cacheSize > cacheLimit {
+		t.Fatalf("gateway cache grew beyond its limit: %d > %d", cacheSize, cacheLimit)
 	}
 }
 
@@ -308,6 +377,135 @@ func TestGatewayNewRangeDoesNotCancelActiveRead(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("first range did not finish")
+	}
+}
+
+func TestGatewayDefaultTransferStartsAtRequestedByteAndUsesLargeRanges(t *testing.T) {
+	content := []byte(strings.Repeat("abcd", (5*1024*1024+12345)/4+1))[:5*1024*1024+12345]
+	source := newTestSource(t, content, defaultMaxRange)
+	capability := strings.Repeat("r", 32)
+	if err := source.Authorize(capability, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	network := streamtransport.NewFakeNetwork()
+	publisher, err := network.StartPublisher(context.Background(), streamtransport.PublisherConfig{HandleConn: source.HandleConn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { publisher.Close() })
+	viewer, err := network.NewViewer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.AllowClient(viewer.PublicKey()); err != nil {
+		t.Fatal(err)
+	}
+	if err := viewer.SetConnectionBlob(publisher.ConnectionBlob()); err != nil {
+		t.Fatal(err)
+	}
+	observed := &observedViewer{Viewer: viewer}
+	media := protocol.Media{Title: "Movie.mkv", SizeBytes: int64(len(content)), Fingerprint: "file-v1:" + strings.Repeat("a", 64)}
+	gateway, err := NewGateway(GatewayConfig{Viewer: observed, Capability: capability, Media: media})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gateway.Close() })
+	request, err := http.NewRequest(http.MethodGet, gateway.URL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Range", "bytes=12345-")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	if err != nil || read != 5*1024*1024 {
+		t.Fatalf("large range returned %d bytes: %v", read, err)
+	}
+	if got := observed.dials.Load(); got != 1 {
+		t.Fatalf("default transfer opened %d provider connections for 5 MiB, want 1", got)
+	}
+	if got := observed.directChecks.Load(); got != 2 {
+		t.Fatalf("default transfer checked its direct route %d times for two ranges, want 2", got)
+	}
+	repeat, err := http.NewRequest(http.MethodGet, gateway.URL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeat.Header.Set("Range", "bytes=20000-29999")
+	result, err := http.DefaultClient.Do(repeat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(result.Body)
+	result.Body.Close()
+	if err != nil || string(body) != string(content[20000:30000]) || observed.dials.Load() != 1 {
+		t.Fatalf("overlapping range missed cache: bytes=%d error=%v dials=%d", len(body), err, observed.dials.Load())
+	}
+	gateway.cacheMu.Lock()
+	_, startsAtSeek := gateway.cache[12345]
+	gateway.cacheMu.Unlock()
+	if !startsAtSeek {
+		t.Fatal("uncached seek fetched bytes before the requested position")
+	}
+}
+
+func TestGatewayWorksWithOneRequestProvider(t *testing.T) {
+	content := []byte(strings.Repeat("abcdefgh", 8192))
+	source := newTestSource(t, content, 32*1024)
+	capability := strings.Repeat("l", 32)
+	if err := source.Authorize(capability, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	network := streamtransport.NewFakeNetwork()
+	publisher, err := network.StartPublisher(context.Background(), streamtransport.PublisherConfig{HandleConn: func(conn net.Conn) {
+		defer conn.Close()
+		request, readErr := http.ReadRequest(bufio.NewReader(conn))
+		if readErr != nil {
+			return
+		}
+		request.Close = true
+		response := source.response(request)
+		response.Close = true
+		_ = response.Write(conn)
+		if response.Body != nil {
+			response.Body.Close()
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { publisher.Close() })
+	viewer, err := network.NewViewer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.AllowClient(viewer.PublicKey()); err != nil {
+		t.Fatal(err)
+	}
+	if err := viewer.SetConnectionBlob(publisher.ConnectionBlob()); err != nil {
+		t.Fatal(err)
+	}
+	observed := &observedViewer{Viewer: viewer}
+	media := protocol.Media{Title: "Movie.mkv", SizeBytes: int64(len(content)), Fingerprint: "file-v1:" + strings.Repeat("a", 64)}
+	gateway, err := NewGateway(GatewayConfig{Viewer: observed, Capability: capability, Media: media, ChunkBytes: 32 * 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gateway.Close() })
+	response, err := http.Get(gateway.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || string(body) != string(content) {
+		t.Fatalf("one-request provider returned %d bytes: %v", len(body), err)
+	}
+	if got := observed.dials.Load(); got != 2 {
+		t.Fatalf("one-request provider used %d connections for two ranges, want 2", got)
 	}
 }
 
