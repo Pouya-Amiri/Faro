@@ -1774,10 +1774,9 @@ if ($("connection-btn")) {
 if ($("stats-open-session")) {
   $("stats-open-session").onclick = () => {
     closePopovers();
-    renderConnectionInfo();
     document.querySelectorAll("[data-settings]").forEach((node) => node.classList.toggle("active", node.dataset.settings === "session"));
     document.querySelectorAll("[data-page]").forEach((page) => page.classList.toggle("hidden", page.dataset.page !== "session"));
-    $("settings-dialog").showModal();
+    openPreferences();
   };
 }
 $("leave-room").onclick = (event) => { event.stopPropagation(); togglePopover($("session-menu"), $("leave-room")); };
@@ -2121,7 +2120,12 @@ document.addEventListener("keydown", (event) => {
 }, true);
 $("room-chip").onclick = (event) => { event.stopPropagation(); togglePopover($("room-menu"), $("room-chip")); };
 $("copy-room-name").onclick = () => { closePopovers(); copyText(snapshot.room.id, "Room name copied"); };
-$("open-settings").onclick = () => { renderConnectionInfo(); $("settings-dialog").showModal(); };
+function openPreferences() {
+  renderConnectionInfo();
+  void refreshTrayStatus();
+  if (!$("settings-dialog").open) $("settings-dialog").showModal();
+}
+$("open-settings").onclick = openPreferences;
 $("settings-dialog").addEventListener("click", (event) => { if (event.target === $("settings-dialog")) $("settings-dialog").close(); });
 document.querySelectorAll("[data-settings]").forEach((button) => {
   button.onclick = () => {
@@ -2416,7 +2420,7 @@ document.addEventListener("contextmenu", (event) => {
       menuButton("Copy room name", act(() => $("copy-room-name").click())),
       menuSeparator(),
       menuButton("Server & session info…", act(() => $("stats-open-session").click())),
-      menuButton("Preferences…", act(() => { renderConnectionInfo(); $("settings-dialog").showModal(); }), { hint: "Ctrl+," }),
+      menuButton("Preferences…", act(openPreferences), { hint: "Ctrl+," }),
       menuSeparator(),
       menuButton("Leave room", act(() => leaveRoom().catch(showError)), { danger: true }),
       ...windowItems()
@@ -2447,7 +2451,7 @@ document.addEventListener("contextmenu", (event) => {
   open([
     ...copySelection,
     snapshot ? menuButton("Copy invite link", act(() => $("copy-invite").click())) : null,
-    snapshot ? menuButton("Preferences…", act(() => { renderConnectionInfo(); $("settings-dialog").showModal(); }), { hint: "Ctrl+," }) : null
+    snapshot ? menuButton("Preferences…", act(openPreferences), { hint: "Ctrl+," }) : null
   ]);
 });
 
@@ -2561,7 +2565,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "ArrowLeft" && canControl()) { event.preventDefault(); $("back-ten").click(); }
   if (event.key === "ArrowRight" && canControl()) { event.preventDefault(); $("forward-ten").click(); }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o" && canControl()) { event.preventDefault(); chooseFiles(); }
-  if ((event.ctrlKey || event.metaKey) && event.key === ",") { event.preventDefault(); $("settings-dialog").showModal(); }
+  if ((event.ctrlKey || event.metaKey) && event.key === ",") { event.preventDefault(); openPreferences(); }
   if (!event.ctrlKey && !event.metaKey && !event.altKey && (event.key === ">" || event.key === "<")) { event.preventDefault(); stepPlaybackRate(event.key === ">" ? 1 : -1); }
 });
 
@@ -2604,6 +2608,22 @@ if (hasBackend && document.body.dataset.platform === "linux") {
     $("hardware-acceleration-row").classList.remove("hidden");
   }).catch(() => {});
 }
+async function refreshTrayStatus() {
+  if (!hasBackend) return;
+  try {
+    const status = await invoke("TrayStatus");
+    $("close-to-tray").checked = Boolean(status.closeToTray);
+    $("close-to-tray-hint").textContent = status.available
+      ? "Closing the window keeps rooms, hosting and shared files running. Quit from the tray icon."
+      : "No system tray found, so closing the window quits Faro. On GNOME, enable the AppIndicator extension.";
+    $("close-to-tray-row").classList.remove("hidden");
+  } catch {}
+}
+void refreshTrayStatus();
+$("close-to-tray").onchange = (event) => {
+  invoke("SetCloseToTray", event.target.checked)
+    .catch((error) => { event.target.checked = !event.target.checked; showError(error); });
+};
 $("hardware-acceleration").onchange = (event) => {
   invoke("SetHardwareAcceleration", event.target.checked)
     .then(() => showToast("Restart Faro to apply the rendering change"))

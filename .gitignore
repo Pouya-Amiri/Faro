@@ -15,6 +15,7 @@
 !/build/
 /build/*
 !/build/appicon.png
+!/build/tray-icon.png
 !/build/config.yml
 !/build/darwin/
 /build/darwin/*

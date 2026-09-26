@@ -188,6 +188,8 @@ const windowCornerRadius = 15
 type windowSettings struct {
 	Background           string `json:"background,omitempty"`
 	HardwareAcceleration bool   `json:"hardwareAcceleration,omitempty"`
+	// QuitOnClose turns off keeping Faro in the tray when its window closes.
+	QuitOnClose bool `json:"quitOnClose,omitempty"`
 }
 
 func windowSettingsPath() (string, error) {

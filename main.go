@@ -23,7 +23,13 @@ const (
 func main() {
 	preferWayland()
 
+	var tray *trayController
 	wailsApp := application.New(application.Options{
+		SingleInstance: singleInstance(func() {
+			if tray != nil {
+				tray.showWindow()
+			}
+		}),
 		Name:        "Faro",
 		Description: "Secure synchronized media playback",
 		Assets: application.AssetOptions{
@@ -65,6 +71,7 @@ func main() {
 		},
 	})
 	desktop.setWindow(mainWindow)
+	tray = setupTray(wailsApp, mainWindow)
 
 	mainWindow.OnWindowEvent(events.Common.WindowFilesDropped, func(event *application.WindowEvent) {
 		wailsApp.Event.Emit("faro:file-drop", map[string]any{
