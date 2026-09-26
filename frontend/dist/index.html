@@ -25,7 +25,7 @@
         document.documentElement.style.colorScheme = isDark ? "dark" : "light";
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=33" />
+    <link rel="stylesheet" href="/styles.css?v=35" />
     <link rel="stylesheet" href="/desktop.css?v=18" />
   </head>
   <body>
@@ -332,15 +332,27 @@
                     <span class="clock-divider">/</span>
                     <span id="duration">--:--</span>
                   </div>
-                  <select id="playback-rate" class="form-select select-compact" data-select-class="rate-select" aria-label="Playback speed" title="Playback speed">
-                    <option value="0.5">0.5×</option>
-                    <option value="0.75">0.75×</option>
-                    <option value="1" selected>1×</option>
-                    <option value="1.25">1.25×</option>
-                    <option value="1.5">1.5×</option>
-                    <option value="1.75">1.75×</option>
-                    <option value="2">2×</option>
-                  </select>
+<div class="rate-control" role="group" aria-label="Playback speed">
+                    <button id="rate-decrease" class="rate-step" type="button" aria-label="Slower" title="Slower (−0.1×)">
+                      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"/></svg>
+                    </button>
+                    <select id="playback-rate" class="form-select select-compact" data-select-class="rate-select" aria-label="Playback speed" title="Playback speed">
+                      <option value="0.25">0.25×</option>
+                      <option value="0.5">0.5×</option>
+                      <option value="0.75">0.75×</option>
+                      <option value="1" selected>1×</option>
+                      <option value="1.25">1.25×</option>
+                      <option value="1.5">1.5×</option>
+                      <option value="1.75">1.75×</option>
+                      <option value="2">2×</option>
+                      <option value="2.5">2.5×</option>
+                      <option value="3">3×</option>
+                      <option value="4">4×</option>
+                    </select>
+                    <button id="rate-increase" class="rate-step" type="button" aria-label="Faster" title="Faster (+0.1×)">
+                      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12M12 6v12"/></svg>
+                    </button>
+                  </div>
                 </div>
               </div>
             </article>
@@ -680,6 +692,14 @@
                       <small>Turn off interface animations</small>
                     </span>
                   </label>
+
+                  <label id="hardware-acceleration-row" class="checkbox-row hidden" for="hardware-acceleration">
+                    <input id="hardware-acceleration" class="form-checkbox" type="checkbox" />
+                    <span class="checkbox-content">
+                      <strong>Hardware-accelerated rendering</strong>
+                      <small>Smoother on high-refresh displays. Turn off if the window renders blank. Applies after restarting Faro.</small>
+                    </span>
+                  </label>
                 </section>
 
                 <!-- Page: Playback -->
@@ -703,6 +723,14 @@
                     <span class="checkbox-content">
                       <strong>Pause on Disconnect</strong>
                       <small>Automatically pause media playback before leaving a room</small>
+                    </span>
+                  </label>
+
+                  <label class="checkbox-row" for="auto-offer-enabled">
+                    <input id="auto-offer-enabled" class="form-checkbox" type="checkbox" checked />
+                    <span class="checkbox-content">
+                      <strong>Share files automatically</strong>
+                      <small>When the queue plays a file some people don't have, stream your copy to them</small>
                     </span>
                   </label>
 
@@ -832,6 +860,6 @@
       </div>
     </div>
 
-    <script type="module" src="/app.js?v=21"></script>
+    <script type="module" src="/app.js?v=23"></script>
   </body>
 </html>

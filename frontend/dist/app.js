@@ -182,7 +182,7 @@ const pauseIcon = '<svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"
 
 const defaultPreferences = {
   theme: "system", compact: false, reduceMotion: false, skipSeconds: 10, wheelSound: true,
-  pauseOnLeave: false, sponsorBlock: true, youtubeQualities: {}, name: "", player: "mpv", executable: "",
+  pauseOnLeave: false, sponsorBlock: true, autoOffer: true, youtubeQualities: {}, name: "", player: "mpv", executable: "",
   playerArgs: "", publicHost: "localhost", listenAddress: ":8999", room: "watch"
 };
 let preferences = loadPreferences();
@@ -338,6 +338,7 @@ function refreshTimelineSegments() {
   timelineSegmentKey = key;
   timelineSegments = [];
   renderTimelineSegments();
+  refreshRateRange();
   if (!media || !hasBackend) return;
   fetchTimelineSegments(key);
 }
@@ -440,6 +441,7 @@ function applyPreferences() {
   }
   if ($("pause-on-leave")) $("pause-on-leave").checked = Boolean(preferences.pauseOnLeave);
   if ($("sponsorblock-enabled")) $("sponsorblock-enabled").checked = preferences.sponsorBlock !== false;
+  if ($("auto-offer-enabled")) $("auto-offer-enabled").checked = preferences.autoOffer !== false;
   if ($("wheel-sound-enabled")) $("wheel-sound-enabled").checked = preferences.wheelSound !== false;
 }
 
@@ -654,7 +656,7 @@ function render() {
   $("owner-invite").classList.toggle("hidden", me?.role !== "owner");
   $("settings-owner-invite").classList.toggle("hidden", me?.role !== "owner");
 
-  for (const id of ["pause", "position", "back-ten", "forward-ten", "playback-rate", "add-file", "empty-add-file", "add-stream-btn", "add-playlist", "shuffle-playlist", "shuffle-all", "load-playlist-file", "save-playlist-file", "clear-playlist", "spin-wheel", "wheel-spin-again", "previous-media", "next-media"]) setDisabled(id, !allowed);
+  for (const id of ["pause", "position", "back-ten", "forward-ten", "add-file", "empty-add-file", "add-stream-btn", "add-playlist", "shuffle-playlist", "shuffle-all", "load-playlist-file", "save-playlist-file", "clear-playlist", "spin-wheel", "wheel-spin-again", "previous-media", "next-media"]) setDisabled(id, !allowed);
   setDisabled("add-playlist", !allowed || addingPlaylistURL);
 
   const media = me?.media || snapshot.participants.find((person) => person.media)?.media;
@@ -702,7 +704,11 @@ function render() {
   renderConnectionInfo();
 }
 
-const playbackRates = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+const playbackRates = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
+const rateStep = 0.1;
+// The backend reports the speeds the room and this participant's player
+// support; until it answers, the protocol range is assumed.
+let rateRange = { min: 0.25, max: 4, supported: true };
 function rateLabel(value) { return `${Number(value.toFixed(2))}×`; }
 
 // The speed menu lists the standard rates. A rate set elsewhere (for example
@@ -720,14 +726,43 @@ function updateRateControl(rate) {
   }
   if (control.value !== key) control.value = key;
   control.dataset.value = key;
+  for (const option of control.options) option.disabled = Number(option.value) < rateRange.min || Number(option.value) > rateRange.max;
+  const unavailable = !canControl() || !rateRange.supported;
+  control.disabled = unavailable;
+  $("rate-decrease").disabled = unavailable || value <= rateRange.min + 1e-9;
+  $("rate-increase").disabled = unavailable || value >= rateRange.max - 1e-9;
+  const title = rateRange.supported ? "Playback speed" : "This media player cannot change playback speed";
+  control.title = title;
+  control.parentElement.title = title;
   control._syncCustomSelect?.();
 }
 
+// Fine steps between the presets, rounded so repeated steps never drift.
+function nudgePlaybackRate(direction) {
+  if (!canControl() || !rateRange.supported) return;
+  const current = Number($("playback-rate").dataset.value || 1);
+  const target = Math.round(clamp(current + direction * rateStep, rateRange.min, rateRange.max) * 100) / 100;
+  if (target !== current) invoke("SetRate", target).catch(showError);
+}
+
+async function refreshRateRange() {
+  if (!hasBackend || !snapshot) return;
+  try {
+    const next = await invoke("PlaybackRateRange");
+    if (next && typeof next.supported === "boolean") rateRange = next;
+  } catch (_) {}
+  if (snapshot) updateRateControl(snapshot.playback.rate || 1);
+}
+
 function stepPlaybackRate(direction) {
-  if (!canControl()) return;
+  if (!canControl() || !rateRange.supported) return;
   const current = Number($("playback-rate").dataset.value || 1);
   const index = playbackRates.reduce((best, candidate, candidateIndex) => Math.abs(candidate - current) < Math.abs(playbackRates[best] - current) ? candidateIndex : best, 0);
-  const target = playbackRates[clamp(index + direction, 0, playbackRates.length - 1)];
+  let next = clamp(index + direction, 0, playbackRates.length - 1);
+  // From an in-between speed, the first step lands on the neighbouring preset.
+  if (direction > 0 && playbackRates[index] > current) next = index;
+  if (direction < 0 && playbackRates[index] < current) next = index;
+  const target = clamp(playbackRates[next], rateRange.min, rateRange.max);
   if (target !== current) invoke("SetRate", target).catch(showError);
 }
 
@@ -1117,7 +1152,9 @@ function renderPlaylist() {
     actions.className = "queue-row-actions";
 
     if (isYouTubeURL(item.url)) {
-      const qualityButton = actionButton("Quality", () => showYouTubeQualityMenu(qualityButton, item.url), !allowed, `YouTube quality: ${savedYouTubeQuality(item.url) ? `${savedYouTubeQuality(item.url)}p` : "Auto"}`);
+      // Quality is a personal preference, so it stays available in moderated rooms.
+      const qualityButton = actionButton("Quality", () => showYouTubeQualityMenu(qualityButton, item.url), false, `YouTube quality: ${savedYouTubeQuality(item.url) ? `${savedYouTubeQuality(item.url)}p` : "Auto"}`);
+      qualityButton.setAttribute("aria-haspopup", "menu");
       actions.append(qualityButton);
     }
     if (!local && item.media) {
@@ -1407,6 +1444,7 @@ async function enterRoom(request) {
   setConnection({ state: "connected" });
   render();
   await invoke("SetSponsorBlockEnabled", preferences.sponsorBlock !== false);
+  await invoke("SetAutoOfferEnabled", preferences.autoOffer !== false);
   // Indexing can hash thousands of files. The room is already usable, so keep
   // discovery in the background and refresh availability as results arrive.
   void indexSavedDirectories();
@@ -1487,20 +1525,46 @@ function closePopovers() {
   document.querySelectorAll(".popover, .popover-menu").forEach((node) => node.classList.add("hidden"));
 }
 
-function menuButton(label, action, { checked = false, disabled = false, danger = false } = {}) {
+function menuButton(label, action, { checked = false, disabled = false, danger = false, hint = "" } = {}) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = `popover-btn ${danger ? "danger-item" : ""}`;
   button.disabled = disabled;
-  button.setAttribute("role", "menuitem");
+  button.setAttribute("role", checked ? "menuitemradio" : "menuitem");
+  if (checked) button.setAttribute("aria-checked", "true");
   const mark = document.createElement("span");
   mark.className = "menu-check";
   mark.textContent = checked ? "✓" : "";
   const text = document.createElement("span");
+  text.className = "menu-label";
   text.textContent = label;
   button.append(mark, text);
+  if (hint) {
+    const keys = document.createElement("kbd");
+    keys.className = "menu-hint";
+    keys.textContent = hint;
+    button.append(keys);
+  }
   button.onclick = action;
   return button;
+}
+
+function menuSeparator() {
+  const line = document.createElement("hr");
+  line.className = "popover-sep";
+  return line;
+}
+
+// Drops separators at the edges and doubled ones left by omitted items.
+function tidyMenu(items) {
+  const result = [];
+  for (const item of items.filter(Boolean)) {
+    const separator = item.classList.contains("popover-sep");
+    if (separator && (!result.length || result.at(-1).classList.contains("popover-sep"))) continue;
+    result.push(item);
+  }
+  while (result.length && result.at(-1).classList.contains("popover-sep")) result.pop();
+  return result;
 }
 
 function enhanceSelect(select) {
@@ -1707,6 +1771,8 @@ $("forward-ten").onclick = () => {
   const target = projectedPlaybackPosition() + Number(preferences.skipSeconds || 10);
   invoke("Seek", duration ? Math.min(duration, target) : target).catch(showError);
 };
+$("rate-decrease").onclick = () => nudgePlaybackRate(-1);
+$("rate-increase").onclick = () => nudgePlaybackRate(1);
 $("playback-rate").onchange = (event) => {
   const rate = Number(event.target.value);
   if (rate > 0 && rate !== Number(event.target.dataset.value)) invoke("SetRate", rate).catch(showError);
@@ -1746,7 +1812,7 @@ $("add-playlist").onclick = async () => {
   try {
     const info = await prepareYouTubeSource(source);
     const label = info?.title || playlistSourceLabel(source);
-    await updatePlaylist([...playlistInputs(), { id: "", label, source, url: "", media: null }]);
+    await updatePlaylist([...playlistInputs(), { id: "", label, source, url: "", media: null, durationSeconds: Number(info?.duration) || 0 }]);
     input.value = "";
     streamDrawer.classList.add("hidden");
   } catch (error) { showError(error); }
@@ -1893,7 +1959,7 @@ function activityDescription(activity) {
       }
       return `${name} seeked to ${formatTime(activity.positionSeconds)}`;
     }
-    case "playback.rate": return `${name} changed speed to ${Number(activity.rate || 1).toFixed(2).replace(/\.00$/, "")}×`;
+    case "playback.rate": return `${name} changed speed to ${rateLabel(Number(activity.rate || 1))}`;
     case "playlist.updated": return `${name} updated the queue · ${activity.itemCount} item${activity.itemCount === 1 ? "" : "s"}`;
     case "playlist.played": return `${name} played ${activity.itemLabel || "a queue item"}`;
     case "wheel.started": return `${name} spun the wheel`;
@@ -1913,10 +1979,13 @@ function activityIcon(action) {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/></svg>';
 }
 
+const timelineRows = new WeakMap();
+
 function renderActivity(entry) {
   const activity = entry.value;
   const row = document.createElement("div");
   row.className = "activity-msg-row";
+  timelineRows.set(row, entry);
   const icon = document.createElement("span");
   icon.className = "activity-msg-icon";
   icon.innerHTML = activityIcon(activity.action);
@@ -1934,6 +2003,7 @@ function renderChatMessage(entry) {
   const message = entry.value;
   const row = document.createElement("div");
   row.className = "chat-msg-row";
+  timelineRows.set(row, entry);
   const avatar = document.createElement("div");
   avatar.className = "chat-msg-avatar";
   avatar.textContent = (message.participantName || "?").slice(0, 1).toUpperCase();
@@ -1972,7 +2042,9 @@ function renderChat() {
 
 // Menus and settings dialog
 document.addEventListener("click", (event) => {
-  if (!event.target.closest(".popover, .popover-menu") && !event.target.closest("#playlist-more") && !event.target.closest("#room-chip") && !event.target.closest("#leave-room") && !event.target.closest("#connection-btn")) {
+  // A click on an element that opens a menu must not close the menu it just
+  // opened (the quality menu can open before its click finishes bubbling).
+  if (!event.target.closest(".popover, .popover-menu, [aria-haspopup]")) {
     closePopovers();
   }
 });
@@ -2055,6 +2127,10 @@ $("sponsorblock-enabled").onchange = (event) => {
   if (snapshot) invoke("SetSponsorBlockEnabled", event.target.checked).catch(showError);
 };
 $("wheel-sound-enabled").onchange = (event) => savePreferences({ wheelSound: event.target.checked });
+$("auto-offer-enabled").onchange = (event) => {
+  savePreferences({ autoOffer: event.target.checked });
+  if (snapshot) invoke("SetAutoOfferEnabled", event.target.checked).catch(showError);
+};
 const systemThemeQuery = matchMedia("(prefers-color-scheme: dark)");
 const systemThemeChanged = () => {
   if (preferences.theme === "system") applyPreferences();
@@ -2158,24 +2234,159 @@ document.addEventListener("contextmenu", (event) => {
     return;
   }
 
-  if (event.target.closest("#now-playing-drop") && snapshot) {
+  // Every other area gets a menu for what it shows. Items mirror the visible
+  // controls, so their enabled state follows the same permissions.
+  const act = (task) => () => { closePopovers(); task(); };
+  const open = (items) => {
+    const menu = tidyMenu(items);
+    if (!menu.length) return;
     event.preventDefault();
-    const title = $("media-title").textContent;
-    const source = selectedSourceURL();
-    const items = [menuButton("Copy media title", () => { closePopovers(); copyText(title, "Title copied"); }, { disabled: title === "No media loaded" })];
-    if (/^https?:\/\//i.test(source)) items.push(menuButton("Copy video URL", () => { closePopovers(); copyText(source, "URL copied"); }));
-    showContextMenu(event, items);
+    showContextMenu(event, menu);
+  };
+  const selectedText = String(getSelection()?.toString() || "").trim();
+  const copySelection = selectedText ? [menuButton("Copy", act(() => copyText(selectedText, "Copied")), { hint: "Ctrl+C" }), menuSeparator()] : [];
+  const windowItems = () => document.body.dataset.platform === "mac" ? [] : [
+    menuSeparator(),
+    menuButton("Minimize", act(() => wails?.Window?.Minimise())),
+    menuButton($("window-maximise").dataset.maximised === "true" ? "Restore" : "Maximize", act(() => wails?.Window?.ToggleMaximise())),
+    menuButton("Close window", act(() => wails?.Window?.Close()))
+  ];
+  const chatFilterItems = () => [
+    ["all", "Show everything"], ["chat", "Chat only"], ["activity", "Activity only"]
+  ].map(([value, label]) => menuButton(label, act(() => document.querySelector(`[data-chat-filter="${value}"]`)?.click()), { checked: chatFilter === value }));
+  const clearChatItem = () => menuButton("Clear feed", act(() => $("clear-chat").click()), { disabled: !timeline.length });
+
+  if (event.target.closest("#wheel-dialog")) {
+    open([
+      ...copySelection,
+      menuButton("Spin again", act(() => $("wheel-spin-again").click()), { disabled: $("wheel-spin-again").disabled }),
+      menuButton("Close", act(dismissWheelWindow), { hint: "Esc" })
+    ]);
     return;
   }
 
-  const selectedText = String(getSelection()?.toString() || "").trim();
+  if (event.target.closest("dialog[open]")) {
+    open([...copySelection, menuButton("Close", act(() => event.target.closest("dialog").close()), { hint: "Esc" })]);
+    return;
+  }
+
+  const timelineRow = event.target.closest(".chat-msg-row, .activity-msg-row");
+  if (timelineRow && snapshot) {
+    const entry = timelineRows.get(timelineRow);
+    const isChat = entry?.kind === "chat";
+    const text = isChat ? entry.value.message : entry ? activityDescription(entry.value) : timelineRow.textContent;
+    open([
+      ...copySelection,
+      menuButton(isChat ? "Copy message" : "Copy text", act(() => copyText(text, "Copied"))),
+      isChat ? menuButton("Copy author name", act(() => copyText(entry.value.participantName, "Name copied"))) : null,
+      menuSeparator(), ...chatFilterItems(), menuSeparator(), clearChatItem()
+    ]);
+    return;
+  }
+
+  if (event.target.closest("#inspector-chat-panel") && snapshot) {
+    open([...copySelection, ...chatFilterItems(), menuSeparator(), clearChatItem()]);
+    return;
+  }
+
+  if (event.target.closest("#playlist-panel") && snapshot) {
+    const allowed = canControl(), count = snapshot.playlist.items.length;
+    open([
+      ...copySelection,
+      menuButton("Add media files…", act(() => chooseFiles()), { disabled: !allowed, hint: "Ctrl+O" }),
+      menuButton("Add folder…", act(() => $("add-folder").click()), { disabled: !allowed }),
+      menuButton("Add URL…", act(() => { streamDrawer.classList.remove("hidden"); $("playlist-source").focus(); }), { disabled: !allowed }),
+      menuSeparator(),
+      menuButton("Spin the wheel", act(openWheelWindow), { disabled: !allowed || count < 2 }),
+      menuButton("Shuffle upcoming", act(() => $("shuffle-playlist").click()), { disabled: !allowed || count < 2 }),
+      menuButton("Shuffle entire queue", act(() => $("shuffle-all").click()), { disabled: !allowed || count < 2 }),
+      menuSeparator(),
+      menuButton("Load playlist file…", act(loadPlaylistFromFile), { disabled: !allowed }),
+      menuButton("Save queue to file…", act(() => $("save-playlist-file").click()), { disabled: !count }),
+      menuButton("Copy queue as text", act(() => $("save-playlist").click()), { disabled: !count }),
+      menuSeparator(),
+      menuButton("Undo last queue change", act(() => $("undo-playlist").click()), { disabled: !allowed || !playlistHistory.length }),
+      menuButton("Clear queue…", act(() => $("clear-playlist").click()), { disabled: !allowed || !count, danger: true })
+    ]);
+    return;
+  }
+
+  if (event.target.closest("#inspector-participants-panel") && snapshot) {
+    const owner = self()?.role === "owner";
+    const setMode = (mode) => act(() => invoke("SetRoomMode", mode).catch(showError));
+    open([
+      ...copySelection,
+      menuButton("Copy invite link", act(() => $("copy-invite").click())),
+      owner ? menuButton("Copy owner recovery invite", act(() => copyInvite(true))) : null,
+      owner ? menuSeparator() : null,
+      owner ? menuButton("Everyone controls playback", setMode("collaborative"), { checked: snapshot.room.mode === "collaborative" }) : null,
+      owner ? menuButton("Moderators control playback", setMode("moderated"), { checked: snapshot.room.mode === "moderated" }) : null
+    ]);
+    return;
+  }
+
+  if (event.target.closest("#now-playing-drop") && snapshot) {
+    const allowed = canControl(), media = referenceMedia(), paused = snapshot.playback.paused;
+    const rate = Number(snapshot.playback.rate || 1), skip = Number(preferences.skipSeconds || 10);
+    const title = $("media-title").textContent, source = selectedSourceURL();
+    const speedAllowed = allowed && rateRange.supported;
+    open([
+      ...copySelection,
+      menuButton(paused ? "Play" : "Pause", act(() => $("pause").click()), { disabled: !allowed, hint: "Space" }),
+      menuButton(`Back ${skip} seconds`, act(() => $("back-ten").click()), { disabled: !allowed || !media, hint: "←" }),
+      menuButton(`Forward ${skip} seconds`, act(() => $("forward-ten").click()), { disabled: !allowed || !media, hint: "→" }),
+      menuSeparator(),
+      menuButton("Slower", act(() => stepPlaybackRate(-1)), { disabled: !speedAllowed || rate <= rateRange.min, hint: "<" }),
+      menuButton("Faster", act(() => stepPlaybackRate(1)), { disabled: !speedAllowed || rate >= rateRange.max, hint: ">" }),
+      menuButton("Normal speed", act(() => invoke("SetRate", 1).catch(showError)), { disabled: !speedAllowed || rate === 1 }),
+      menuSeparator(),
+      menuButton("Copy timestamp", act(() => copyText(formatTime(projectedPlaybackPosition()), "Timestamp copied")), { disabled: !media }),
+      menuButton("Copy media title", act(() => copyText(title, "Title copied")), { disabled: !media }),
+      /^https?:\/\//i.test(source) ? menuButton("Copy video URL", act(() => copyText(source, "URL copied"))) : null
+    ]);
+    return;
+  }
+
+  if (event.target.closest(".app-command-bar, .window-titlebar") && snapshot) {
+    open([
+      ...copySelection,
+      menuButton("Copy invite link", act(() => $("copy-invite").click())),
+      menuButton("Copy room name", act(() => $("copy-room-name").click())),
+      menuSeparator(),
+      menuButton("Server & session info…", act(() => $("stats-open-session").click())),
+      menuButton("Preferences…", act(() => { renderConnectionInfo(); $("settings-dialog").showModal(); }), { hint: "Ctrl+," }),
+      menuSeparator(),
+      menuButton("Leave room", act(() => leaveRoom().catch(showError)), { danger: true }),
+      ...windowItems()
+    ]);
+    return;
+  }
+
+  if (event.target.closest("#connect-view, .window-titlebar") && !snapshot) {
+    const joining = !$("join-form").classList.contains("hidden");
+    open([
+      ...copySelection,
+      menuButton("Join a room", act(() => switchConnectMode("join")), { checked: joining }),
+      menuButton("Host a room", act(() => switchConnectMode("host")), { checked: !joining }),
+      menuSeparator(),
+      menuButton("Paste invite link", act(() => {
+        switchConnectMode("join");
+        const input = $("join-invite");
+        input.focus();
+        pasteIntoControl(input, 0, input.value.length, input.value);
+      })),
+      menuButton("Switch theme", act(cycleTheme)),
+      ...windowItems()
+    ]);
+    return;
+  }
+
   if (!snapshot && !selectedText) return;
-  event.preventDefault();
-  const items = [];
-  if (selectedText) items.push(menuButton("Copy", () => { copyText(selectedText, "Copied"); closePopovers(); }));
-  if (snapshot) items.push(menuButton("Copy invite", () => { $("copy-invite").click(); closePopovers(); }));
-  if (snapshot) items.push(menuButton("Preferences…", () => { closePopovers(); renderConnectionInfo(); $("settings-dialog").showModal(); }));
-  showContextMenu(event, items);
+  open([
+    ...copySelection,
+    snapshot ? menuButton("Copy invite link", act(() => $("copy-invite").click())) : null,
+    snapshot ? menuButton("Preferences…", act(() => { renderConnectionInfo(); $("settings-dialog").showModal(); }), { hint: "Ctrl+," }) : null
+  ]);
 });
 
 // External file drops from Wails and browser drop
@@ -2204,7 +2415,7 @@ document.addEventListener("drop", async (event) => {
   if (/^https?:\/\//i.test(value.trim()) && snapshot && canControl()) {
     try {
       const source = value.trim(), info = await prepareYouTubeSource(source);
-      await updatePlaylist([...playlistInputs(), { id: "", label: info?.title || "", source, url: "", media: null }]);
+      await updatePlaylist([...playlistInputs(), { id: "", label: info?.title || "", source, url: "", media: null, durationSeconds: Number(info?.duration) || 0 }]);
     } catch (error) { showError(error); }
   }
 });
@@ -2310,4 +2521,16 @@ applyPreferences();
 renderMediaDirectories();
 renderConnectionInfo();
 if (hasBackend) invoke("WindowReady").catch(() => {});
+// Only WebKitGTK offers a choice of rendering path.
+if (hasBackend && document.body.dataset.platform === "linux") {
+  invoke("HardwareAcceleration").then((enabled) => {
+    $("hardware-acceleration").checked = Boolean(enabled);
+    $("hardware-acceleration-row").classList.remove("hidden");
+  }).catch(() => {});
+}
+$("hardware-acceleration").onchange = (event) => {
+  invoke("SetHardwareAcceleration", event.target.checked)
+    .then(() => showToast("Restart Faro to apply the rendering change"))
+    .catch((error) => { event.target.checked = !event.target.checked; showError(error); });
+};
 if (hasBackend) void checkForUpdates();

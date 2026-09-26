@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/Pouya-Amiri/Faro/frontend"
@@ -60,7 +61,7 @@ func main() {
 			InvisibleTitleBarHeight: 38,
 		},
 		Linux: application.LinuxWindow{
-			WebviewGpuPolicy: application.WebviewGpuPolicyNever,
+			WebviewGpuPolicy: webviewGpuPolicy(),
 		},
 	})
 	desktop.setWindow(mainWindow)
@@ -103,6 +104,24 @@ func main() {
 		_, _ = fmt.Fprintln(os.Stderr, "faro:", err)
 		os.Exit(1)
 	}
+}
+
+// webviewGpuPolicy chooses WebKitGTK's rendering path. CPU rendering is the
+// default: after the paint-cost fixes it holds 60 fps, while the GPU path is
+// known to render blank windows with some drivers. The Preferences switch
+// opts in (it helps most on high-refresh displays), and
+// FARO_HARDWARE_ACCELERATION=on|off overrides both for one launch.
+func webviewGpuPolicy() application.WebviewGpuPolicy {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("FARO_HARDWARE_ACCELERATION"))) {
+	case "1", "on", "true", "yes":
+		return application.WebviewGpuPolicyAlways
+	case "0", "off", "false", "no":
+		return application.WebviewGpuPolicyNever
+	}
+	if loadWindowSettings().HardwareAcceleration {
+		return application.WebviewGpuPolicyAlways
+	}
+	return application.WebviewGpuPolicyNever
 }
 
 // preferWayland makes the modern backend the first choice while retaining an

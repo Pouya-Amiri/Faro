@@ -183,8 +183,11 @@ window.solid-csd.faro, window.solid-csd.faro:backdrop {
 // windowCornerRadius matches libadwaita's window radius.
 const windowCornerRadius = 15
 
+// windowSettings is read before the window exists, so it lives in a small
+// file next to the app's other configuration rather than in the webview.
 type windowSettings struct {
-	Background string `json:"background"`
+	Background           string `json:"background,omitempty"`
+	HardwareAcceleration bool   `json:"hardwareAcceleration,omitempty"`
 }
 
 func windowSettingsPath() (string, error) {
@@ -195,33 +198,40 @@ func windowSettingsPath() (string, error) {
 	return filepath.Join(root, "faro", "window.json"), nil
 }
 
-func loadWindowBackground() application.RGBA {
+func loadWindowSettings() windowSettings {
+	var settings windowSettings
 	path, err := windowSettingsPath()
 	if err != nil {
-		return defaultWindowBackground
+		return settings
 	}
 	data, err := os.ReadFile(path)
-	if err != nil || len(data) > 4096 {
-		return defaultWindowBackground
+	if err != nil || len(data) > 4096 || json.Unmarshal(data, &settings) != nil {
+		return windowSettings{}
 	}
-	var settings windowSettings
-	if json.Unmarshal(data, &settings) != nil || !hexColour.MatchString(settings.Background) {
-		return defaultWindowBackground
+	if !hexColour.MatchString(settings.Background) {
+		settings.Background = ""
 	}
-	return parseHexColour(settings.Background)
+	return settings
 }
 
-func saveWindowBackground(colour string) error {
+// updateWindowSettings applies change to the stored settings and writes them
+// back atomically, keeping fields the change does not touch.
+func updateWindowSettings(change func(*windowSettings)) error {
 	path, err := windowSettingsPath()
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(windowSettings{Background: strings.ToLower(colour)})
+	settings := loadWindowSettings()
+	before := settings
+	change(&settings)
+	if settings == before {
+		if _, statErr := os.Stat(path); statErr == nil {
+			return nil
+		}
+	}
+	data, err := json.Marshal(settings)
 	if err != nil {
 		return err
-	}
-	if existing, readErr := os.ReadFile(path); readErr == nil && string(existing) == string(data) {
-		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -231,6 +241,27 @@ func saveWindowBackground(colour string) error {
 		return err
 	}
 	return os.Rename(temporary, path)
+}
+
+func loadWindowBackground() application.RGBA {
+	if background := loadWindowSettings().Background; background != "" {
+		return parseHexColour(background)
+	}
+	return defaultWindowBackground
+}
+
+func saveWindowBackground(colour string) error {
+	return updateWindowSettings(func(settings *windowSettings) { settings.Background = strings.ToLower(colour) })
+}
+
+// HardwareAcceleration reports whether GPU rendering is enabled for the next
+// launch.
+func (d *Desktop) HardwareAcceleration() bool { return loadWindowSettings().HardwareAcceleration }
+
+// SetHardwareAcceleration stores the GPU rendering preference. WebKit chooses
+// its rendering path when the window is created, so it applies on restart.
+func (d *Desktop) SetHardwareAcceleration(enabled bool) error {
+	return updateWindowSettings(func(settings *windowSettings) { settings.HardwareAcceleration = enabled })
 }
 
 func parseHexColour(colour string) application.RGBA {

@@ -87,3 +87,30 @@ func TestWindowControlStyle(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowSettingsKeepUnrelatedFields(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	desktop := &Desktop{}
+	if desktop.HardwareAcceleration() {
+		t.Fatal("hardware acceleration must default to off")
+	}
+	if err := desktop.SetHardwareAcceleration(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveWindowBackground("#112233"); err != nil {
+		t.Fatal(err)
+	}
+	if !desktop.HardwareAcceleration() {
+		t.Fatal("saving the background dropped the hardware acceleration setting")
+	}
+	if got := loadWindowBackground(); got != application.NewRGB(0x11, 0x22, 0x33) {
+		t.Fatalf("background = %+v", got)
+	}
+	if err := desktop.SetHardwareAcceleration(false); err != nil {
+		t.Fatal(err)
+	}
+	if desktop.HardwareAcceleration() || loadWindowBackground() != application.NewRGB(0x11, 0x22, 0x33) {
+		t.Fatal("turning acceleration off changed the other settings")
+	}
+}
