@@ -135,6 +135,7 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 			}
 			if event.Chat != nil {
 				s.sink(Event{Kind: "chat", Chat: event.Chat})
+				s.showChatInPlayer(event.Chat)
 			}
 			if event.Activity != nil {
 				s.sink(Event{Kind: "activity", Activity: event.Activity})

@@ -64,3 +64,15 @@ type Player interface {
 	Events() <-chan Event
 	Close() error
 }
+
+// ChatLine is one chat message drawn over the video.
+type ChatLine struct {
+	Author string
+	Text   string
+}
+
+// ChatOverlayPlayer can draw recent chat messages over the video. An empty
+// list removes the overlay.
+type ChatOverlayPlayer interface {
+	ShowChat(context.Context, []ChatLine) error
+}

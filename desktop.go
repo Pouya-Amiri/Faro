@@ -244,3 +244,5 @@ func mediaFileFilters() []application.FileFilter {
 }
 
 func (d *Desktop) SetAutoOfferEnabled(enabled bool) { d.service.SetAutoOfferEnabled(enabled) }
+
+func (d *Desktop) SetChatOverlayEnabled(enabled bool) { d.service.SetChatOverlayEnabled(enabled) }

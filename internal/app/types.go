@@ -174,6 +174,7 @@ type Service struct {
 	streamRequestID         string
 	streamReceiveItemID     string
 	streamIdentity          *protocol.Media
+	chat                    chatOverlay
 }
 
 func New(root context.Context, sink EventSink) *Service {

@@ -182,7 +182,7 @@ const pauseIcon = '<svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"
 
 const defaultPreferences = {
   theme: "system", compact: false, reduceMotion: false, skipSeconds: 10, wheelSound: true,
-  pauseOnLeave: false, sponsorBlock: true, autoOffer: true, youtubeQualities: {}, name: "", player: "mpv", executable: "",
+  pauseOnLeave: false, sponsorBlock: true, autoOffer: true, chatOverlay: true, youtubeQualities: {}, name: "", player: "mpv", executable: "",
   playerArgs: "", publicHost: "localhost", listenAddress: ":8999", room: "watch"
 };
 let preferences = loadPreferences();
@@ -442,6 +442,7 @@ function applyPreferences() {
   if ($("pause-on-leave")) $("pause-on-leave").checked = Boolean(preferences.pauseOnLeave);
   if ($("sponsorblock-enabled")) $("sponsorblock-enabled").checked = preferences.sponsorBlock !== false;
   if ($("auto-offer-enabled")) $("auto-offer-enabled").checked = preferences.autoOffer !== false;
+  if ($("chat-overlay-enabled")) $("chat-overlay-enabled").checked = preferences.chatOverlay !== false;
   if ($("wheel-sound-enabled")) $("wheel-sound-enabled").checked = preferences.wheelSound !== false;
 }
 
@@ -1469,6 +1470,7 @@ async function enterRoom(request) {
   render();
   await invoke("SetSponsorBlockEnabled", preferences.sponsorBlock !== false);
   await invoke("SetAutoOfferEnabled", preferences.autoOffer !== false);
+  await invoke("SetChatOverlayEnabled", preferences.chatOverlay !== false);
   // Indexing can hash thousands of files. The room is already usable, so keep
   // discovery in the background and refresh availability as results arrive.
   void indexSavedDirectories();
@@ -2151,6 +2153,10 @@ $("sponsorblock-enabled").onchange = (event) => {
   if (snapshot) invoke("SetSponsorBlockEnabled", event.target.checked).catch(showError);
 };
 $("wheel-sound-enabled").onchange = (event) => savePreferences({ wheelSound: event.target.checked });
+$("chat-overlay-enabled").onchange = (event) => {
+  savePreferences({ chatOverlay: event.target.checked });
+  invoke("SetChatOverlayEnabled", event.target.checked).catch(showError);
+};
 $("auto-offer-enabled").onchange = (event) => {
   savePreferences({ autoOffer: event.target.checked });
   if (snapshot) invoke("SetAutoOfferEnabled", event.target.checked).catch(showError);
