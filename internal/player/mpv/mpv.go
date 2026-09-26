@@ -496,6 +496,7 @@ func (m *MPV) emit(event player.Event) {
 func (m *MPV) Close() error {
 	var result error
 	m.once.Do(func() {
+		m.requestQuit()
 		close(m.done)
 		m.completeLoad(errors.New("player closed while loading media"))
 		result = m.stream.Close()
@@ -503,6 +504,24 @@ func (m *MPV) Close() error {
 		m.cleanup()
 	})
 	return result
+}
+
+// requestQuit asks the player to quit over IPC before its process is
+// signalled. For IINA the process Faro started is only the iina-cli wrapper,
+// so a signal alone would leave IINA's window open; the quit command reaches
+// IINA's own mpv core. The reply is not awaited.
+func (m *MPV) requestQuit() {
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		m.writeMu.Lock()
+		defer m.writeMu.Unlock()
+		_, _ = m.stream.Write([]byte(`{"command":["quit"]}` + "\n"))
+	}()
+	select {
+	case <-sent:
+	case <-time.After(300 * time.Millisecond):
+	}
 }
 
 func (m *MPV) Done() <-chan struct{} { return m.done }

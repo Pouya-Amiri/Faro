@@ -62,9 +62,11 @@ func main() {
 		Hidden:           revealWhenReady,
 		EnableFileDrop:   true,
 		BackgroundColour: background,
+		// No InvisibleTitleBarHeight: Wails starts a native window drag for any
+		// click in that band, which swallowed clicks on the top bar's buttons.
+		// The page's --wails-draggable regions already move the window.
 		Mac: application.MacWindow{
-			TitleBar:                application.MacTitleBarHiddenInset,
-			InvisibleTitleBarHeight: 38,
+			TitleBar: application.MacTitleBarHiddenInset,
 		},
 		Linux: application.LinuxWindow{
 			WebviewGpuPolicy: webviewGpuPolicy(),

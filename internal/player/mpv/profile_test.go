@@ -51,3 +51,17 @@ func TestIINAUsesLongLivedCLIWrapperAndDedicatedIPC(t *testing.T) {
 		}
 	}
 }
+
+func TestIINAExtraArgumentsBecomeMPVOptions(t *testing.T) {
+	args := Config{Profile: ProfileIINA, ExtraArgs: []string{"--fs", "--no-border", "--volume=50", "--mpv-mute=yes", "--pip", "--input-ipc-server=/tmp/other"}}.arguments("/tmp/faro.sock", "")
+	for _, want := range []string{"--mpv-fs", "--mpv-border=no", "--mpv-volume=50", "--mpv-mute=yes", "--pip", "--mpv-input-ipc-server=/tmp/faro.sock"} {
+		if !slices.Contains(args, want) {
+			t.Fatalf("IINA arguments %v do not contain %q", args, want)
+		}
+	}
+	for _, unwanted := range []string{"--fs", "--no-border", "--mpv-input-ipc-server=/tmp/other"} {
+		if slices.Contains(args, unwanted) {
+			t.Fatalf("IINA arguments %v still contain %q", args, unwanted)
+		}
+	}
+}

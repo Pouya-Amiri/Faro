@@ -57,6 +57,7 @@ func (c Config) arguments(ipcPath, initialSource string) []string {
 	// be accidentally overridden by saved Extra Arguments.
 	args := safeExtraArguments(c.ExtraArgs)
 	if c.Profile == ProfileIINA {
+		args = iinaArguments(args)
 		args = append(args,
 			// iina-cli otherwise exits immediately after launching the app. Faro
 			// owns this dedicated instance and needs the wrapper to track it.
@@ -84,6 +85,32 @@ func (c Config) arguments(ipcPath, initialSource string) []string {
 		args = append(args, initialSource)
 	}
 	return args
+}
+
+// iinaCLIOptions are iina-cli's own flags; everything else must reach IINA's
+// mpv core as --mpv-<option>.
+var iinaCLIOptions = map[string]bool{
+	"--separate-windows": true, "-w": true, "--stdin": true, "--no-stdin": true,
+	"--keep-running": true, "--music-mode": true, "--pip": true, "--help": true, "-h": true,
+}
+
+// iinaArguments rewrites mpv-style Extra Arguments for iina-cli, which only
+// accepts mpv options with an --mpv- prefix and not in their --no- form:
+// --fs becomes --mpv-fs and --no-border becomes --mpv-border=no.
+func iinaArguments(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		key := strings.ToLower(strings.SplitN(value, "=", 2)[0])
+		switch {
+		case !strings.HasPrefix(value, "--") || iinaCLIOptions[key] || strings.HasPrefix(key, "--mpv-"):
+			result = append(result, value)
+		case strings.HasPrefix(value, "--no-") && !strings.Contains(value, "="):
+			result = append(result, "--mpv-"+strings.TrimPrefix(value, "--no-")+"=no")
+		default:
+			result = append(result, "--mpv-"+strings.TrimPrefix(value, "--"))
+		}
+	}
+	return result
 }
 
 func safeExtraArguments(values []string) []string {

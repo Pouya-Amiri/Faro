@@ -38,6 +38,10 @@ func (d *Desktop) WindowReady() { d.revealWindow() }
 // WindowChrome returns the desktop's title bar button layout and double-click
 // behaviour.
 func (d *Desktop) WindowChrome() WindowChrome {
+	if runtime.GOOS == "darwin" {
+		// macOS draws its own traffic lights on the left of the window.
+		return WindowChrome{ButtonsSide: "left", Buttons: []string{}, DoubleClick: "toggle-maximize", Style: "mac"}
+	}
 	chrome := parseWindowChrome(platformWindowChrome())
 	chrome.Style = windowControlStyle(runtime.GOOS, os.Getenv("XDG_CURRENT_DESKTOP"))
 	return chrome
