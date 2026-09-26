@@ -48,7 +48,12 @@ func TestHubEnforcesRoomAndParticipantLimits(t *testing.T) {
 func TestRateWindowResets(t *testing.T) {
 	limiter := rateWindow{maximum: 2, window: time.Second}
 	now := time.Unix(10, 0)
-	if !limiter.allow(now) || !limiter.allow(now) || limiter.allow(now) {
+	// Separate calls: allow has side effects, which staticcheck cannot see
+	// through a repeated expression.
+	first := limiter.allow(now)
+	second := limiter.allow(now)
+	third := limiter.allow(now)
+	if !first || !second || third {
 		t.Fatal("rate limit did not stop the third command")
 	}
 	if !limiter.allow(now.Add(time.Second)) {

@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -54,13 +57,18 @@ func TestFormatSelectorUsesQualityCapWithFallback(t *testing.T) {
 }
 
 func TestYouTubeURLRecognition(t *testing.T) {
-	for _, source := range []string{"https://www.youtube.com/watch?v=x", "https://youtu.be/x", "https://m.youtube.com/watch?v=x"} {
+	for _, source := range []string{
+		"https://www.youtube.com/watch?v=x", "https://youtu.be/x", "https://m.youtube.com/watch?v=x",
+		"https://music.youtube.com/watch?v=x", "https://www.youtube-nocookie.com/embed/x", "HTTPS://WWW.YOUTUBE.COM/watch?v=x",
+	} {
 		if !IsURL(source) {
 			t.Fatalf("expected YouTube URL: %s", source)
 		}
 	}
-	if IsURL("https://example.com/watch?v=x") {
-		t.Fatal("non-YouTube URL was accepted")
+	for _, source := range []string{"https://example.com/watch?v=x", "https://youtube.com.evil.example/watch?v=x", "ftp://youtube.com/x", "youtube.com/watch?v=x"} {
+		if IsURL(source) {
+			t.Fatalf("non-YouTube URL was accepted: %s", source)
+		}
 	}
 }
 
@@ -112,5 +120,23 @@ func TestResolverRetriesWithAlternateYouTubeClient(t *testing.T) {
 func TestFallbackFormatUsesCombinedVideo(t *testing.T) {
 	if got := fallbackFormatSelector(1080); got != "best[height<=1080]" {
 		t.Fatalf("unexpected fallback selector: %s", got)
+	}
+}
+
+func TestRunCommandParsesStdoutOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script")
+	}
+	script := filepath.Join(t.TempDir(), "fake-yt-dlp")
+	body := "#!/bin/sh\necho 'Downloading deno runtime...' >&2\necho '{\"title\":\"x\"}'\n[ \"$1\" = fail ] && { echo 'ERROR: video unavailable' >&2; exit 1; }\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output, err := runCommand(context.Background(), script)
+	if err != nil || strings.TrimSpace(string(output)) != `{"title":"x"}` {
+		t.Fatalf("output = %q, err = %v", output, err)
+	}
+	if _, err := runCommand(context.Background(), script, "fail"); err == nil || !strings.Contains(err.Error(), "video unavailable") {
+		t.Fatalf("failure error = %v, want the stderr message", err)
 	}
 }

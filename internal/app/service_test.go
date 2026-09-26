@@ -1446,3 +1446,19 @@ func TestSelectedFileIsSharedAutomaticallyWithParticipantsWithoutIt(t *testing.T
 		t.Fatal("a file was shared although automatic sharing is off")
 	}
 }
+
+func TestLeaveRoomForgetsInvites(t *testing.T) {
+	service := New(context.Background(), nil)
+	service.invite = invite.Invite{Address: "127.0.0.1:8999", Room: "movie-night", Fingerprint: strings.Repeat("a", 64)}
+	service.ownerToken = strings.Repeat("o", 43)
+	if _, err := service.ParticipantInvite(); err != nil {
+		t.Fatalf("invite unavailable before leaving: %v", err)
+	}
+	service.LeaveRoom()
+	if value, err := service.OwnerInvite(); err == nil {
+		t.Fatalf("owner invite still available after leaving: %q", value)
+	}
+	if value, err := service.ParticipantInvite(); err == nil {
+		t.Fatalf("invite still available after leaving: %q", value)
+	}
+}

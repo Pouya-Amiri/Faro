@@ -30,7 +30,7 @@ func (Factory) StartPublisher(ctx context.Context, cfg streamtransport.Publisher
 	if derpMapURL != "" {
 		parsed, err := url.Parse(derpMapURL)
 		if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-			return nil, errors.New("Tailcat bootstrap map must be an absolute HTTPS URL")
+			return nil, errors.New("the Tailcat bootstrap map must be an absolute HTTPS URL")
 		}
 		derpMapURL = parsed.String()
 	}

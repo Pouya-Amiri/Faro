@@ -3,6 +3,7 @@ package mpv
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,7 +80,13 @@ func Start(ctx context.Context, cfg Config, initialSource string) (*MPV, error) 
 	if err != nil {
 		return nil, err
 	}
-	id := fmt.Sprintf("%d", time.Now().UnixNano())
+	// The random part keeps another local process from predicting the name
+	// and creating the pipe before mpv does.
+	nonce := make([]byte, 8)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	id := fmt.Sprintf("%d-%x", time.Now().UnixNano(), nonce)
 	ipcPath, cleanup, err := ipcAddress(id)
 	if err != nil {
 		return nil, err

@@ -384,11 +384,13 @@ function releaseScrubber(delay = 650) {
 
 function parseArguments(value) {
   const matches = value.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
-  return matches.map((item) => item.replace(/^("|')|("|')$/g, ""));
+  // Quotes group words, wherever they appear: --title="My Movie" becomes
+  // --title=My Movie, as a shell would pass it.
+  return matches.map((item) => item.replace(/"([^"]*)"|'([^']*)'/g, (_, double, single) => double ?? single));
 }
 
 function basename(path) { return String(path).split(/[\\/]/).filter(Boolean).pop() || path; }
-function isYouTubeURL(source) { return /^https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/|youtu\.be\/)/i.test(String(source || "").trim()); }
+function isYouTubeURL(source) { return /^https?:\/\/(?:(?:www\.|m\.|music\.)?youtube\.com|youtu\.be|(?:www\.)?youtube-nocookie\.com)(?:[\/?#:]|$)/i.test(String(source || "").trim()); }
 function self() { return snapshot?.participants?.find((person) => person.id === snapshot.selfId); }
 function canControl() { const me = self(); return snapshot?.room?.mode === "collaborative" || me?.role === "owner" || me?.role === "moderator"; }
 function playlistInputs() { return (snapshot?.playlist?.items || []).map(({ id, label, url, media }) => ({ id, label, url: url || "", media: media || null, source: "" })); }

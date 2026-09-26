@@ -41,7 +41,7 @@ func (m *MPV) ShowChat(ctx context.Context, lines []player.ChatLine) error {
 // breaks.
 func assEscape(text string) string {
 	text = strings.Join(strings.Fields(text), " ")
-	return strings.NewReplacer(`\`, "\\⁠", "{", `\{`, "}", `\}`).Replace(text)
+	return strings.NewReplacer(`\`, "\\\u2060", "{", `\{`, "}", `\}`).Replace(text)
 }
 
 func truncateRunes(text string, limit int) string {

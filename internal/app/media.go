@@ -805,7 +805,7 @@ func (s *Service) IndexMediaDirectory(directory string) (int, error) {
 	count := 0
 	err := filepath.WalkDir(directory, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			return skipUnreadable(directory, path, entry, walkErr)
 		}
 		if entry.IsDir() || !isMediaExtension(filepath.Ext(entry.Name())) {
 			return nil
@@ -855,6 +855,19 @@ func isMediaExtension(extension string) bool {
 	}
 }
 
+// skipUnreadable lets a directory walk continue past a subfolder or file it
+// cannot read, such as "System Volume Information" or a folder without
+// permission. Only an unreadable starting folder fails the walk.
+func skipUnreadable(root, path string, entry fs.DirEntry, walkErr error) error {
+	if path == root {
+		return walkErr
+	}
+	if entry != nil && entry.IsDir() {
+		return fs.SkipDir
+	}
+	return nil
+}
+
 func MediaFilesInDirectory(directory string, maximum int) ([]string, error) {
 	directory = strings.TrimSpace(directory)
 	if directory == "" {
@@ -866,13 +879,13 @@ func MediaFilesInDirectory(directory string, maximum int) ([]string, error) {
 	files := make([]string, 0)
 	err := filepath.WalkDir(directory, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			return skipUnreadable(directory, path, entry, walkErr)
 		}
 		if entry.IsDir() || !isMediaExtension(filepath.Ext(entry.Name())) {
 			return nil
 		}
 		if len(files) >= maximum {
-			return errors.New("folder exceeds the 500-item playlist limit")
+			return fmt.Errorf("folder has more media files than the %d queue slots available", maximum)
 		}
 		files = append(files, path)
 		return nil
@@ -902,7 +915,7 @@ func ExpandMediaPaths(paths []string, maximum int) ([]string, error) {
 		}
 		remaining := maximum - len(files)
 		if remaining <= 0 {
-			return nil, errors.New("dropped media exceeds the 500-item playlist limit")
+			return nil, fmt.Errorf("dropped media exceeds the %d-item queue limit", maximum)
 		}
 		directoryFiles, err := MediaFilesInDirectory(path, remaining)
 		if err != nil {
@@ -911,7 +924,7 @@ func ExpandMediaPaths(paths []string, maximum int) ([]string, error) {
 		files = append(files, directoryFiles...)
 	}
 	if len(files) > maximum {
-		return nil, errors.New("dropped media exceeds the 500-item playlist limit")
+		return nil, fmt.Errorf("dropped media exceeds the %d-item queue limit", maximum)
 	}
 	return files, nil
 }

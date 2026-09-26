@@ -538,4 +538,9 @@ func (s *Service) Shutdown() {
 func (s *Service) LeaveRoom() {
 	s.Disconnect()
 	s.StopServer()
+	// Invites describe the room just left; copying one afterwards would hand
+	// out a stale (or, with the owner token, sensitive) link.
+	s.mu.Lock()
+	s.invite, s.ownerToken = invite.Invite{}, ""
+	s.mu.Unlock()
 }

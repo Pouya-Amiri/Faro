@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,14 +101,16 @@ func darwinExecutableDirectories(home string) []string {
 }
 
 func IsURL(source string) bool {
-	lower := strings.ToLower(strings.TrimSpace(source))
-	return strings.HasPrefix(lower, "https://youtube.com/") ||
-		strings.HasPrefix(lower, "https://www.youtube.com/") ||
-		strings.HasPrefix(lower, "https://m.youtube.com/") ||
-		strings.HasPrefix(lower, "https://youtu.be/") ||
-		strings.HasPrefix(lower, "http://youtube.com/") ||
-		strings.HasPrefix(lower, "http://www.youtube.com/") ||
-		strings.HasPrefix(lower, "http://youtu.be/")
+	parsed, err := url.Parse(strings.TrimSpace(source))
+	if err != nil || parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return false
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
+		"youtu.be", "youtube-nocookie.com", "www.youtube-nocookie.com":
+		return true
+	}
+	return false
 }
 
 func (r *Resolver) Inspect(ctx context.Context, source string) (Info, error) {
@@ -222,10 +225,17 @@ func fallbackFormatSelector(height int) string {
 	return "best[height<=" + strconv.Itoa(height) + "]"
 }
 
+// runCommand returns stdout only: yt-dlp and the JavaScript runtime it
+// starts print notices on stderr, which would corrupt the JSON on stdout.
+// Stderr becomes the error message when the command fails.
 func runCommand(ctx context.Context, executable string, args ...string) ([]byte, error) {
-	output, err := newCommandContext(ctx, executable, args...).CombinedOutput()
+	output, err := newCommandContext(ctx, executable, args...).Output()
 	if err != nil {
-		message := strings.TrimSpace(string(output))
+		var stderr []byte
+		if exitErr := (*exec.ExitError)(nil); errors.As(err, &exitErr) {
+			stderr = exitErr.Stderr
+		}
+		message := strings.TrimSpace(string(stderr))
 		if len(message) > 1200 {
 			message = message[len(message)-1200:]
 		}
