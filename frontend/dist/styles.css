@@ -598,6 +598,7 @@ svg { display: block; flex: 0 0 auto; }
 .badge-success::before { background: var(--success); }
 .badge-warning { color: var(--warning); }
 .badge-warning::before { background: var(--warning); }
+.badge-kind { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .badge-kind::before { content: "·"; color: var(--line-strong); }
 .media-title-heading { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mismatch-banner { position: absolute; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--danger); }

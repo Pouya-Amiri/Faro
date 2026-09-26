@@ -50,6 +50,10 @@ type StreamStatus struct {
 	State   string `json:"state"`
 	OfferID string `json:"offerId,omitempty"`
 	Route   string `json:"route,omitempty"`
+	// Cache progress of an active stream, reported about once a second.
+	CachedBytes    int64   `json:"cachedBytes,omitempty"`
+	TotalBytes     int64   `json:"totalBytes,omitempty"`
+	BytesPerSecond float64 `json:"bytesPerSecond,omitempty"`
 }
 
 type ConnectionStatus struct {

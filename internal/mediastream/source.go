@@ -24,10 +24,16 @@ import (
 )
 
 const (
-	upstreamPath       = "/v1/media"
-	defaultMaxRange    = int64(4 * 1024 * 1024)
-	defaultConcurrency = 8
-	maxRequestBytes    = int64(64 * 1024)
+	upstreamPath    = "/v1/media"
+	defaultMaxRange = int64(4 * 1024 * 1024)
+	// defaultConcurrency bounds simultaneous range reads across all viewers of
+	// one offer. Each viewer fetches several ranges in parallel.
+	defaultConcurrency = 32
+	// connectionIdle is how long a connection may stall before it is dropped.
+	// It applies to each read and write, not to a whole response: a slow link
+	// may take minutes over a 4 MiB range as long as bytes keep moving.
+	connectionIdle  = 30 * time.Second
+	maxRequestBytes = int64(64 * 1024)
 )
 
 type SourceConfig struct {
@@ -149,9 +155,9 @@ func (s *Source) HandleConn(conn net.Conn) {
 	defer conn.Close()
 	limited := &requestReader{conn: conn}
 	reader := bufio.NewReader(limited)
-	writer := bufio.NewWriter(conn)
+	writer := bufio.NewWriter(deadlineWriter{conn})
 	for {
-		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(connectionIdle))
 		limited.remaining = maxRequestBytes
 		request, err := http.ReadRequest(reader)
 		if err != nil {
@@ -171,6 +177,14 @@ func (s *Source) HandleConn(conn net.Conn) {
 			return
 		}
 	}
+}
+
+// deadlineWriter renews the write deadline before every write.
+type deadlineWriter struct{ conn net.Conn }
+
+func (w deadlineWriter) Write(data []byte) (int, error) {
+	_ = w.conn.SetWriteDeadline(time.Now().Add(connectionIdle))
+	return w.conn.Write(data)
 }
 
 type requestReader struct {

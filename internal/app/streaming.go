@@ -526,10 +526,46 @@ func (s *Service) activateStream(ctx context.Context, client *faroclient.Client,
 		previous.Close()
 	}
 	s.sink(Event{Kind: "stream", Stream: &StreamStatus{State: "active", OfferID: grant.OfferID, Route: "direct"}})
+	go s.reportStreamProgress(gateway, grant.OfferID)
 	if _, err := s.finishMediaTransition(openCtx, mediaPlayer, localClockSnapshot(client).Playback.Paused, nil); err != nil {
 		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "stream_sync", Message: err.Error()}})
 	}
 	finished = true
+}
+
+// reportStreamProgress emits the active gateway's cache progress about once a
+// second, until the stream ends or the whole file is cached.
+func (s *Service) reportStreamProgress(gateway *mediastream.Gateway, offerID string) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	last, lastAt := gateway.Progress().ReceivedBytes, time.Now()
+	for {
+		select {
+		case <-s.root.Done():
+			return
+		case <-ticker.C:
+		}
+		s.mu.Lock()
+		current := s.streamGateway == gateway
+		s.mu.Unlock()
+		if !current {
+			return
+		}
+		progress, now := gateway.Progress(), time.Now()
+		rate := float64(progress.ReceivedBytes-last) / now.Sub(lastAt).Seconds()
+		last, lastAt = progress.ReceivedBytes, now
+		complete := progress.TotalBytes > 0 && progress.CachedBytes >= progress.TotalBytes
+		if complete {
+			rate = 0
+		}
+		s.sink(Event{Kind: "stream", Stream: &StreamStatus{
+			State: "active", OfferID: offerID, Route: "direct",
+			CachedBytes: progress.CachedBytes, TotalBytes: progress.TotalBytes, BytesPerSecond: rate,
+		}})
+		if complete {
+			return
+		}
+	}
 }
 
 func (s *Service) failStreamActivation(client *faroclient.Client, grant protocol.MediaStreamGranted, pending *pendingStream, gateway *mediastream.Gateway, code string, cause error) {

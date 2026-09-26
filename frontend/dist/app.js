@@ -663,8 +663,7 @@ function render() {
   const title = media?.title || "No media loaded";
   $("media-title").textContent = title;
   $("media-title").title = title;
-  const mediaSourceKind = streamState.state === "active" ? "Direct P2P" : media?.fingerprint ? "Local media" : "Stream";
-  $("media-kind").textContent = media ? `${media.sizeBytes ? formatBytes(media.sizeBytes) + " · " : ""}${mediaSourceKind}` : "No media loaded";
+  renderMediaKind(media);
   const mismatches = media ? snapshot.participants.filter((person) => person.media && person.media.fingerprint !== media.fingerprint) : [];
   $("media-warning").classList.toggle("hidden", mismatches.length === 0);
   $("media-warning").textContent = mismatches.length ? `${mismatches.length} participant${mismatches.length === 1 ? " has" : "s have"} different media loaded. Sync paused for mismatched copies.` : "";
@@ -1026,6 +1025,31 @@ function dismissWheelWindow() {
   if (activeWheel) dismissedWheelID = activeWheel.id;
   cancelAnimationFrame(wheelAnimation);
   if ($("wheel-dialog").open) $("wheel-dialog").close();
+}
+
+function renderMediaKind(media) {
+  const badge = $("media-kind");
+  if (!media) {
+    badge.textContent = "No media loaded";
+    badge.title = "";
+    return;
+  }
+  const parts = media.sizeBytes ? [formatBytes(media.sizeBytes)] : [];
+  if (streamState.state === "active") {
+    parts.push("Direct P2P");
+    const { cachedBytes = 0, totalBytes = 0, bytesPerSecond = 0 } = streamState;
+    if (totalBytes > 0) {
+      const percent = Math.floor(cachedBytes / totalBytes * 100);
+      parts.push(cachedBytes >= totalBytes ? "Cached" : `${percent}% cached`);
+      if (bytesPerSecond >= 1024 && cachedBytes < totalBytes) parts.push(`${formatBytes(bytesPerSecond)}/s`);
+    }
+  } else {
+    parts.push(media.fingerprint ? "Local media" : "Stream");
+  }
+  badge.textContent = parts.join(" · ");
+  badge.title = streamState.state === "active" && streamState.totalBytes > 0
+    ? `${formatBytes(streamState.cachedBytes) || "0 B"} of ${formatBytes(streamState.totalBytes)} cached on this device`
+    : "";
 }
 
 function formatBytes(bytes) {
@@ -2458,8 +2482,18 @@ function receive(event) {
     if (event.snapshot.playlistWheel) showWheel(event.snapshot.playlistWheel, event.serverNowUnixMs);
   }
   if (event.stream) {
-    streamState = { state: event.stream.state || "idle", offerId: event.stream.offerId || "", route: event.stream.route || "" };
-    if (snapshot) render();
+    const next = event.stream;
+    if (next.totalBytes) {
+      // Progress ticks only refresh the badge, and a tick that arrives after
+      // the stream ended is ignored.
+      if (streamState.state === "active" && streamState.offerId === next.offerId) {
+        Object.assign(streamState, { cachedBytes: next.cachedBytes || 0, totalBytes: next.totalBytes, bytesPerSecond: next.bytesPerSecond || 0 });
+        if (snapshot) renderMediaKind(referenceMedia());
+      }
+    } else {
+      streamState = { state: next.state || "idle", offerId: next.offerId || "", route: next.route || "" };
+      if (snapshot) render();
+    }
   }
   if (event.wheel) showWheel(event.wheel, event.serverNowUnixMs);
   if (event.chat) addChat(event.chat);
