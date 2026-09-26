@@ -128,6 +128,11 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 			if event.Type == protocol.TypePlaylistUpdated || event.Type == protocol.TypeStateSnapshot || event.Type == protocol.TypeStreamOffersUpdated {
 				go s.reconcilePlaylistStreams(ctx, client)
 			}
+			switch event.Type {
+			case protocol.TypePlaylistUpdated, protocol.TypeStateSnapshot, protocol.TypeStreamOffersUpdated,
+				protocol.TypeMediaUpdated, protocol.TypeParticipantsUpdated:
+				s.scheduleAutoOffer(ctx, client)
+			}
 			if event.Chat != nil {
 				s.sink(Event{Kind: "chat", Chat: event.Chat})
 			}

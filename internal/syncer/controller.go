@@ -25,6 +25,7 @@ type Controller struct {
 	mu             sync.Mutex
 	correctionRate float64
 	nominalRate    float64
+	remoteRate     float64
 	player         player.Player
 	sender         PlaybackSender
 	serverNow      func() time.Time
@@ -45,6 +46,9 @@ func New(mediaPlayer player.Player, sender PlaybackSender, serverNow func() time
 func (c *Controller) ApplyRemote(ctx context.Context, remote protocol.Playback, forceSeek bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if remote.Rate > 0 {
+		c.remoteRate = remote.Rate
+	}
 	local, err := c.player.State(ctx)
 	if err != nil {
 		return err
@@ -98,14 +102,29 @@ func (c *Controller) PublishLocal(ctx context.Context, seek bool) error {
 	rate := state.Rate
 	if c.nominalRate > 0 && math.Abs(rate-c.correctionRate) < .001 {
 		rate = c.nominalRate
-	}
-	if rate <= 0 {
-		rate = 1
+	} else {
+		rate = NominalRate(c.remoteRate, rate)
 	}
 	return c.sender.SetPlayback(protocol.PlaybackSet{
 		PositionSeconds: math.Max(0, projectedPosition(state)),
 		Paused:          state.Paused, Rate: rate, Seek: seek,
 	})
+}
+
+// NominalRate is the playback rate a participant should publish when their
+// player reports observed. The controller nudges each player's speed by up to
+// maxRateCorrection to remove drift, so a rate within that band of the room
+// rate is the room rate, not a deliberate change; publishing it would turn a
+// transient correction such as 1.03 into everybody's speed. Deliberate rates
+// are rounded to hundredths.
+func NominalRate(room, observed float64) float64 {
+	if observed <= 0 {
+		observed = 1
+	}
+	if room > 0 && math.Abs(observed/room-1) <= maxRateCorrection+0.0005 {
+		return room
+	}
+	return math.Round(observed*100) / 100
 }
 
 func clamp(value, minimum, maximum float64) float64 {

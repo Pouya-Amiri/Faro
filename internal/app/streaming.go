@@ -42,6 +42,13 @@ func (s *Service) offerStream(path string, maxViewers int) error {
 func (s *Service) offerStreamForItem(path string, maxViewers int, itemID string) error {
 	s.streamOfferMu.Lock()
 	defer s.streamOfferMu.Unlock()
+	return s.offerStreamLocked(path, maxViewers, itemID, false)
+}
+
+// offerStreamLocked publishes the offer. The caller holds streamOfferMu, so an
+// automatic and an explicit share can never interleave; auto marks the offer
+// as automatic in the same step that records it.
+func (s *Service) offerStreamLocked(path string, maxViewers int, itemID string, auto bool) error {
 	client, err := s.connected()
 	if err != nil {
 		return err
@@ -115,6 +122,7 @@ func (s *Service) offerStreamForItem(path string, maxViewers int, itemID string)
 	s.mu.Lock()
 	if s.streamPublisher == publisher {
 		s.streamOfferItemID = itemID
+		s.streamOfferAuto = auto
 	}
 	s.mu.Unlock()
 	return nil
@@ -127,6 +135,11 @@ func (s *Service) StopOfferingStream() error {
 	if err != nil {
 		return err
 	}
+	// Stopping explicitly means "not this one": automatic sharing leaves the
+	// item alone until the selection moves on.
+	s.mu.Lock()
+	s.autoOfferSuppressedItem = s.streamOfferItemID
+	s.mu.Unlock()
 	return s.stopOfferingStream(client)
 }
 
@@ -154,6 +167,7 @@ func (s *Service) stopOfferingStream(client *faroclient.Client) error {
 		clear(s.streamCapabilities)
 		if withdrawErr == nil {
 			s.streamOfferID, s.streamOfferMedia, s.streamOfferItemID = "", nil, ""
+			s.streamOfferAuto = false
 		}
 	}
 	s.mu.Unlock()
@@ -611,6 +625,11 @@ func (s *Service) detachStreamingLocked() streamingResources {
 	s.streamPublisher, s.streamGateway = nil, nil
 	s.streamOfferID, s.streamOfferItemID, s.streamRequestID, s.streamReceiveItemID = "", "", "", ""
 	s.streamOfferMedia, s.streamIdentity = nil, nil
+	s.streamOfferAuto = false
+	if s.autoOfferTimer != nil {
+		s.autoOfferTimer.Stop()
+		s.autoOfferTimer, s.autoOfferKey = nil, ""
+	}
 	s.streamCapabilities = make(map[string]string)
 	s.pendingStreams = make(map[string]*pendingStream)
 	s.pendingRequestOffers = make(map[string]string)

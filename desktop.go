@@ -84,6 +84,8 @@ func (d *Desktop) Seek(seconds float64) error { return d.service.Seek(seconds) }
 
 func (d *Desktop) SetRate(rate float64) error { return d.service.SetRate(rate) }
 
+func (d *Desktop) PlaybackRateRange() app.RateRange { return d.service.PlaybackRateRange() }
+
 func (d *Desktop) StopOfferingStream() error { return d.service.StopOfferingStream() }
 
 func (d *Desktop) StreamingAvailable() bool { return d.service.StreamingAvailable() }
@@ -240,3 +242,5 @@ func mediaFileFilters() []application.FileFilter {
 		{DisplayName: "All files", Pattern: "*"},
 	}
 }
+
+func (d *Desktop) SetAutoOfferEnabled(enabled bool) { d.service.SetAutoOfferEnabled(enabled) }

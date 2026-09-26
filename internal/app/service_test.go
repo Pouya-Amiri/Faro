@@ -1261,3 +1261,188 @@ func TestReconnectInvalidatesFailedConnectionBeforeBackoff(t *testing.T) {
 		t.Fatal("reconnect did not stop after its session was cancelled")
 	}
 }
+
+func TestPausingDuringDriftCorrectionPublishesRoomRate(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	service := New(context.Background(), nil)
+	status, err := service.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "rate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Shutdown)
+	fake := newLifecyclePlayer()
+	service.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return fake, nil }
+	if err := service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Ada", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(mediaPath, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.OpenMedia(mediaPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetPaused(false); err != nil {
+		t.Fatal(err)
+	}
+	// The sync controller is catching up: the player runs 3% fast.
+	fake.mu.Lock()
+	fake.state.Rate = 1.03
+	fake.mu.Unlock()
+	for _, action := range []func() error{
+		func() error { return service.SetPaused(true) },
+		func() error { return service.Seek(12) },
+	} {
+		if err := action(); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := service.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Playback.Rate != 1 {
+			t.Fatalf("drift correction leaked into the room rate: %v", snapshot.Playback.Rate)
+		}
+	}
+}
+
+// minimalMP4 builds the smallest file the duration probe accepts: ftyp and a
+// moov box whose mvhd declares the duration.
+func minimalMP4(timescale, duration uint32) []byte {
+	box := func(kind string, payload []byte) []byte {
+		size := uint32(8 + len(payload))
+		return append([]byte{byte(size >> 24), byte(size >> 16), byte(size >> 8), byte(size), kind[0], kind[1], kind[2], kind[3]}, payload...)
+	}
+	be := func(value uint32) []byte {
+		return []byte{byte(value >> 24), byte(value >> 16), byte(value >> 8), byte(value)}
+	}
+	mvhd := append(append(append([]byte{0, 0, 0, 0}, make([]byte, 8)...), be(timescale)...), be(duration)...)
+	mvhd = append(mvhd, make([]byte, 80)...)
+	return append(box("ftyp", []byte("isom\x00\x00\x02\x00")), box("moov", box("mvhd", mvhd))...)
+}
+
+func TestSetPlaylistFillsInDurations(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	service := New(context.Background(), nil)
+	status, err := service.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "durations"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Shutdown)
+	if err := service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Ada", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(t.TempDir(), "episode.mp4")
+	if err := os.WriteFile(mediaPath, minimalMP4(1000, 1_425_000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetPlaylist([]PlaylistInput{
+		{Label: "Episode", Source: mediaPath},
+		{Label: "Talk", URL: "https://www.youtube.com/watch?v=abc", DurationSeconds: 3601},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := service.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Playlist.Items[0].Media.DurationSeconds; got != 1425 {
+		t.Fatalf("local file duration = %v, want 1425", got)
+	}
+	if got := snapshot.Playlist.Items[1].Media.DurationSeconds; got != 3601 {
+		t.Fatalf("link duration = %v, want 3601", got)
+	}
+}
+
+func TestSelectedFileIsSharedAutomaticallyWithParticipantsWithoutIt(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	network := streamtransport.NewFakeNetwork()
+	host, viewer := New(context.Background(), nil), New(context.Background(), nil)
+	host.streamFactory, viewer.streamFactory = network, network
+	status, err := host.StartServer(ServerRequest{Mode: "advanced",
+		ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "auto",
+		StreamingDERPMapURL: "https://derp.example.test/map.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	t.Cleanup(viewer.Shutdown)
+	host.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	viewer.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	for _, participant := range []struct {
+		service *Service
+		name    string
+	}{{host, "Host"}, {viewer, "Viewer"}} {
+		if err := participant.service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: participant.name, Player: "mpv"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 1000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}, {Label: "Next", URL: "https://example.test/next.mp4"}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor := func(message string, check func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !check() {
+			if time.Now().After(deadline) {
+				t.Fatal(message)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	offering := func() bool {
+		host.mu.RLock()
+		defer host.mu.RUnlock()
+		return host.streamPublisher != nil
+	}
+	receiving := func() bool {
+		viewer.mu.RLock()
+		defer viewer.mu.RUnlock()
+		return viewer.streamGateway != nil
+	}
+
+	// Selecting the file (as clicking it or a wheel win does) shares it
+	// without anyone pressing "Share file", and the viewer streams it.
+	if err := host.SelectPlaylist(0); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("the selected file was not shared automatically", offering)
+	waitFor("the viewer did not stream the automatically shared file", receiving)
+
+	// Moving to another item withdraws the automatic offer.
+	if err := host.SelectPlaylist(1); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("the automatic offer outlived its selection", func() bool { return !offering() })
+
+	// An explicit stop is respected until the selection changes.
+	if err := host.SelectPlaylist(0); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("the file was not shared again when reselected", offering)
+	if err := host.StopOfferingStream(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(4 * autoOfferStagger / 3)
+	if offering() {
+		t.Fatal("automatic sharing overrode an explicit stop")
+	}
+
+	// With the preference off nothing is shared.
+	host.SetAutoOfferEnabled(false)
+	if err := host.SelectPlaylist(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SelectPlaylist(0); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(4 * autoOfferStagger / 3)
+	if offering() {
+		t.Fatal("a file was shared although automatic sharing is off")
+	}
+}

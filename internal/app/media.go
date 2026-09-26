@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	faroclient "github.com/Pouya-Amiri/Faro/internal/client"
@@ -49,9 +50,17 @@ func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.
 	s.mu.Unlock()
 	if source == "" {
 		s.stopSelectedPlayback(client, "")
-		s.sink(Event{Kind: "error", Error: &protocol.Error{
-			Code: "media_missing", Message: fmt.Sprintf("Locate a local copy of %q before playing it", item.Label),
-		}})
+		// Someone who has the file shares it (or is about to), and the stream
+		// starts on its own; only a file nobody can provide is an error.
+		fingerprint := ""
+		if item.Media != nil {
+			fingerprint = item.Media.Fingerprint
+		}
+		if !(s.StreamingAvailable() && awaitingSharedCopy(client.Snapshot(), fingerprint)) {
+			s.sink(Event{Kind: "error", Error: &protocol.Error{
+				Code: "media_missing", Message: fmt.Sprintf("Locate a local copy of %q before playing it", item.Label),
+			}})
+		}
 		return
 	}
 	currentClient, mediaPlayer, err := s.ensurePlayer(playerStartAutomatic)
@@ -130,23 +139,41 @@ func (s *Service) SetPlaylist(inputs []PlaylistInput) error {
 		return err
 	}
 	items := make([]protocol.PlaylistItem, 0, len(inputs))
+	probes := make(map[int]string)
 	for _, input := range inputs {
-		item := protocol.PlaylistItem{ID: input.ID, Label: strings.TrimSpace(input.Label), URL: input.URL, Media: input.Media}
+		item := protocol.PlaylistItem{ID: input.ID, Label: strings.TrimSpace(input.Label), URL: input.URL, Media: cloneStreamMedia(input.Media)}
+		localPath := ""
 		if input.Source != "" || input.URL != "" {
-			result, inspectErr := mediaid.Inspect(firstNonEmpty(input.Source, input.URL), item.Label, 0)
+			result, inspectErr := mediaid.Inspect(firstNonEmpty(input.Source, input.URL), item.Label, max(input.DurationSeconds, 0))
 			if inspectErr != nil {
 				return inspectErr
 			}
 			item.URL, item.Media = result.URL, &result.Media
 			if result.Path != "" {
 				s.rememberSource(result.Media.Fingerprint, result.Path)
+				localPath = result.Path
 			}
 		}
 		if item.Label == "" && item.Media != nil {
 			item.Label = item.Media.Title
 		}
+		// Fill in durations the queue does not know yet: new local files, and
+		// items already in the queue for which this participant has a copy.
+		if item.Media != nil && item.Media.DurationSeconds <= 0 {
+			if input.DurationSeconds > 0 {
+				item.Media.DurationSeconds = input.DurationSeconds
+			} else if localPath == "" && item.URL == "" {
+				s.mu.RLock()
+				localPath = s.sources[item.Media.Fingerprint]
+				s.mu.RUnlock()
+			}
+			if item.Media.DurationSeconds <= 0 && localPath != "" {
+				probes[len(items)] = localPath
+			}
+		}
 		items = append(items, item)
 	}
+	probePlaylistDurations(items, probes)
 	if err := client.SetPlaylist(protocol.PlaylistSet{Items: items}); err != nil {
 		return err
 	}
@@ -173,6 +200,37 @@ func (s *Service) SetPlaylist(inputs []PlaylistInput) error {
 	// The event performs the same transfer reconciliation for every participant.
 	go s.reconcilePlaylistStreams(s.root, client)
 	return nil
+}
+
+// probePlaylistDurations reads durations for the given item indexes in
+// parallel. Container headers are read directly and are fast; the ffprobe
+// fallback for other formats is not, so a large folder drop is spread out.
+func probePlaylistDurations(items []protocol.PlaylistItem, paths map[int]string) {
+	if len(paths) == 0 {
+		return
+	}
+	type job struct {
+		index int
+		path  string
+	}
+	jobs := make(chan job)
+	var wait sync.WaitGroup
+	for range min(8, len(paths)) {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for next := range jobs {
+				if duration := mediaid.ProbeDuration(next.path); duration > 0 {
+					items[next.index].Media.DurationSeconds = duration
+				}
+			}
+		}()
+	}
+	for index, path := range paths {
+		jobs <- job{index: index, path: path}
+	}
+	close(jobs)
+	wait.Wait()
 }
 
 func (s *Service) SelectPlaylist(index int) error {
@@ -233,7 +291,7 @@ func (s *Service) OpenMedia(source string) error {
 		return err
 	}
 	_, err = s.finishMediaTransition(ctx, mediaPlayer, state.Paused, func(paused bool) error {
-		return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: 0, Paused: paused, Rate: normalizedRate(state.Rate), Seek: true})
+		return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: 0, Paused: paused, Rate: publishedRate(client, state.Rate), Seek: true})
 	})
 	finished = true
 	if err == nil {
@@ -564,7 +622,7 @@ func (s *Service) ChangeYouTubeQuality(source string, height int) error {
 	_, err = s.finishMediaTransition(ctx, mediaPlayer, state.Paused, func(paused bool) error {
 		return client.SetPlayback(protocol.PlaybackSet{
 			PositionSeconds: state.PositionSeconds, Paused: paused,
-			Rate: normalizedRate(state.Rate), Seek: true,
+			Rate: publishedRate(client, state.Rate), Seek: true,
 		})
 	})
 	finished = true
