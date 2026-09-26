@@ -12,8 +12,11 @@ import (
 )
 
 const (
-	defaultSoftDrift  = 120 * time.Millisecond
-	defaultHardDrift  = time.Second
+	defaultSoftDrift = 120 * time.Millisecond
+	defaultHardDrift = time.Second
+	// syncTolerance is the drift reported as in sync; rate correction keeps
+	// working on smaller drifts without anyone noticing them.
+	syncTolerance     = 500 * time.Millisecond
 	maxRateCorrection = 0.03
 )
 
@@ -31,6 +34,30 @@ type Controller struct {
 	serverNow      func() time.Time
 	softDrift      time.Duration
 	hardDrift      time.Duration
+	status         Status
+}
+
+// Status is how closely the local player followed the room at the last
+// check, before any correction that check applied.
+type Status struct {
+	Buffering    bool
+	DriftSeconds float64 // room position minus local position
+	// ToleranceSeconds is the drift still perceived as in sync: half a
+	// second, or two position steps for players that only report seconds.
+	ToleranceSeconds float64
+	MeasuredAt       time.Time
+}
+
+// InSync reports whether the last check found the player following the room.
+func (s Status) InSync() bool {
+	return !s.MeasuredAt.IsZero() && !s.Buffering && math.Abs(s.DriftSeconds) <= s.ToleranceSeconds
+}
+
+// Status returns the result of the last ApplyRemote check.
+func (c *Controller) Status() Status {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.status
 }
 
 func New(mediaPlayer player.Player, sender PlaybackSender, serverNow func() time.Time) *Controller {
@@ -54,6 +81,7 @@ func (c *Controller) ApplyRemote(ctx context.Context, remote protocol.Playback, 
 		return err
 	}
 	if local.Buffering {
+		c.status = Status{Buffering: true, MeasuredAt: time.Now()}
 		return nil
 	}
 	desired := remote.PositionAt(c.serverNow())
@@ -67,6 +95,7 @@ func (c *Controller) ApplyRemote(ctx context.Context, remote protocol.Playback, 
 		softDrift = resolution
 		hardDrift = 2 * resolution
 	}
+	c.status = Status{DriftSeconds: drift, ToleranceSeconds: max(syncTolerance.Seconds(), hardDrift.Seconds()/2), MeasuredAt: time.Now()}
 	var failures []error
 	if local.Paused != remote.Paused {
 		failures = append(failures, c.player.SetPaused(ctx, remote.Paused))

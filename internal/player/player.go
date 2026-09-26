@@ -48,6 +48,9 @@ type ResolvedStream struct {
 	VideoURL    string
 	AudioURL    string
 	CombinedURL string
+	// Title replaces the extracted URL (".../videoplayback?...") that
+	// players would otherwise show as the media title.
+	Title string
 }
 
 type ResolvedStreamPlayer interface {

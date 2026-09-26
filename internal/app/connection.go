@@ -207,12 +207,17 @@ func (s *Service) syncLoop(ctx context.Context) {
 			}
 			snapshot := client.Snapshot()
 			if !s.shouldApplyRemote(snapshot) {
+				s.reportSync(SyncStatus{State: "idle"})
 				continue
 			}
 			s.mu.RLock()
 			force := snapshot.Playback.Seek && snapshot.Playback.SetBy != snapshot.SelfID && snapshot.Playback.Revision != s.lastRemoteRevision
+			controller := s.sync
 			s.mu.RUnlock()
 			err := s.applyRemote(ctx, snapshot.Playback, force)
+			if controller != nil {
+				s.reportSync(syncStatusOf(controller.Status()))
+			}
 			if err != nil && err.Error() != lastError {
 				lastError = err.Error()
 				s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "player_sync", Message: lastError}})
@@ -522,6 +527,7 @@ func (s *Service) Disconnect() {
 	streams := s.detachStreamingLocked()
 	s.sessionCtx, s.cancel, s.playerCancel, s.client, s.player, s.sync = nil, nil, nil, nil, nil, nil
 	s.playerDismissed = false
+	s.syncState = ""
 	s.mu.Unlock()
 	s.playerLifecycleMu.Unlock()
 	if cancel != nil {
@@ -589,4 +595,28 @@ func changesRoomState(messageType protocol.MessageType) bool {
 		return false
 	}
 	return true
+}
+
+func syncStatusOf(status syncer.Status) SyncStatus {
+	switch {
+	case status.MeasuredAt.IsZero():
+		return SyncStatus{State: "idle"}
+	case status.Buffering:
+		return SyncStatus{State: "buffering"}
+	case status.InSync():
+		return SyncStatus{State: "synced", DriftSeconds: status.DriftSeconds}
+	}
+	return SyncStatus{State: "catching-up", DriftSeconds: status.DriftSeconds}
+}
+
+// reportSync tells the page when the sync state changes; drift alone
+// changing within a state is not worth a message every second.
+func (s *Service) reportSync(status SyncStatus) {
+	s.mu.Lock()
+	changed := s.syncState != status.State
+	s.syncState = status.State
+	s.mu.Unlock()
+	if changed {
+		s.sink(Event{Kind: "sync", Sync: &status})
+	}
 }

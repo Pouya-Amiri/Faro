@@ -685,6 +685,9 @@ svg { display: block; flex: 0 0 auto; }
   transition: opacity 100ms ease, transform 100ms ease;
 }
 .toast-popup.show { transform: translate(-50%, 0); opacity: 1; }
+/* In a room, toasts sit above the playback bar and its seek thumb instead of
+   covering the transport buttons. */
+body:has(#room-view:not(.hidden)) .toast-popup { bottom: calc(var(--playback-height) + 22px); }
 .toast-status-icon { color: var(--success); }
 .toast-popup.error .toast-status-icon { color: var(--danger); }
 .toast-message-text { font-size: var(--fs-sm); }
@@ -695,6 +698,10 @@ body.drag-active .drop-overlay { display: grid; }
 .drop-modal-box small { color: var(--text-muted); }
 
 body.compact .queue-item { min-height: 38px; }
+/* The Spin wheel turns a notch on hover; the pointer stays put. */
+.spin-icon .spin-face { transform-box: view-box; transform-origin: 12px 13px; transition: transform 420ms cubic-bezier(.2,.8,.2,1); }
+#spin-wheel:hover:not(:disabled) .spin-face { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .spin-icon .spin-face { transition: none; } }
 body.reduce-motion *, body.reduce-motion *::before, body.reduce-motion *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 
 @media (max-width: 1120px) {
@@ -874,7 +881,10 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
 /* Queue */
 .workspace-grid { grid-template-columns: minmax(0, 1fr) clamp(280px, 27vw, 370px); }
 .stage-side { border-left: .5px solid var(--line); }
-.panel-header-toolbar { min-height: 54px; padding: 0 10px 0 16px; background: var(--panel); }
+/* 55px with the 1px bottom border leaves 54px inside, so the 20px counters
+   and 30px buttons centre on whole pixels; at 53px WebKit rounded the
+   counter's background and its digits in opposite directions. */
+.panel-header-toolbar { min-height: 55px; padding: 0 10px 0 16px; background: var(--panel); }
 .panel-title { font-size: var(--fs-lg); font-weight: 600; }
 .counter-badge, .tab-counter { min-width: 21px; height: 20px; border: 0; background: var(--fill); color: var(--text-muted); font-size: var(--fs-xs); font-weight: 500; font-variant-numeric: tabular-nums; }
 .panel-actions { gap: 7px; }
@@ -1118,7 +1128,7 @@ input[type="number"] { appearance: textfield; }
 }
 
 /* Playback permissions sit with the People heading. */
-.people-heading-row { min-height: 54px; gap: 8px; }
+.people-heading-row { min-height: 55px; gap: 8px; }
 .people-heading-primary { min-width: 0; display: flex; align-items: center; gap: 10px; }
 .people-heading-row > .custom-select { min-width: 138px; margin-left: auto; }
 .people-heading-row > .custom-select .custom-select-trigger { min-width: 138px; }

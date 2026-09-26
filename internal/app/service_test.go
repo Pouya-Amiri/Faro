@@ -125,7 +125,7 @@ func TestAppStreamsOfferedFileThroughFakeTransport(t *testing.T) {
 	if err := os.WriteFile(path, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.offerStream(path, 1); err != nil {
+	if err := host.offerStreamForItem(path, 1, ""); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -335,7 +335,7 @@ func TestOfferStreamRejectsConnectionWithoutSessionContext(t *testing.T) {
 	service.mu.Lock()
 	service.sessionCtx = nil
 	service.mu.Unlock()
-	if err := service.offerStream(path, 1); err == nil || !strings.Contains(err.Error(), "connection changed") {
+	if err := service.offerStreamForItem(path, 1, ""); err == nil || !strings.Contains(err.Error(), "connection changed") {
 		t.Fatalf("offerStream with detached session context returned %v", err)
 	}
 }
@@ -1029,7 +1029,7 @@ func TestPlayerStartsLazilyAndClosingItKeepsSessionConnected(t *testing.T) {
 	if err := os.WriteFile(mediaPath, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.OpenMedia(mediaPath); err != nil {
+	if err := openThroughQueue(t, service, mediaPath); err != nil {
 		t.Fatal(err)
 	}
 	if starts != 1 {
@@ -1282,7 +1282,7 @@ func TestPausingDuringDriftCorrectionPublishesRoomRate(t *testing.T) {
 	if err := os.WriteFile(mediaPath, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.OpenMedia(mediaPath); err != nil {
+	if err := openThroughQueue(t, service, mediaPath); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.SetPaused(false); err != nil {
@@ -1542,7 +1542,7 @@ func TestConcurrentStreamRequestsClaimTheOfferOnce(t *testing.T) {
 	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 20000)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.offerStream(path, 1); err != nil {
+	if err := host.offerStreamForItem(path, 1, ""); err != nil {
 		t.Fatal(err)
 	}
 	var offerID string
@@ -1576,4 +1576,31 @@ func TestConcurrentStreamRequestsClaimTheOfferOnce(t *testing.T) {
 		defer viewer.mu.RUnlock()
 		return viewer.streamGateway != nil
 	})
+}
+
+// openThroughQueue plays a local file the way the page does: add it to the
+// queue, select it, and wait for the player to open it.
+func openThroughQueue(t *testing.T, service *Service, path string) error {
+	t.Helper()
+	if err := service.SetPlaylist([]PlaylistInput{{Label: filepath.Base(path), Source: path}}); err != nil {
+		return err
+	}
+	if err := service.SelectPlaylist(0); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		service.mu.RLock()
+		mediaPlayer, source := service.player, service.currentSource
+		service.mu.RUnlock()
+		if mediaPlayer != nil && source == path {
+			if state, err := mediaPlayer.State(context.Background()); err == nil && state.Source == path {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return errors.New("the selected queue item never opened in the player")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

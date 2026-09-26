@@ -32,13 +32,9 @@ func (s *Service) StreamingAvailable() bool {
 	return client.Welcome().Streaming != nil
 }
 
-// offerStream publishes the resolved local copy for a shared-playlist item.
+// offerStreamForItem publishes the resolved local copy for a shared-playlist item.
 // Product entry points must resolve the path through OfferPlaylistStream so an
 // arbitrary file can never be offered outside the queue.
-func (s *Service) offerStream(path string, maxViewers int) error {
-	return s.offerStreamForItem(path, maxViewers, "")
-}
-
 func (s *Service) offerStreamForItem(path string, maxViewers int, itemID string) error {
 	s.streamOfferMu.Lock()
 	defer s.streamOfferMu.Unlock()

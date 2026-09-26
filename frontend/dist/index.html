@@ -25,7 +25,7 @@
         document.documentElement.style.colorScheme = isDark ? "dark" : "light";
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=36" />
+    <link rel="stylesheet" href="/styles.css?v=37" />
     <link rel="stylesheet" href="/desktop.css?v=18" />
   </head>
   <body>
@@ -376,7 +376,7 @@
                     <span>Add URL</span>
                   </button>
                   <button id="spin-wheel" class="btn btn-secondary btn-sm" type="button" title="Spin the wheel to pick the next item for everyone">
-                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13.5" r="8.5"/><path d="M12 5v17M4.6 9.25l14.8 8.5M4.6 17.75l14.8-8.5"/><path d="M9.5 1.5h5L12 5.5Z" fill="currentColor"/></svg>
+                    <svg class="icon spin-icon" viewBox="0 0 24 24" aria-hidden="true"><g class="spin-face"><circle cx="12" cy="13" r="8.5"/><path d="M12 13V5A8 8 0 0 1 17.66 7.34ZM12 13H20A8 8 0 0 1 17.66 18.66ZM12 13V21A8 8 0 0 1 6.34 18.66ZM12 13H4A8 8 0 0 1 6.34 7.34Z" fill="currentColor" fill-opacity=".7" stroke="none"/><circle cx="12" cy="13" r="1.8" fill="currentColor" stroke="none"/></g><path d="M12 7.4 9.2 2.2h5.6Z" fill="currentColor" stroke-linejoin="round"/></svg>
                     <span>Spin</span>
                   </button>
                   <button id="playlist-more" class="btn btn-secondary btn-icon" type="button" aria-haspopup="menu" aria-label="More queue actions" title="Queue Options">
@@ -902,6 +902,6 @@
       </div>
     </div>
 
-    <script type="module" src="/app.js?v=27"></script>
+    <script type="module" src="/app.js?v=28"></script>
   </body>
 </html>

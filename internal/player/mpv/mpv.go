@@ -216,7 +216,16 @@ func (m *MPV) SetRate(ctx context.Context, rate float64) error {
 func (m *MPV) Open(ctx context.Context, source string) error {
 	m.openMu.Lock()
 	defer m.openMu.Unlock()
+	m.setMediaTitle(ctx, "")
 	return m.openSource(ctx, source)
+}
+
+// setMediaTitle sets or (with "") clears force-media-title, which mpv shows
+// in its window title and OSD and reports as media-title. Resolved YouTube
+// streams would otherwise be titled by their extracted URL. A property works
+// on every mpv version, unlike per-file loadfile options.
+func (m *MPV) setMediaTitle(ctx context.Context, title string) {
+	_ = m.command(ctx, []any{"set_property", "force-media-title", title}, nil)
 }
 
 func (m *MPV) OpenResolved(ctx context.Context, stream player.ResolvedStream) error {
@@ -230,6 +239,7 @@ func (m *MPV) OpenResolved(ctx context.Context, stream player.ResolvedStream) er
 	if primary == "" {
 		return errors.New("resolved stream has no video URL")
 	}
+	m.setMediaTitle(ctx, strings.TrimSpace(stream.Title))
 	if err := m.openSource(ctx, primary); err != nil {
 		if stream.CombinedURL != "" && primary != stream.CombinedURL {
 			return m.openSource(ctx, stream.CombinedURL)

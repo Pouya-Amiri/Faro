@@ -249,60 +249,6 @@ func (s *Service) SpinPlaylistWheel() error {
 	return client.SpinPlaylistWheel()
 }
 
-func (s *Service) OpenMedia(source string) error {
-	s.mediaLoadMu.Lock()
-	defer s.mediaLoadMu.Unlock()
-	client, mediaPlayer, err := s.ensurePlayer(playerStartExplicit)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := s.mediaOperationContext(s.root)
-	defer cancel()
-	identity, err := mediaid.Inspect(source, "", 0)
-	if err != nil {
-		return err
-	}
-	s.beginMediaTransition()
-	finished := false
-	defer func() {
-		if !finished {
-			s.endMediaTransition()
-		}
-	}()
-	info, err := s.openPlayerSource(ctx, mediaPlayer, source)
-	if err != nil {
-		return err
-	}
-	state := s.waitForPlayerMedia(ctx, mediaPlayer, info.Duration)
-	if err := mediaPlayer.Seek(ctx, 0); err != nil {
-		return err
-	}
-	if state.Title != "" {
-		identity.Media.Title = state.Title
-	}
-	if info.Title != "" {
-		identity.Media.Title = info.Title
-	}
-	identity.Media.DurationSeconds = firstPositive(info.Duration, state.DurationSeconds)
-	if identity.Path != "" {
-		s.rememberSource(identity.Media.Fingerprint, identity.Path)
-	}
-	if err := client.SetMedia(protocol.MediaSet{Media: &identity.Media}); err != nil {
-		return err
-	}
-	_, err = s.finishMediaTransition(ctx, mediaPlayer, state.Paused, func(paused bool) error {
-		return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: 0, Paused: paused, Rate: publishedRate(client, state.Rate), Seek: true})
-	})
-	finished = true
-	if err == nil {
-		s.mu.Lock()
-		s.selectedItem, s.selectedItemIdentity = "", ""
-		s.manualSource = source
-		s.mu.Unlock()
-	}
-	return err
-}
-
 func (s *Service) reopenMediaAtRoomClock(source string, paused bool) error {
 	s.mediaLoadMu.Lock()
 	defer s.mediaLoadMu.Unlock()
@@ -523,7 +469,7 @@ func (s *Service) openPlayerSource(ctx context.Context, mediaPlayer player.Playe
 	}
 	if resolvedPlayer, ok := mediaPlayer.(player.ResolvedStreamPlayer); ok {
 		err = resolvedPlayer.OpenResolved(ctx, player.ResolvedStream{
-			VideoURL: stream.VideoURL, AudioURL: stream.AudioURL, CombinedURL: stream.CombinedURL,
+			VideoURL: stream.VideoURL, AudioURL: stream.AudioURL, CombinedURL: stream.CombinedURL, Title: stream.Info.Title,
 		})
 	} else if stream.CombinedURL != "" {
 		err = mediaPlayer.Open(ctx, stream.CombinedURL)
@@ -542,7 +488,7 @@ func (s *Service) openPlayerSource(ctx context.Context, mediaPlayer player.Playe
 			return youtube.Info{}, fmt.Errorf("high-quality YouTube stream failed to open (%v); web_safari fallback failed: %w", err, fallbackErr)
 		}
 		if resolvedPlayer, ok := mediaPlayer.(player.ResolvedStreamPlayer); ok {
-			fallbackErr = resolvedPlayer.OpenResolved(ctx, player.ResolvedStream{CombinedURL: fallback.CombinedURL})
+			fallbackErr = resolvedPlayer.OpenResolved(ctx, player.ResolvedStream{CombinedURL: fallback.CombinedURL, Title: fallback.Info.Title})
 		} else {
 			fallbackErr = mediaPlayer.Open(ctx, fallback.CombinedURL)
 		}

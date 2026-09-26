@@ -33,6 +33,8 @@ let lastWheelSoundTime = -Infinity;
 let addingPlaylistURL = false;
 let streamingAvailable = false;
 let streamState = { state: "idle", offerId: "", route: "" };
+// How closely this participant's own player follows the room (from the backend).
+let syncStatus = { state: "idle", driftSeconds: 0 };
 let legalInfoLoaded = false;
 let legalSourceURL = "";
 let updateReleaseURL = "";
@@ -699,9 +701,7 @@ function render() {
   $("media-warning").classList.toggle("hidden", mismatches.length === 0);
   $("media-warning").textContent = mismatches.length ? `${mismatches.length} participant${mismatches.length === 1 ? " has" : "s have"} different media loaded. Sync paused for mismatched copies.` : "";
 
-  const syncState = $("sync-state");
-  syncState.textContent = media ? (mismatches.length ? "Mismatch" : "In sync") : "Waiting for media";
-  syncState.className = `badge badge-sync ${media ? (mismatches.length ? "badge-warning" : "badge-success") : ""}`;
+  renderSyncBadge(media, mismatches.length);
 
   const playback = snapshot.playback;
   const duration = Number(media?.durationSeconds || 0);
@@ -1065,6 +1065,44 @@ function dismissWheelWindow() {
   if (activeWheel) dismissedWheelID = activeWheel.id;
   cancelAnimationFrame(wheelAnimation);
   if ($("wheel-dialog").open) $("wheel-dialog").close();
+}
+
+function mismatchCount(media) {
+  return media ? (snapshot?.participants || []).filter((person) => person.media && person.media.fingerprint !== media.fingerprint).length : 0;
+}
+
+// The badge reports this participant's own player: other people's positions
+// are not shared, so "In sync" claims nothing about them.
+function renderSyncBadge(media = referenceMedia(), mismatches = mismatchCount(media)) {
+  const badge = $("sync-state");
+  let text = "Waiting for media", tone = "", title = "";
+  if (media && mismatches) {
+    text = "Mismatch"; tone = "badge-warning";
+    title = "Someone has a different file loaded; their playback is not synced";
+  } else if (media) {
+    const drift = Math.abs(Number(syncStatus.driftSeconds) || 0);
+    const behind = Number(syncStatus.driftSeconds) > 0;
+    switch (syncStatus.state) {
+      case "synced":
+        text = "In sync"; tone = "badge-success";
+        title = `Your player is within ${drift < 0.05 ? "0.05" : drift.toFixed(2)} s of the room`;
+        break;
+      case "catching-up":
+        text = "Syncing"; tone = "badge-warning";
+        title = `Your player is ${drift.toFixed(1)} s ${behind ? "behind" : "ahead of"} the room and is catching up`;
+        break;
+      case "buffering":
+        text = "Buffering"; tone = "badge-warning";
+        title = "Your player is buffering";
+        break;
+      default:
+        text = "Waiting for player";
+        title = "Sync starts once your player has the media open";
+    }
+  }
+  badge.textContent = text;
+  badge.title = title;
+  badge.className = `badge badge-sync ${tone}`;
 }
 
 function renderMediaKind(media) {
@@ -1702,6 +1740,7 @@ async function leaveRoom() {
   renderChat();
   streamingAvailable = false;
   streamState = { state: "idle", offerId: "", route: "" };
+  syncStatus = { state: "idle", driftSeconds: 0 };
   timelineSegments = []; timelineSegmentKey = ""; timelineSegmentsRetryKey = "";
   isScrubbing = false;
   seekCommandPending = false;
@@ -2552,6 +2591,10 @@ function receive(event) {
       streamState = { state: next.state || "idle", offerId: next.offerId || "", route: next.route || "" };
       if (snapshot) render();
     }
+  }
+  if (event.sync) {
+    syncStatus = { state: event.sync.state || "idle", driftSeconds: Number(event.sync.driftSeconds) || 0 };
+    if (snapshot) renderSyncBadge();
   }
   if (event.wheel) showWheel(event.wheel, event.serverNowUnixMs);
   if (event.chat) addChat(event.chat);

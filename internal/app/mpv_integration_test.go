@@ -66,28 +66,19 @@ func testMPVRoom(t *testing.T, streamed bool) {
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.OpenMedia(path); err != nil {
+	if !streamed {
+		// The guest has its own copy before the host queues the file.
+		if _, err := guest.IndexMediaDirectory(filepath.Dir(path)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := openThroughQueue(t, host, path); err != nil {
 		t.Fatal(err)
 	}
 	if streamed {
-		if err := host.offerStream(path, 1); err != nil {
-			t.Fatal(err)
-		}
-		deadline := time.Now().Add(5 * time.Second)
-		var offerID string
-		for offerID == "" {
-			snap, _ := guest.Snapshot()
-			if len(snap.StreamOffers) > 0 {
-				offerID = snap.StreamOffers[0].ID
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("no offer")
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if err := guest.StreamFromOffer(offerID); err != nil {
-			t.Fatal(err)
-		}
+		// The guest lacks the file, so the host shares it automatically and
+		// the guest requests it: the path the app takes without any clicks.
+		deadline := time.Now().Add(15 * time.Second)
 		for {
 			guest.mu.RLock()
 			active := guest.streamGateway != nil
@@ -96,12 +87,26 @@ func testMPVRoom(t *testing.T, streamed bool) {
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatal("stream did not activate")
+				t.Fatal("the automatic stream did not activate")
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-	} else if err := guest.OpenMedia(path); err != nil {
-		t.Fatal(err)
+	} else {
+		deadline := time.Now().Add(8 * time.Second)
+		for {
+			guest.mu.RLock()
+			mediaPlayer := guest.player
+			guest.mu.RUnlock()
+			if mediaPlayer != nil {
+				if value, err := mediaPlayer.State(context.Background()); err == nil && value.Source == path {
+					break
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the guest's own copy did not open")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 	state := func(s *Service) player.State {
 		_, p, err := s.connectedPlayer()

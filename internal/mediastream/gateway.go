@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -171,7 +172,7 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 	units := int((cfg.Media.SizeBytes + unit - 1) / unit)
 	gateway := &Gateway{
 		viewer: cfg.Viewer, capability: cfg.Capability, media: cfg.Media, chunkBytes: chunkBytes, adaptive: max(min(minAdaptiveChunk, chunkBytes), unit) / unit * unit, unit: unit,
-		path: "/" + token, listener: listener, store: store, ctx: ctx, cancel: cancel,
+		path: "/" + token + "/" + gatewayFileName(cfg.Media.Title), listener: listener, store: store, ctx: ctx, cancel: cancel,
 		have: make([]uint64, (units+63)/64), units: units, fetches: make(map[*fetch]struct{}), readers: make(map[*reader]struct{}),
 		foreground: make(chan struct{}, foregroundFetches), background: make(chan struct{}, backgroundFetches),
 		wake: make(chan struct{}, 1), fillDone: make(chan struct{}),
@@ -220,6 +221,17 @@ func openCacheStore(cfg GatewayConfig, chunkBytes int64) (cacheStore, error) {
 		return store, nil
 	}
 	return newMemoryStore(cfg.Media.SizeBytes, memoryCacheBytes, defaultGatewayChunk), nil
+}
+
+// gatewayFileName ends the gateway URL with the file's name: players title
+// media without embedded metadata by the last URL segment, so they show
+// "Movie.mkv" rather than an opaque token.
+func gatewayFileName(title string) string {
+	name := strings.TrimSpace(filepath.Base(strings.ReplaceAll(title, "\\", "/")))
+	if name == "" || name == "." || name == "/" {
+		name = "media"
+	}
+	return url.PathEscape(name)
 }
 
 func (g *Gateway) URL() string { return "http://" + g.listener.Addr().String() + g.path }
@@ -307,7 +319,7 @@ func (g *Gateway) Close() error {
 }
 
 func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	if request.URL.Path != g.path {
+	if decoded, err := url.PathUnescape(g.path); err != nil || request.URL.Path != decoded {
 		http.NotFound(writer, request)
 		return
 	}

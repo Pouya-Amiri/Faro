@@ -375,3 +375,33 @@ func TestGatewayReportsCachedRanges(t *testing.T) {
 		t.Fatalf("merged cached ranges = %v", got)
 	}
 }
+
+func TestGatewayURLEndsWithTheFileName(t *testing.T) {
+	content := randomContent(t, 4096)
+	fixture := newGatewayFixture(t, content, defaultMaxRange, func(cfg *GatewayConfig) {
+		cfg.Media.Title = "My Movie (2024) #1.mkv"
+		cfg.DisableBackgroundFill = true
+	})
+	address := fixture.gateway.URL()
+	if !strings.HasSuffix(address, "/My%20Movie%20%282024%29%20%231.mkv") {
+		t.Fatalf("gateway URL %q does not end with the file name", address)
+	}
+	// Players may escape the name differently; the decoded path is what counts.
+	for _, variant := range []string{address, strings.Replace(address, "%282024%29", "(2024)", 1)} {
+		response, err := http.Get(variant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK || string(body) != string(content) {
+			t.Fatalf("%s: status %d", variant, response.StatusCode)
+		}
+	}
+	if response, err := http.Get(strings.TrimSuffix(address, "/My%20Movie%20%282024%29%20%231.mkv")); err == nil {
+		response.Body.Close()
+		if response.StatusCode != http.StatusNotFound {
+			t.Fatalf("the bare token path answered %d", response.StatusCode)
+		}
+	}
+}
