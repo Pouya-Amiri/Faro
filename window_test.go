@@ -2,6 +2,7 @@ package main
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -45,5 +46,27 @@ func TestWindowBackgroundRoundTrip(t *testing.T) {
 	desktop := &Desktop{}
 	if err := desktop.SetWindowBackground("not a colour"); err == nil {
 		t.Fatal("invalid colours must be rejected")
+	}
+}
+
+func TestWindowFrameCSSFollowsTheme(t *testing.T) {
+	dark := windowFrameCSS(application.NewRGB(0x26, 0x26, 0x28))
+	light := windowFrameCSS(application.NewRGB(0xf0, 0xee, 0xeb))
+	for name, css := range map[string]string{"dark": dark, "light": light} {
+		// GTK older than 4.16 rejects color-mix(), which would drop the rule.
+		if strings.Contains(css, "color-mix") {
+			t.Errorf("%s frame CSS uses color-mix()", name)
+		}
+		for _, want := range []string{"window.csd.faro {", "window.csd.faro:backdrop", "window.csd.faro.tiled-top:backdrop", "window.csd.faro.maximized", "window.solid-csd.faro", "border-radius: 15px"} {
+			if !strings.Contains(css, want) {
+				t.Errorf("%s frame CSS is missing %q", name, want)
+			}
+		}
+	}
+	if !strings.Contains(dark, "background-color: rgb(38, 38, 40)") || !strings.Contains(dark, "rgba(255, 255, 255, 0.15)") {
+		t.Errorf("dark frame should use the page colour and a light edge:\n%s", dark)
+	}
+	if !strings.Contains(light, "background-color: rgb(240, 238, 235)") || !strings.Contains(light, "rgba(0, 0, 6, 0.15)") {
+		t.Errorf("light frame should use the page colour and a dark edge:\n%s", light)
 	}
 }

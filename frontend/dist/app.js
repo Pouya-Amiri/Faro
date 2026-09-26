@@ -435,12 +435,18 @@ function applyPreferences() {
 
 // The native window paints this colour before the page exists, so the next
 // launch starts in the right theme instead of flashing the default dark one.
+// On Linux it is also the GTK frame colour under the rounded corners, which
+// are the sidebar and toolbar surfaces, so --panel-alt is the colour the
+// anti-aliased corner edge must blend into.
 let rememberedWindowBackground = "";
 function rememberWindowBackground() {
   if (!hasBackend) return;
-  const match = getComputedStyle(document.body).backgroundColor.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/);
-  if (!match) return;
-  const colour = `#${match.slice(1, 4).map((channel) => Number(channel).toString(16).padStart(2, "0")).join("")}`;
+  let colour = getComputedStyle(document.documentElement).getPropertyValue("--panel-alt").trim().toLowerCase();
+  if (!/^#[0-9a-f]{6}$/.test(colour)) {
+    const match = getComputedStyle(document.body).backgroundColor.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+    if (!match) return;
+    colour = `#${match.slice(1, 4).map((channel) => Number(channel).toString(16).padStart(2, "0")).join("")}`;
+  }
   if (colour === rememberedWindowBackground) return;
   rememberedWindowBackground = colour;
   invoke("SetWindowBackground", colour).catch(() => {});

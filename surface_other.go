@@ -11,6 +11,8 @@ const nativeClientDecorations = false
 
 const revealWhenReady = false
 
-func prepareWindowSurface(application.Window) bool { return true }
+func prepareWindowSurface(application.Window, application.RGBA) bool { return true }
+
+func setWindowFrameStyle(application.RGBA) {}
 
 func platformWindowChrome() (layout, doubleClick string) { return "", "" }

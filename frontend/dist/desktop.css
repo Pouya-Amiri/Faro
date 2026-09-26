@@ -33,7 +33,6 @@ dialog,
 /* macOS draws its own inset traffic lights over the command bar. */
 body[data-platform="mac"] .window-controls { display: none; }
 body[data-platform="mac"] .app-command-bar { padding-left: 82px; padding-right: 12px; }
-body[data-platform="mac"] .sidebar-brand { padding-left: 82px; }
 
 /* Reserve the corner used by the embedded window controls. */
 body:not([data-platform="mac"]) .app-command-bar { padding-right: calc(var(--window-controls-width) + 4px); }
@@ -45,8 +44,19 @@ body[data-controls-side="left"]:not([data-platform="mac"]) .app-command-bar {
   padding-left: calc(var(--window-controls-width) + 8px);
   padding-right: 12px;
 }
-body[data-controls-side="left"]:not([data-platform="mac"]) .sidebar-brand { padding-left: calc(var(--window-controls-width) + 12px); }
 body[data-controls-side="left"]:not([data-platform="mac"]) .window-drag-region { right: 0; }
+
+/* When the window controls sit on the left (macOS traffic lights, or a GNOME
+   layout such as "close,minimize:"), they own the sidebar's top row and the
+   brand moves below it, as in Files or Finder, instead of squeezing beside
+   the buttons. The row stays draggable because it is part of .sidebar-brand. */
+body[data-platform="mac"] .sidebar-brand,
+body[data-controls-side="left"] .sidebar-brand {
+  height: auto;
+  align-items: flex-end;
+  padding: var(--command-height) 20px 14px;
+}
+body[data-platform="mac"] .sidebar-brand { padding-top: 44px; }
 
 /* Like native title bars, the controls recede while the window is inactive. */
 body.window-inactive .window-control { opacity: .55; }

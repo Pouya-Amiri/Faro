@@ -22,9 +22,14 @@ type Desktop struct {
 	window     application.Window
 	service    *app.Service
 	revealOnce sync.Once
+
+	backgroundMu sync.Mutex
+	background   application.RGBA
 }
 
-func NewDesktop(wailsApp *application.App) *Desktop { return &Desktop{app: wailsApp} }
+func NewDesktop(wailsApp *application.App, background application.RGBA) *Desktop {
+	return &Desktop{app: wailsApp, background: background}
+}
 
 func (d *Desktop) setWindow(window application.Window) { d.window = window }
 

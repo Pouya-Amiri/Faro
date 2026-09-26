@@ -14,26 +14,19 @@ package main
 // replacing GTK's title bar with an empty one. The window's own CSS state
 // classes (.maximized, .tiled-*, .solid-csd, ...) switch in the same frame as
 // the state change, so the corners never lag behind the window state.
-static void faroInstallChromeStyle(int radius) {
-	static gboolean installed = FALSE;
-	if (installed) {
-		return;
+//
+// The frame style itself is generated in Go (windowFrameCSS) from the page's
+// theme colour and replaced whenever the theme changes.
+static void faroSetFrameStyle(const char *css) {
+	static GtkCssProvider *provider = NULL;
+	if (provider == NULL) {
+		provider = gtk_css_provider_new();
+		// USER priority beats the GTK theme's window.csd rules. The provider is
+		// deliberately never released: it must outlive the display.
+		gtk_style_context_add_provider_for_display(gdk_display_get_default(),
+			GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_USER);
 	}
-	installed = TRUE;
-
-	gchar *css = g_strdup_printf(
-		"window.csd.faro { border-radius: %dpx; }"
-		"window.csd.faro.maximized, window.csd.faro.fullscreen,"
-		"window.csd.faro.tiled, window.csd.faro.tiled-top, window.csd.faro.tiled-bottom,"
-		"window.csd.faro.tiled-left, window.csd.faro.tiled-right,"
-		"window.csd.faro.solid-csd { border-radius: 0; }",
-		radius);
-	GtkCssProvider *provider = gtk_css_provider_new();
 	gtk_css_provider_load_from_string(provider, css);
-	g_free(css);
-	gtk_style_context_add_provider_for_display(gdk_display_get_default(),
-		GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_USER);
-	// The provider is deliberately never released: it must outlive the display.
 }
 
 // faroPrepareWindow must run before the window is first mapped: GTK does not
@@ -78,21 +71,26 @@ const nativeClientDecorations = true
 // rendered, so no half-styled frame is ever visible.
 const revealWhenReady = true
 
-// surfaceCornerRadius is the radius of the floating Linux window.
-const surfaceCornerRadius = 15
-
-// prepareWindowSurface installs the empty title bar and corner style. It is
-// idempotent and reports false when the native window does not exist yet.
-func prepareWindowSurface(window application.Window) bool {
+// prepareWindowSurface installs the empty title bar and the frame style for
+// the given page background. It is idempotent and reports false when the
+// native window does not exist yet.
+func prepareWindowSurface(window application.Window, background application.RGBA) bool {
 	native := window.NativeWindow()
 	if native == nil {
 		return false
 	}
+	setWindowFrameStyle(background)
 	application.InvokeSync(func() {
-		C.faroInstallChromeStyle(C.int(surfaceCornerRadius))
 		C.faroPrepareWindow((*C.GtkWindow)(native))
 	})
 	return true
+}
+
+// setWindowFrameStyle restyles the GTK frame to match the page's theme.
+func setWindowFrameStyle(background application.RGBA) {
+	css := C.CString(windowFrameCSS(background))
+	defer C.free(unsafe.Pointer(css))
+	application.InvokeSync(func() { C.faroSetFrameStyle(css) })
 }
 
 // platformWindowChrome reports the desktop's title bar button layout and

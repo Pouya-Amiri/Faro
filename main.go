@@ -36,7 +36,8 @@ func main() {
 		},
 	})
 
-	desktop := NewDesktop(wailsApp)
+	background := loadWindowBackground()
+	desktop := NewDesktop(wailsApp, background)
 	wailsApp.RegisterService(application.NewService(desktop))
 
 	mainWindow := wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
@@ -53,7 +54,7 @@ func main() {
 		Frameless:        runtime.GOOS != "darwin" && !nativeClientDecorations,
 		Hidden:           revealWhenReady,
 		EnableFileDrop:   true,
-		BackgroundColour: loadWindowBackground(),
+		BackgroundColour: background,
 		Mac: application.MacWindow{
 			TitleBar:                application.MacTitleBarHiddenInset,
 			InvisibleTitleBarHeight: 38,

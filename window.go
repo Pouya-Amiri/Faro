@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -44,8 +45,14 @@ func (d *Desktop) SetWindowBackground(colour string) error {
 	if !hexColour.MatchString(colour) {
 		return errors.New("window background must be a #rrggbb colour")
 	}
-	if d.window != nil {
-		d.window.SetBackgroundColour(parseHexColour(colour))
+	background := parseHexColour(colour)
+	d.backgroundMu.Lock()
+	changed := d.background != background
+	d.background = background
+	d.backgroundMu.Unlock()
+	if changed && d.window != nil {
+		d.window.SetBackgroundColour(background)
+		setWindowFrameStyle(background)
 	}
 	return saveWindowBackground(colour)
 }
@@ -58,7 +65,10 @@ func (d *Desktop) revealWindow() {
 		return
 	}
 	d.revealOnce.Do(func() {
-		prepareWindowSurface(d.window)
+		d.backgroundMu.Lock()
+		background := d.background
+		d.backgroundMu.Unlock()
+		prepareWindowSurface(d.window, background)
 		d.window.Show()
 	})
 }
@@ -98,6 +108,59 @@ func windowButtons(section string) []string {
 	}
 	return buttons
 }
+
+// windowFrameCSS styles GTK's client-side frame the way libadwaita styles
+// GNOME's own windows: a faint inner highlight, a hairline edge and a soft
+// shadow that lightens while the window is inactive. The frame's background is
+// the page's background, so the anti-aliased rounded clip of the webview
+// blends into the same colour instead of the GTK theme's (light) window
+// colour, which showed as a pale outline around the corners. Only rgba() is
+// used: color-mix() needs GTK 4.16.
+func windowFrameCSS(background application.RGBA) string {
+	edge := "rgba(0, 0, 6, 0.15)"
+	if 0.2126*float64(background.Red)+0.7152*float64(background.Green)+0.0722*float64(background.Blue) < 128 {
+		edge = "rgba(255, 255, 255, 0.15)"
+	}
+	fill := fmt.Sprintf("rgb(%d, %d, %d)", background.Red, background.Green, background.Blue)
+	tiled := "window.csd.faro.tiled, window.csd.faro.tiled-top, window.csd.faro.tiled-bottom, window.csd.faro.tiled-left, window.csd.faro.tiled-right"
+	tiledBackdrop := strings.ReplaceAll(tiled, ", ", ":backdrop, ") + ":backdrop"
+	return fmt.Sprintf(`window.csd.faro {
+  background-color: %[1]s;
+  border-radius: %[3]dpx;
+  outline: 1px solid rgba(255, 255, 255, 0.07);
+  outline-offset: -1px;
+  box-shadow: 0 0 14px 5px rgba(0, 0, 0, 0.15), 0 0 5px 2px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(0, 0, 0, 0.05);
+}
+window.csd.faro:backdrop {
+  box-shadow: 0 0 14px 5px transparent, 0 0 10px 5px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.05);
+  transition: box-shadow 200ms ease-out;
+}
+%[4]s, %[5]s {
+  border-radius: 0;
+  outline: none;
+  box-shadow: 0 0 0 1px %[2]s, 0 0 0 20px transparent;
+}
+window.csd.faro.maximized, window.csd.faro.fullscreen,
+window.csd.faro.maximized:backdrop, window.csd.faro.fullscreen:backdrop {
+  border-radius: 0;
+  outline: none;
+  box-shadow: none;
+  transition: none;
+}
+window.solid-csd.faro, window.solid-csd.faro:backdrop {
+  margin: 0;
+  padding: 4px;
+  border: none;
+  border-radius: 0;
+  outline: none;
+  background-color: %[1]s;
+  box-shadow: inset 0 0 0 4px %[1]s, inset 0 0 0 1px %[2]s;
+}
+`, fill, edge, windowCornerRadius, tiled, tiledBackdrop)
+}
+
+// windowCornerRadius matches libadwaita's window radius.
+const windowCornerRadius = 15
 
 type windowSettings struct {
 	Background string `json:"background"`
