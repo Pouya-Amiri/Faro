@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -102,12 +103,21 @@ func parseWindowChrome(layout, doubleClick string) WindowChrome {
 	chrome := WindowChrome{ButtonsSide: "right", Buttons: []string{"minimize", "maximize", "close"}}
 	if layout = strings.TrimSpace(layout); layout != "" {
 		left, right, _ := strings.Cut(layout, ":")
-		if buttons := windowButtons(right); len(buttons) != 0 {
-			chrome.Buttons = buttons
-		} else if buttons := windowButtons(left); len(buttons) != 0 {
-			chrome.ButtonsSide, chrome.Buttons = "left", buttons
-		} else {
-			chrome.Buttons = []string{}
+		leftButtons, rightButtons := windowButtons(left), windowButtons(right)
+		chrome.Buttons = []string{}
+		for _, button := range append(leftButtons, rightButtons...) {
+			if !slices.Contains(chrome.Buttons, button) {
+				chrome.Buttons = append(chrome.Buttons, button)
+			}
+		}
+		// Faro draws one group of controls. With buttons on both sides (such as
+		// "close:minimize,maximize") it goes where the close button is, so no
+		// button is dropped.
+		if len(rightButtons) == 0 || len(leftButtons) != 0 && slices.Contains(leftButtons, "close") {
+			chrome.ButtonsSide = "left"
+		}
+		if len(chrome.Buttons) == 0 {
+			chrome.ButtonsSide = "right"
 		}
 	}
 	switch strings.TrimSpace(doubleClick) {

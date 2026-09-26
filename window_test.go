@@ -22,6 +22,10 @@ func TestParseWindowChrome(t *testing.T) {
 		{"close,close:menu", "menu", "left", []string{"close"}, "none"},
 		{"menu:", "", "right", []string{}, "toggle-maximize"},
 		{" appmenu : minimize , close ", "toggle-maximize-vertically", "right", []string{"minimize", "close"}, "toggle-maximize"},
+		// Buttons on both sides stay together where the close button is.
+		{"close:minimize,maximize", "", "left", []string{"close", "minimize", "maximize"}, "toggle-maximize"},
+		{"minimize:maximize,close", "", "right", []string{"minimize", "maximize", "close"}, "toggle-maximize"},
+		{"close:close", "", "left", []string{"close"}, "toggle-maximize"},
 	}
 	for _, test := range cases {
 		chrome := parseWindowChrome(test.layout, test.doubleClick)
