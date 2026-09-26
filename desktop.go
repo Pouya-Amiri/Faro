@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/Pouya-Amiri/Faro/internal/app"
 	"github.com/Pouya-Amiri/Faro/internal/buildinfo"
@@ -17,9 +18,10 @@ import (
 )
 
 type Desktop struct {
-	app     *application.App
-	window  application.Window
-	service *app.Service
+	app        *application.App
+	window     application.Window
+	service    *app.Service
+	revealOnce sync.Once
 }
 
 func NewDesktop(wailsApp *application.App) *Desktop { return &Desktop{app: wailsApp} }

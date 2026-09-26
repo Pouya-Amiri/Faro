@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"time"
 
 	"github.com/Pouya-Amiri/Faro/frontend"
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -39,23 +40,25 @@ func main() {
 	wailsApp.RegisterService(application.NewService(desktop))
 
 	mainWindow := wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
-		Name:             "main",
-		Title:            "Faro",
-		URL:              "/",
-		Width:            1360,
-		Height:           860,
-		MinWidth:         windowMinWidth,
-		MinHeight:        windowMinHeight,
-		Frameless:        runtime.GOOS != "darwin",
+		Name:      "main",
+		Title:     "Faro",
+		URL:       "/",
+		Width:     1360,
+		Height:    860,
+		MinWidth:  windowMinWidth,
+		MinHeight: windowMinHeight,
+		// Faro draws its own title bar. On Linux GTK keeps its client-side
+		// decorations (corners, shadow, resize borders) and only its title bar
+		// is replaced; see surface_linux.go.
+		Frameless:        runtime.GOOS != "darwin" && !nativeClientDecorations,
+		Hidden:           revealWhenReady,
 		EnableFileDrop:   true,
-		BackgroundColour: application.NewRGB(24, 24, 26),
+		BackgroundColour: loadWindowBackground(),
 		Mac: application.MacWindow{
 			TitleBar:                application.MacTitleBarHiddenInset,
 			InvisibleTitleBarHeight: 38,
 		},
 		Linux: application.LinuxWindow{
-			// The frameless surface itself is shaped once the GTK toplevel
-			// exists; see surface_linux.go.
 			WebviewGpuPolicy: application.WebviewGpuPolicyNever,
 		},
 	})
@@ -67,20 +70,33 @@ func main() {
 			"target": event.Context().DropTargetDetails(),
 		})
 	})
-	// Faro is frameless, so Faro owns the window shape: rounded while floating,
-	// square while maximised, fullscreen or tiled. This is a no-op away from
-	// Linux, where the toolkit or window manager already draws the corners.
-	syncSurface := func(*application.WindowEvent) { syncWindowSurface(mainWindow) }
+	// The page reports window state so its own controls can show the restore
+	// icon and square corners while maximised or fullscreen.
+	emitWindowState := func(*application.WindowEvent) {
+		wailsApp.Event.Emit("faro:window-state", map[string]bool{
+			"maximised":  mainWindow.IsMaximised(),
+			"fullscreen": mainWindow.IsFullscreen(),
+		})
+	}
 	for _, eventType := range []events.WindowEventType{
-		events.Common.WindowRuntimeReady,
 		events.Common.WindowMaximise,
 		events.Common.WindowUnMaximise,
 		events.Common.WindowFullscreen,
 		events.Common.WindowUnFullscreen,
+		events.Common.WindowRestore,
 	} {
-		mainWindow.OnWindowEvent(eventType, syncSurface)
+		mainWindow.OnWindowEvent(eventType, emitWindowState)
 	}
-	watchWindowSurface(mainWindow)
+	if revealWhenReady {
+		// The page calls Desktop.WindowReady after its first render. These
+		// fallbacks guarantee the window still appears if it never does.
+		mainWindow.OnWindowEvent(events.Common.WindowRuntimeReady, func(*application.WindowEvent) {
+			time.AfterFunc(2*time.Second, desktop.revealWindow)
+		})
+		wailsApp.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
+			time.AfterFunc(6*time.Second, desktop.revealWindow)
+		})
+	}
 
 	if err := wailsApp.Run(); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "faro:", err)

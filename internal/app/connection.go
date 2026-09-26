@@ -95,6 +95,11 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 	for {
 		select {
 		case event := <-client.Events():
+			if event.Type == protocol.TypePong {
+				// Clock samples change no room state; re-rendering the whole UI
+				// every ping interval only causes flicker.
+				continue
+			}
 			if event.StreamRequest != nil {
 				go s.handleStreamRequest(ctx, client, *event.StreamRequest)
 			}

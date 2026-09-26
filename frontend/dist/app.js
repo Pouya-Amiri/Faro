@@ -22,7 +22,7 @@ let wheelRotation = 0;
 let isScrubbing = false;
 let seekCommandPending = false;
 let seekReleaseTimer = 0;
-let appVersion = "2";
+let appVersion = "";
 let timelineSegments = [];
 let timelineSegmentKey = "";
 let timelineSegmentsRetryKey = "";
@@ -235,29 +235,33 @@ function showToast(message, type = "success") {
 
 function showError(error) { showToast(error?.message || String(error), "error"); }
 
+// A busy button ignores repeated presses immediately, but only shows its
+// loading state if the task is still running after a moment. Disabling it for
+// instant actions made it blink.
 async function withButtonLoading(button, task, loadingLabel = "") {
   if (!button || button.dataset.busy === "true") return;
   const label = button.querySelector("span");
   const previousLabel = label?.textContent || "";
   button.dataset.busy = "true";
-  button.disabled = true;
-  button.classList.add("is-loading");
   button.setAttribute("aria-busy", "true");
-  if (label && loadingLabel) label.textContent = loadingLabel;
+  const showLoading = setTimeout(() => {
+    button.classList.add("is-loading");
+    if (label && loadingLabel) label.textContent = loadingLabel;
+  }, 150);
   try { return await task(); }
   finally {
+    clearTimeout(showLoading);
     if (label && loadingLabel) label.textContent = previousLabel;
     button.dataset.busy = "false";
     button.classList.remove("is-loading");
     button.removeAttribute("aria-busy");
-    button.disabled = false;
     if (snapshot) render();
   }
 }
 
 function setDisabled(id, disabled) {
   const element = $(id);
-  if (element) element.disabled = Boolean(disabled) || element.dataset.busy === "true";
+  if (element && element.disabled !== Boolean(disabled)) element.disabled = Boolean(disabled);
 }
 
 function formatTime(seconds) {
@@ -400,20 +404,22 @@ function applyPreferences() {
   const resolved = preferences.theme === "system" ? (systemDark ? "dark" : "light") : preferences.theme;
   const isDark = resolved === "dark" || resolved === "midnight" || resolved === "pine";
   // data-theme carries the resolved theme, never the preference, so styles.css
-  // defines each palette once.
-  document.documentElement.dataset.theme = resolved;
-  document.documentElement.style.colorScheme = isDark ? "dark" : "light";
+  // defines each palette once. Every palette is keyed on this attribute, so it
+  // is written only when it actually changes: a redundant write restyles the
+  // whole document.
+  const root = document.documentElement;
+  if (root.dataset.theme !== resolved) root.dataset.theme = resolved;
+  const colorScheme = isDark ? "dark" : "light";
+  if (root.style.colorScheme !== colorScheme) root.style.colorScheme = colorScheme;
   document.body.classList.toggle("compact", Boolean(preferences.compact));
   document.body.classList.toggle("reduce-motion", Boolean(preferences.reduceMotion));
   const themeButton = $("welcome-theme");
-  if (themeButton) {
-    const iconSpan = themeButton.querySelector(".theme-btn-icon");
-    if (iconSpan) {
-      iconSpan.innerHTML = isDark ? sunIcon : moonIcon;
-    } else {
-      themeButton.innerHTML = isDark ? sunIcon : moonIcon;
-    }
+  const themeIcon = themeButton?.querySelector(".theme-btn-icon") || themeButton;
+  if (themeIcon && themeIcon.dataset.icon !== colorScheme) {
+    themeIcon.dataset.icon = colorScheme;
+    themeIcon.innerHTML = isDark ? sunIcon : moonIcon;
   }
+  rememberWindowBackground();
   if ($("theme-select")) {
     $("theme-select").value = preferences.theme;
     $("theme-select")._syncCustomSelect?.();
@@ -425,6 +431,55 @@ function applyPreferences() {
   if ($("pause-on-leave")) $("pause-on-leave").checked = Boolean(preferences.pauseOnLeave);
   if ($("sponsorblock-enabled")) $("sponsorblock-enabled").checked = preferences.sponsorBlock !== false;
   if ($("wheel-sound-enabled")) $("wheel-sound-enabled").checked = preferences.wheelSound !== false;
+}
+
+// The native window paints this colour before the page exists, so the next
+// launch starts in the right theme instead of flashing the default dark one.
+let rememberedWindowBackground = "";
+function rememberWindowBackground() {
+  if (!hasBackend) return;
+  const match = getComputedStyle(document.body).backgroundColor.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  if (!match) return;
+  const colour = `#${match.slice(1, 4).map((channel) => Number(channel).toString(16).padStart(2, "0")).join("")}`;
+  if (colour === rememberedWindowBackground) return;
+  rememberedWindowBackground = colour;
+  invoke("SetWindowBackground", colour).catch(() => {});
+}
+
+// Window controls mirror the desktop's title bar conventions.
+let windowChrome = { buttonsSide: "right", buttons: ["minimize", "maximize", "close"], doubleClick: "toggle-maximize" };
+const maximiseIcon = '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
+const restoreIcon = '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><rect x="2" y="4" width="6" height="6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 4V3.2c0-.66.54-1.2 1.2-1.2h3.1c.66 0 1.2.54 1.2 1.2v3.1c0 .66-.54 1.2-1.2 1.2H8" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
+
+async function loadWindowChrome() {
+  if (!hasBackend) return;
+  try { windowChrome = { ...windowChrome, ...(await invoke("WindowChrome")) }; } catch (_) {}
+}
+
+function applyWindowChrome() {
+  const controls = document.querySelector(".window-controls");
+  const byName = { minimize: $("window-minimise"), maximize: $("window-maximise"), close: $("window-close") };
+  const names = (Array.isArray(windowChrome.buttons) ? windowChrome.buttons : []).filter((name) => byName[name]);
+  for (const [name, button] of Object.entries(byName)) button.classList.toggle("hidden", !names.includes(name));
+  for (const name of names) controls.append(byName[name]);
+  document.body.dataset.controlsSide = windowChrome.buttonsSide === "left" ? "left" : "right";
+  document.documentElement.style.setProperty("--window-controls-width", `${names.length * 48}px`);
+}
+
+function setWindowState(state = {}) {
+  const maximised = Boolean(state.maximised || state.fullscreen);
+  const button = $("window-maximise");
+  if (button.dataset.maximised === String(maximised)) return;
+  button.dataset.maximised = String(maximised);
+  button.innerHTML = maximised ? restoreIcon : maximiseIcon;
+  button.title = maximised ? "Restore" : "Maximise";
+  button.setAttribute("aria-label", maximised ? "Restore window" : "Maximise window");
+}
+
+function titlebarDoubleClick(event) {
+  if (event.target.closest("button, input, select, textarea, a")) return;
+  if (windowChrome.doubleClick === "minimize") wails?.Window?.Minimise();
+  else if (windowChrome.doubleClick !== "none") wails?.Window?.ToggleMaximise();
 }
 
 function hydrateConnectForms() {
@@ -611,8 +666,12 @@ function render() {
   refreshTimelineSegments();
 
   const pauseBtn = $("pause");
-  pauseBtn.innerHTML = playback.paused ? playIcon : pauseIcon;
-  pauseBtn.setAttribute("aria-label", playback.paused ? "Play" : "Pause");
+  const pauseState = playback.paused ? "paused" : "playing";
+  if (pauseBtn.dataset.state !== pauseState) {
+    pauseBtn.dataset.state = pauseState;
+    pauseBtn.innerHTML = playback.paused ? playIcon : pauseIcon;
+    pauseBtn.setAttribute("aria-label", playback.paused ? "Play" : "Pause");
+  }
 
   updateRateControl(playback.rate || 1);
   renderParticipants(media);
@@ -647,21 +706,34 @@ function wheelTargetRotation(wheel) {
   return Number(wheel.turns || 8) * Math.PI * 2 - (Number(wheel.winner || 0) + 0.5) * arc - jitter;
 }
 
-function drawWheel(wheel, rotation = 0, highlight = -1) {
-  const canvas = $("wheel-canvas"), ctx = canvas.getContext("2d");
-  const items = wheel?.items?.length ? wheel.items : (snapshot?.playlist?.items || []).map(({ id, label }) => ({ id, label }));
-  const theme = wheelTheme();
-  const size = canvas.width, center = size / 2, radius = center - 14;
-  ctx.clearRect(0, 0, size, size);
-  if (!items.length) {
-    ctx.beginPath(); ctx.arc(center, center, radius, 0, Math.PI * 2);
-    ctx.fillStyle = theme.empty; ctx.fill();
-    return;
+// The wheel face is drawn once per queue/theme/size into an offscreen canvas
+// and each animation frame only rotates that bitmap. Redrawing every segment
+// and shadowed label per frame was expensive with CPU rendering. Geometry is
+// expressed against a 1000px reference wheel and scaled to the real size.
+const wheelFaceCache = { key: "", canvas: null };
+
+function wheelCanvasSize(canvas) {
+  const cssSize = canvas.clientWidth || 350;
+  const size = Math.max(200, Math.min(1400, Math.round(cssSize * (window.devicePixelRatio || 1))));
+  if (canvas.width !== size) {
+    canvas.width = size;
+    canvas.height = size;
   }
+  return size;
+}
+
+function wheelFace(items, theme, size, highlight) {
+  const key = JSON.stringify([document.documentElement.dataset.theme, size, highlight, items.map((item) => item.label)]);
+  if (wheelFaceCache.key === key && wheelFaceCache.canvas) return wheelFaceCache.canvas;
+  const face = wheelFaceCache.canvas || document.createElement("canvas");
+  face.width = size;
+  face.height = size;
+  const ctx = face.getContext("2d");
+  const scale = size / 1000, center = size / 2, radius = center - 14 * scale;
   const arc = Math.PI * 2 / items.length;
+  ctx.clearRect(0, 0, size, size);
   ctx.save();
   ctx.translate(center, center);
-  ctx.rotate(rotation);
   for (let index = 0; index < items.length; index++) {
     const start = -Math.PI / 2 + index * arc, end = start + arc;
     ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, radius, start, end); ctx.closePath();
@@ -669,7 +741,7 @@ function drawWheel(wheel, rotation = 0, highlight = -1) {
     // so opening or spinning the same wheel never repaints its segments.
     ctx.fillStyle = theme.segments[index % theme.segments.length];
     ctx.fill();
-    ctx.strokeStyle = theme.separator; ctx.lineWidth = 3; ctx.stroke();
+    ctx.strokeStyle = theme.separator; ctx.lineWidth = 3 * scale; ctx.stroke();
     if (index === highlight) {
       ctx.save(); ctx.globalAlpha = 0.28; ctx.fillStyle = "#ffffff"; ctx.fill(); ctx.restore();
     }
@@ -682,19 +754,40 @@ function drawWheel(wheel, rotation = 0, highlight = -1) {
       ctx.rotate(start + arc / 2);
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
-      ctx.font = `600 ${items.length > 12 ? 32 : 38}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+      ctx.font = `600 ${(items.length > 12 ? 32 : 38) * scale}px -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif`;
       ctx.fillStyle = ink.color;
       ctx.shadowColor = ink.shadow;
-      ctx.shadowBlur = 4;
-      ctx.fillText(text, radius - 34, 0, radius * 0.65);
+      ctx.shadowBlur = 4 * scale;
+      ctx.fillText(text, radius - 34 * scale, 0, radius * 0.65);
       ctx.restore();
     }
   }
   ctx.restore();
+  wheelFaceCache.key = key;
+  wheelFaceCache.canvas = face;
+  return face;
+}
+
+function drawWheel(wheel, rotation = 0, highlight = -1) {
+  const canvas = $("wheel-canvas"), ctx = canvas.getContext("2d");
+  const items = wheel?.items?.length ? wheel.items : (snapshot?.playlist?.items || []).map(({ id, label }) => ({ id, label }));
+  const theme = wheelTheme();
+  const size = wheelCanvasSize(canvas), center = size / 2, scale = size / 1000, radius = center - 14 * scale;
+  ctx.clearRect(0, 0, size, size);
+  if (!items.length) {
+    ctx.beginPath(); ctx.arc(center, center, radius, 0, Math.PI * 2);
+    ctx.fillStyle = theme.empty; ctx.fill();
+    return;
+  }
+  ctx.save();
+  ctx.translate(center, center);
+  ctx.rotate(rotation);
+  ctx.drawImage(wheelFace(items, theme, size, highlight), -center, -center);
+  ctx.restore();
   ctx.beginPath();
   ctx.arc(center, center, radius, 0, Math.PI * 2);
   ctx.strokeStyle = theme.rim;
-  ctx.lineWidth = 4;
+  ctx.lineWidth = 4 * scale;
   ctx.stroke();
 }
 
@@ -874,12 +967,19 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
 }
 
+// Rebuilding a list replaces the element under the pointer (hover flicker),
+// the focused control and any open role menu, so lists are rebuilt only when
+// what they display has changed.
+let participantsRenderKey = "";
 function renderParticipants(referenceMedia) {
   const me = self();
   const list = $("participants");
   if (!list || !snapshot) return;
-  document.querySelectorAll(".participant-custom-menu").forEach((menu) => menu.remove());
   if ($("people-count")) $("people-count").textContent = snapshot.participants.length;
+  const key = JSON.stringify([snapshot.selfId, me?.role, referenceMedia?.fingerprint || "", snapshot.participants.map((person) => [person.id, person.name, person.role, person.media?.fingerprint || ""])]);
+  if (key === participantsRenderKey && list.childElementCount === snapshot.participants.length) return;
+  participantsRenderKey = key;
+  document.querySelectorAll(".participant-custom-menu").forEach((menu) => menu.remove());
 
   list.replaceChildren(...snapshot.participants.map((person) => {
     const item = document.createElement("li");
@@ -921,6 +1021,7 @@ function renderParticipants(referenceMedia) {
 
 function capitalize(value) { return value ? value[0].toUpperCase() + value.slice(1) : ""; }
 
+let playlistRenderKey = "";
 function renderPlaylist() {
   if (!snapshot) return;
   const allowed = canControl(), items = snapshot.playlist.items || [];
@@ -936,6 +1037,13 @@ function renderPlaylist() {
 
   const list = $("playlist");
   if (draggedPlaylistIndex >= 0) return;
+  const key = JSON.stringify([
+    items, snapshot.playlist.selected, allowed, availability, streamingAvailable, streamState,
+    snapshot.selfId, snapshot.streamOffers || [], preferences.youtubeQualities || {},
+    snapshot.participants.map((person) => [person.id, person.availableMedia])
+  ]);
+  if (key === playlistRenderKey && list.childElementCount === items.length) return;
+  playlistRenderKey = key;
   list.replaceChildren(...items.map((item, index) => {
     const row = document.createElement("li");
     row.className = `queue-item ${index === snapshot.playlist.selected ? "active" : ""}`;
@@ -1422,6 +1530,8 @@ async function leaveRoom() {
   await invoke("LeaveRoom");
   hosted = { running: false };
   snapshot = null; timeline = []; playlistHistory = [];
+  playlistRenderKey = ""; participantsRenderKey = ""; availabilityKey = "";
+  renderChat();
   streamingAvailable = false;
   streamState = { state: "idle", offerId: "", route: "" };
   timelineSegments = []; timelineSegmentKey = ""; timelineSegmentsRetryKey = "";
@@ -1446,12 +1556,11 @@ document.body.dataset.platform = wails?.System?.IsMac() ? "mac" : wails?.System?
 $("window-minimise").onclick = () => wails?.Window?.Minimise();
 $("window-maximise").onclick = () => wails?.Window?.ToggleMaximise();
 $("window-close").onclick = () => wails?.Window?.Close();
-$("window-titlebar").ondblclick = (event) => {
-  if (!event.target.closest("button")) $("window-maximise").click();
-};
-document.querySelector(".app-command-bar")?.addEventListener("dblclick", (event) => {
-  if (!event.target.closest("button, input, select")) $("window-maximise").click();
-});
+$("window-titlebar").ondblclick = titlebarDoubleClick;
+document.querySelector(".app-command-bar")?.addEventListener("dblclick", titlebarDoubleClick);
+document.querySelector(".sidebar-brand")?.addEventListener("dblclick", titlebarDoubleClick);
+window.addEventListener("blur", () => document.body.classList.add("window-inactive"));
+window.addEventListener("focus", () => document.body.classList.remove("window-inactive"));
 
 // Connection forms wiring
 $("join-tab").onclick = () => switchConnectMode("join");
@@ -1698,15 +1807,25 @@ $("add-media-directory").onclick = () => withButtonLoading($("add-media-director
 }, "Indexing");
 
 function addChat(chat) {
-  timeline.push({ kind: "chat", value: chat, sentAtUnixMs: chat.sentAtUnixMs });
-  if (timeline.length > 500) timeline = timeline.slice(-500);
-  renderChat();
+  appendTimeline({ kind: "chat", value: chat, sentAtUnixMs: chat.sentAtUnixMs });
 }
 
 function addActivity(activity) {
-  timeline.push({ kind: "activity", value: activity, sentAtUnixMs: activity.sentAtUnixMs });
+  appendTimeline({ kind: "activity", value: activity, sentAtUnixMs: activity.sentAtUnixMs });
+}
+
+// New entries are appended instead of rebuilding the feed, and the feed only
+// follows new messages while the reader is already at the bottom.
+function appendTimeline(entry) {
+  timeline.push(entry);
   if (timeline.length > 500) timeline = timeline.slice(-500);
-  renderChat();
+  const chatStream = $("chat");
+  if (!chatStream || (chatFilter !== "all" && entry.kind !== chatFilter)) return;
+  const following = chatStream.scrollHeight - chatStream.scrollTop - chatStream.clientHeight < 24;
+  chatStream.querySelector(".chat-empty")?.remove();
+  chatStream.append(entry.kind === "activity" ? renderActivity(entry) : renderChatMessage(entry));
+  while (chatStream.childElementCount > 500) chatStream.firstElementChild.remove();
+  if (following) chatStream.scrollTop = chatStream.scrollHeight;
 }
 
 function activityDescription(activity) {
@@ -1875,10 +1994,11 @@ const systemThemeQuery = matchMedia("(prefers-color-scheme: dark)");
 const systemThemeChanged = () => {
   if (preferences.theme === "system") applyPreferences();
 };
+// The media query reports real system theme changes. Re-applying the theme on
+// every focus or visibility change restyled the whole page exactly when the
+// compositor was redrawing the window, which showed up as flashing.
 if (systemThemeQuery.addEventListener) systemThemeQuery.addEventListener("change", systemThemeChanged);
 else systemThemeQuery.addListener?.(systemThemeChanged);
-window.addEventListener("focus", systemThemeChanged);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) systemThemeChanged(); });
 
 function showContextMenu(event, items) {
   const menu = $("context-menu");
@@ -2022,10 +2142,18 @@ function receiveFileDrop(paths, target) {
   addMediaPaths(paths || [], target?.id === "now-playing-drop");
 }
 
+// Availability and streaming support change with the playlist or the
+// connection, not with every room event.
+let connectionEpoch = 0;
+let availabilityKey = "";
+let streamingCheckEpoch = -1;
 function receive(event) {
   if (event.connection) {
     setConnection(event.connection);
-    if (event.connection.state === "connected") refreshStreamingSupport();
+    if (event.connection.state === "connected") {
+      connectionEpoch++;
+      refreshStreamingSupport();
+    }
     if (event.connection.state === "disconnected") {
       streamingAvailable = false;
       streamState = { state: "idle", offerId: "", route: "" };
@@ -2034,8 +2162,15 @@ function receive(event) {
   if (event.snapshot) {
     snapshot = normalizeSnapshot(event.snapshot);
     render();
-    refreshAvailability();
-    if (!streamingAvailable) refreshStreamingSupport();
+    const nextAvailabilityKey = `${connectionEpoch}|${snapshot.playlist.revision}|${snapshot.playlist.items.length}`;
+    if (nextAvailabilityKey !== availabilityKey) {
+      availabilityKey = nextAvailabilityKey;
+      refreshAvailability();
+    }
+    if (!streamingAvailable && streamingCheckEpoch !== connectionEpoch) {
+      streamingCheckEpoch = connectionEpoch;
+      refreshStreamingSupport();
+    }
     if (event.snapshot.playlistWheel) showWheel(event.snapshot.playlistWheel, event.serverNowUnixMs);
   }
   if (event.stream) {
@@ -2072,10 +2207,11 @@ document.addEventListener("keydown", (event) => {
 if (wails?.Events) {
   wails.Events.On("faro:event", (event) => receive(event.data));
   wails.Events.On("faro:file-drop", (event) => receiveFileDrop(event.data?.paths, event.data?.target));
+  wails.Events.On("faro:window-state", (event) => setWindowState(event.data));
 }
 
 setInterval(() => {
-  if (!snapshot || snapshot.playback.paused || connectionState !== "connected" || isScrubbing) return;
+  if (document.hidden || !snapshot || snapshot.playback.paused || connectionState !== "connected" || isScrubbing) return;
   const projected = projectedPlaybackPosition();
   const duration = playbackDuration();
   if (duration) $("position").value = String(projected);
@@ -2083,14 +2219,21 @@ setInterval(() => {
   $("current-time").textContent = formatTime(projected);
 }, 250);
 
-await configurePlayerOptions();
+// Startup. On Linux the window stays hidden until WindowReady, so everything
+// the first frame shows is settled before it is revealed.
+applyPreferences();
+await Promise.all([
+  configurePlayerOptions(),
+  loadWindowChrome(),
+  hasBackend ? invoke("Version").then((value) => { appVersion = value; }).catch(() => {}) : null,
+  hasBackend ? wails?.Window?.IsMaximised?.().then((maximised) => setWindowState({ maximised })).catch(() => {}) : null
+]);
+$("version").textContent = appVersion;
+applyWindowChrome();
 hydrateConnectForms();
 enhanceAllSelects();
 applyPreferences();
 renderMediaDirectories();
-if (hasBackend) invoke("Version").then((value) => {
-  appVersion = value;
-  $("version").textContent = value;
-  renderConnectionInfo();
-}).catch(() => {});
+renderConnectionInfo();
+if (hasBackend) invoke("WindowReady").catch(() => {});
 if (hasBackend) void checkForUpdates();

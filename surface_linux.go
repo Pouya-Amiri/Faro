@@ -4,16 +4,17 @@ package main
 
 /*
 #cgo pkg-config: gtk4
+#include <stdlib.h>
 #include <gtk/gtk.h>
 
-// Faro draws its own title bar, so GTK decorates nothing and Wails pins
-// `border-radius: 0` on the toplevel. The toplevel then still painted the
-// theme's opaque background, which is what showed as a square black corner
-// behind the rounded page. This is the standard GTK4 client-side-decoration
-// recipe: a transparent toplevel clipped to a rounded rectangle. Descendants
-// are clipped as well, so the WebKitWebView underneath can never paint over
-// the transparent corners.
-static void faroInstallSurfaceStyle(int radius) {
+// Faro draws its own title bar in the page, but it keeps GTK's client-side
+// decorations: GTK4 then owns the rounded corners, the shadow, the resize
+// borders outside the visible frame, the opaque region, and the square shape
+// while maximised, fullscreen or tiled. The window becomes "frameless" by
+// replacing GTK's title bar with an empty one. The window's own CSS state
+// classes (.maximized, .tiled-*, .solid-csd, ...) switch in the same frame as
+// the state change, so the corners never lag behind the window state.
+static void faroInstallChromeStyle(int radius) {
 	static gboolean installed = FALSE;
 	if (installed) {
 		return;
@@ -21,86 +22,96 @@ static void faroInstallSurfaceStyle(int radius) {
 	installed = TRUE;
 
 	gchar *css = g_strdup_printf(
-		"window.faro-surface { background: transparent; }"
-		"window.faro-surface.faro-surface-rounded { border-radius: %dpx; }",
+		"window.csd.faro { border-radius: %dpx; }"
+		"window.csd.faro.maximized, window.csd.faro.fullscreen,"
+		"window.csd.faro.tiled, window.csd.faro.tiled-top, window.csd.faro.tiled-bottom,"
+		"window.csd.faro.tiled-left, window.csd.faro.tiled-right,"
+		"window.csd.faro.solid-csd { border-radius: 0; }",
 		radius);
 	GtkCssProvider *provider = gtk_css_provider_new();
 	gtk_css_provider_load_from_string(provider, css);
 	g_free(css);
-	// USER priority beats the `.wails-frameless { border-radius: 0 }` rule Wails
-	// installs on the same widget at APPLICATION priority.
 	gtk_style_context_add_provider_for_display(gdk_display_get_default(),
 		GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_USER);
 	// The provider is deliberately never released: it must outlive the display.
 }
 
-// gdk_toplevel_get_state also reports the tiled states a compositor uses for
-// edge snapping. GTK exposes them nowhere else and Wails does not forward them.
-// wantFlush carries the maximised/fullscreen state Wails already tracks, so a
-// compositor that omits a flag cannot leave corners rounded at a screen edge.
-static gboolean faroSurfaceFlush(GtkWindow *window, gboolean wantFlush) {
-	if (wantFlush) {
-		return TRUE;
+// faroPrepareWindow must run before the window is first mapped: GTK does not
+// promise that a title bar can be replaced on a visible window.
+static void faroPrepareWindow(GtkWindow *window) {
+	if (g_object_get_data(G_OBJECT(window), "faro-prepared") != NULL) {
+		return;
 	}
-	GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(window));
-	if (surface == NULL) {
-		return FALSE;
-	}
-	const GdkToplevelState flush = GDK_TOPLEVEL_STATE_MAXIMIZED | GDK_TOPLEVEL_STATE_FULLSCREEN |
-		GDK_TOPLEVEL_STATE_TILED | GDK_TOPLEVEL_STATE_TOP_TILED | GDK_TOPLEVEL_STATE_RIGHT_TILED |
-		GDK_TOPLEVEL_STATE_BOTTOM_TILED | GDK_TOPLEVEL_STATE_LEFT_TILED;
-	return (gdk_toplevel_get_state(GDK_TOPLEVEL(surface)) & flush) != 0;
+	g_object_set_data(G_OBJECT(window), "faro-prepared", GINT_TO_POINTER(1));
+
+	GtkWidget *titlebar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+	gtk_widget_set_visible(titlebar, FALSE);
+	gtk_window_set_titlebar(window, titlebar);
+	gtk_window_set_decorated(window, TRUE);
+	gtk_widget_add_css_class(GTK_WIDGET(window), "faro");
+	// Clip the webview to the rounded frame so its square corners never paint
+	// over the transparent corner area.
+	gtk_widget_set_overflow(GTK_WIDGET(window), GTK_OVERFLOW_HIDDEN);
 }
 
-static void faroShapeSurface(GtkWindow *window, gboolean flush) {
-	GtkWidget *widget = GTK_WIDGET(window);
-	gtk_widget_add_css_class(widget, "faro-surface");
-	gtk_widget_set_overflow(widget, GTK_OVERFLOW_HIDDEN);
-	if (flush) {
-		gtk_widget_remove_css_class(widget, "faro-surface-rounded");
-	} else {
-		gtk_widget_add_css_class(widget, "faro-surface-rounded");
+static gchar *faroStringSetting(const char *name) {
+	gchar *value = NULL;
+	GtkSettings *settings = gtk_settings_get_default();
+	if (settings != NULL) {
+		g_object_get(settings, name, &value, NULL);
 	}
+	return value;
 }
 */
 import "C"
 
 import (
+	"unsafe"
+
 	"github.com/wailsapp/wails/v3/pkg/application"
-	"github.com/wailsapp/wails/v3/pkg/events"
 )
 
-// surfaceCornerRadius is the radius of the rounded Linux window. GTK4 owns the
-// window shape, so the radius is declared only here.
+// nativeClientDecorations keeps GTK's decorations and hides only its title bar.
+const nativeClientDecorations = true
+
+// revealWhenReady creates the window hidden and shows it once the page has
+// rendered, so no half-styled frame is ever visible.
+const revealWhenReady = true
+
+// surfaceCornerRadius is the radius of the floating Linux window.
 const surfaceCornerRadius = 15
 
-// watchWindowSurface adds the Linux-only state changes Wails does not report as
-// common window events: the first load, by which time the toplevel exists, and
-// resizes, which is how edge snapping and tiling appear.
-func watchWindowSurface(window application.Window) {
-	notify := func(*application.WindowEvent) { syncWindowSurface(window) }
-	window.OnWindowEvent(events.Linux.WindowLoadStarted, notify)
-	window.OnWindowEvent(events.Linux.WindowDidResize, notify)
-}
-
-// syncWindowSurface gives the frameless GTK toplevel a transparent, rounded
-// shape, or a square one while the window is flush with the screen edges.
-// Window events are delivered on their own goroutine, so the GTK calls are
-// dispatched to the main thread.
-func syncWindowSurface(window application.Window) {
+// prepareWindowSurface installs the empty title bar and corner style. It is
+// idempotent and reports false when the native window does not exist yet.
+func prepareWindowSurface(window application.Window) bool {
 	native := window.NativeWindow()
 	if native == nil {
-		return
-	}
-	// IsMaximised and IsFullscreen dispatch to the main thread themselves, so
-	// they must be read outside the InvokeSync below.
-	wantFlush := C.gboolean(0)
-	if window.IsMaximised() || window.IsFullscreen() {
-		wantFlush = 1
+		return false
 	}
 	application.InvokeSync(func() {
-		gtkWindow := (*C.GtkWindow)(native)
-		C.faroInstallSurfaceStyle(C.int(surfaceCornerRadius))
-		C.faroShapeSurface(gtkWindow, C.faroSurfaceFlush(gtkWindow, wantFlush))
+		C.faroInstallChromeStyle(C.int(surfaceCornerRadius))
+		C.faroPrepareWindow((*C.GtkWindow)(native))
 	})
+	return true
+}
+
+// platformWindowChrome reports the desktop's title bar button layout and
+// double-click action so the page can mirror them.
+func platformWindowChrome() (layout, doubleClick string) {
+	application.InvokeSync(func() {
+		layout = takeSetting("gtk-decoration-layout")
+		doubleClick = takeSetting("gtk-titlebar-double-click")
+	})
+	return layout, doubleClick
+}
+
+func takeSetting(name string) string {
+	key := C.CString(name)
+	defer C.free(unsafe.Pointer(key))
+	value := C.faroStringSetting(key)
+	if value == nil {
+		return ""
+	}
+	defer C.g_free(C.gpointer(value))
+	return C.GoString(value)
 }

@@ -7,6 +7,10 @@ import "github.com/wailsapp/wails/v3/pkg/application"
 // Window shaping is a Linux/GTK4 concern (see surface_linux.go). Everywhere
 // else the native toolkit or window manager owns the window corners.
 
-func watchWindowSurface(application.Window) {}
+const nativeClientDecorations = false
 
-func syncWindowSurface(application.Window) {}
+const revealWhenReady = false
+
+func prepareWindowSurface(application.Window) bool { return true }
+
+func platformWindowChrome() (layout, doubleClick string) { return "", "" }
