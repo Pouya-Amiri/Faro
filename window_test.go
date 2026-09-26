@@ -70,3 +70,20 @@ func TestWindowFrameCSSFollowsTheme(t *testing.T) {
 		t.Errorf("light frame should use the page colour and a dark edge:\n%s", light)
 	}
 }
+
+func TestWindowControlStyle(t *testing.T) {
+	cases := map[[2]string]string{
+		{"windows", ""}:           "windows",
+		{"linux", "GNOME"}:        "gnome",
+		{"linux", "ubuntu:GNOME"}: "gnome",
+		{"linux", "KDE"}:          "kde",
+		{"linux", "XFCE"}:         "gnome",
+		{"linux", ""}:             "gnome",
+		{"darwin", ""}:            "windows",
+	}
+	for input, want := range cases {
+		if got := windowControlStyle(input[0], input[1]); got != want {
+			t.Errorf("windowControlStyle(%q, %q) = %q, want %q", input[0], input[1], got, want)
+		}
+	}
+}

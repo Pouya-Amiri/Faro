@@ -25,8 +25,8 @@
         document.documentElement.style.colorScheme = isDark ? "dark" : "light";
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=32" />
-    <link rel="stylesheet" href="/desktop.css?v=17" />
+    <link rel="stylesheet" href="/styles.css?v=33" />
+    <link rel="stylesheet" href="/desktop.css?v=18" />
   </head>
   <body>
     <script>
@@ -313,15 +313,13 @@
                     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 20 9 12l10-8v16ZM5 19V5"/></svg>
                   </button>
                   <button id="back-ten" class="btn btn-transport skip-btn" type="button" title="Skip backward 10 seconds" aria-label="Back 10 seconds">
-                    <svg class="icon icon-skip" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 4v4h4"/></svg>
-                    <span class="skip-num">10</span>
+                    <svg class="icon icon-skip" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5A8.5 8.5 0 1 1 4.64 8.75M14.5 2 12 4.5 14.5 7"/><text class="skip-num" x="12" y="15.7" text-anchor="middle" font-size="7.5">10</text></svg>
                   </button>
                   <button id="pause" class="btn btn-play-pause" type="button" aria-label="Play / Pause" title="Play / Pause">
                     <svg class="play-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M8 5v14l11-7L8 5Z" fill="currentColor"/></svg>
                   </button>
                   <button id="forward-ten" class="btn btn-transport skip-btn" type="button" title="Skip forward 10 seconds" aria-label="Forward 10 seconds">
-                    <svg class="icon icon-skip" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 4v4h-4"/></svg>
-                    <span class="skip-num">10</span>
+                    <svg class="icon icon-skip" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5A8.5 8.5 0 1 0 19.36 8.75M9.5 2 12 4.5 9.5 7"/><text class="skip-num" x="12" y="15.7" text-anchor="middle" font-size="7.5">10</text></svg>
                   </button>
                   <button id="next-media" class="btn btn-transport" type="button" title="Next in queue" aria-label="Next media">
                     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 4 10 8-10 8V4ZM19 5v14"/></svg>
@@ -334,14 +332,15 @@
                     <span class="clock-divider">/</span>
                     <span id="duration">--:--</span>
                   </div>
-                  <div class="inline-select-group rate-group" title="Playback speed">
-                    <span class="select-label">Speed</span>
-                    <div class="rate-stepper" role="group" aria-label="Playback speed">
-                      <button id="rate-decrease" type="button" aria-label="Decrease playback speed" title="Slower"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6h7"/></svg></button>
-                      <button id="playback-rate" class="rate-value" data-value="1" type="button" aria-label="Reset playback speed" title="Reset to normal speed">1×</button>
-                      <button id="rate-increase" type="button" aria-label="Increase playback speed" title="Faster"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6h7M6 2.5v7"/></svg></button>
-                    </div>
-                  </div>
+                  <select id="playback-rate" class="form-select select-compact" data-select-class="rate-select" aria-label="Playback speed" title="Playback speed">
+                    <option value="0.5">0.5×</option>
+                    <option value="0.75">0.75×</option>
+                    <option value="1" selected>1×</option>
+                    <option value="1.25">1.25×</option>
+                    <option value="1.5">1.5×</option>
+                    <option value="1.75">1.75×</option>
+                    <option value="2">2×</option>
+                  </select>
                 </div>
               </div>
             </article>
@@ -349,7 +348,8 @@
             <!-- Shared Queue / Playlist Data Grid Table -->
             <article id="playlist-panel" class="deck-card queue-card" data-file-drop-target>
               <div class="panel-header-toolbar">
-                <div class="panel-heading">
+                <div class="panel-heading inspector-title-wrap">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>
                   <span class="panel-title">Queue</span>
                   <span id="playlist-count" class="counter-badge">0</span>
                 </div>
@@ -362,9 +362,9 @@
                     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></svg>
                     <span>Add URL</span>
                   </button>
-                  <button id="shuffle-playlist" class="btn btn-secondary btn-sm" type="button" title="Shuffle upcoming items">
-                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5-5 5M21 8h-4c-5 0-5 8-10 8H3M16 21l5-5-5-5M21 16h-4c-1.2 0-2.1-.5-2.9-1.2M3 8h4c1.2 0 2.1.5 2.9 1.2"/></svg>
-                    <span>Shuffle</span>
+                  <button id="spin-wheel" class="btn btn-secondary btn-sm" type="button" title="Spin the wheel to pick the next item for everyone">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13.5" r="8.5"/><path d="M12 5v17M4.6 9.25l14.8 8.5M4.6 17.75l14.8-8.5"/><path d="M9.5 1.5h5L12 5.5Z" fill="currentColor"/></svg>
+                    <span>Spin</span>
                   </button>
                   <button id="playlist-more" class="btn btn-secondary btn-icon" type="button" aria-haspopup="menu" aria-label="More queue actions" title="Queue Options">
                     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
@@ -446,7 +446,13 @@
                   <button id="clear-chat" class="btn btn-ghost btn-xs" type="button" title="Clear message feed">Clear</button>
                 </div>
 
-                <div id="chat" class="chat-feed-stream" role="log" aria-live="polite"></div>
+                <div class="chat-feed-wrap">
+                  <div id="chat" class="chat-feed-stream" role="log" aria-live="polite"></div>
+                  <button id="chat-new-messages" class="chat-new-messages hidden" type="button">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
+                    <span>New messages</span>
+                  </button>
+                </div>
 
                 <form id="chat-form" class="chat-compose-bar">
                   <input id="chat-message" class="form-input form-input-sm" autocomplete="off" maxlength="512" placeholder="Message the room" required />
@@ -478,10 +484,9 @@
             <span>Undo Last Queue Change</span>
           </button>
           <hr class="popover-sep" />
-          <button id="spin-wheel" class="popover-btn" role="menuitem">
-            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 2v12M2 8h12M3.8 3.8l8.4 8.4M3.8 12.2l8.4-8.4" stroke="currentColor" stroke-width="1.1"/></svg>
-            <span>Spin Selection Wheel...</span>
-            <small class="popover-badge">Synced</small>
+          <button id="shuffle-playlist" class="popover-btn" role="menuitem">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M11 3h3v3M14 3l-5 5M11 13h3v-3M14 13l-5-5M2 3l4 4M2 13l4-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Shuffle Upcoming</span>
           </button>
           <button id="shuffle-all" class="popover-btn" role="menuitem">
             <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M11 3h3v3M14 3l-5 5M11 13h3v-3M14 13l-5-5M2 3l4 4M2 13l4-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -827,6 +832,6 @@
       </div>
     </div>
 
-    <script type="module" src="/app.js?v=20"></script>
+    <script type="module" src="/app.js?v=21"></script>
   </body>
 </html>

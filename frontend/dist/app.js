@@ -427,7 +427,17 @@ function applyPreferences() {
   if ($("compact-mode")) $("compact-mode").checked = Boolean(preferences.compact);
   if ($("reduce-motion")) $("reduce-motion").checked = Boolean(preferences.reduceMotion);
   if ($("skip-seconds")) $("skip-seconds").value = preferences.skipSeconds;
-  document.querySelectorAll(".skip-num").forEach((node) => node.textContent = preferences.skipSeconds);
+  document.querySelectorAll(".skip-num").forEach((node) => {
+    const label = String(preferences.skipSeconds);
+    if (node.textContent !== label) node.textContent = label;
+    node.setAttribute("font-size", label.length > 2 ? "6" : "7.5");
+  });
+  for (const [id, direction] of [["back-ten", "backward"], ["forward-ten", "forward"]]) {
+    const button = $(id);
+    if (!button) continue;
+    button.title = `Skip ${direction} ${preferences.skipSeconds} seconds`;
+    button.setAttribute("aria-label", button.title);
+  }
   if ($("pause-on-leave")) $("pause-on-leave").checked = Boolean(preferences.pauseOnLeave);
   if ($("sponsorblock-enabled")) $("sponsorblock-enabled").checked = preferences.sponsorBlock !== false;
   if ($("wheel-sound-enabled")) $("wheel-sound-enabled").checked = preferences.wheelSound !== false;
@@ -453,7 +463,9 @@ function rememberWindowBackground() {
 }
 
 // Window controls mirror the desktop's title bar conventions.
-let windowChrome = { buttonsSide: "right", buttons: ["minimize", "maximize", "close"], doubleClick: "toggle-maximize" };
+let windowChrome = { buttonsSide: "right", buttons: ["minimize", "maximize", "close"], doubleClick: "toggle-maximize", style: "windows" };
+// Space each control style needs: [per button, gap between buttons, outer padding].
+const windowControlMetrics = { windows: [46, 0, 0], gnome: [24, 12, 24], kde: [22, 6, 20] };
 const maximiseIcon = '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
 const restoreIcon = '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><rect x="2" y="4" width="6" height="6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 4V3.2c0-.66.54-1.2 1.2-1.2h3.1c.66 0 1.2.54 1.2 1.2v3.1c0 .66-.54 1.2-1.2 1.2H8" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
 
@@ -468,8 +480,12 @@ function applyWindowChrome() {
   const names = (Array.isArray(windowChrome.buttons) ? windowChrome.buttons : []).filter((name) => byName[name]);
   for (const [name, button] of Object.entries(byName)) button.classList.toggle("hidden", !names.includes(name));
   for (const name of names) controls.append(byName[name]);
+  const style = windowControlMetrics[windowChrome.style] ? windowChrome.style : "windows";
+  const [button, gap, padding] = windowControlMetrics[style];
   document.body.dataset.controlsSide = windowChrome.buttonsSide === "left" ? "left" : "right";
-  document.documentElement.style.setProperty("--window-controls-width", `${names.length * 48}px`);
+  document.body.dataset.controlsStyle = style;
+  const width = names.length ? names.length * button + (names.length - 1) * gap + padding : 0;
+  document.documentElement.style.setProperty("--window-controls-width", `${width}px`);
 }
 
 function setWindowState(state = {}) {
@@ -638,7 +654,7 @@ function render() {
   $("owner-invite").classList.toggle("hidden", me?.role !== "owner");
   $("settings-owner-invite").classList.toggle("hidden", me?.role !== "owner");
 
-  for (const id of ["pause", "position", "back-ten", "forward-ten", "playback-rate", "rate-decrease", "rate-increase", "add-file", "empty-add-file", "add-stream-btn", "add-playlist", "shuffle-playlist", "shuffle-all", "load-playlist-file", "save-playlist-file", "clear-playlist", "spin-wheel", "wheel-spin-again", "previous-media", "next-media"]) setDisabled(id, !allowed);
+  for (const id of ["pause", "position", "back-ten", "forward-ten", "playback-rate", "add-file", "empty-add-file", "add-stream-btn", "add-playlist", "shuffle-playlist", "shuffle-all", "load-playlist-file", "save-playlist-file", "clear-playlist", "spin-wheel", "wheel-spin-again", "previous-media", "next-media"]) setDisabled(id, !allowed);
   setDisabled("add-playlist", !allowed || addingPlaylistURL);
 
   const media = me?.media || snapshot.participants.find((person) => person.media)?.media;
@@ -686,18 +702,29 @@ function render() {
   renderConnectionInfo();
 }
 
-const playbackRates = [0.5, 0.75, 1, 1.25, 1.5, 2];
+const playbackRates = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+function rateLabel(value) { return `${Number(value.toFixed(2))}×`; }
+
+// The speed menu lists the standard rates. A rate set elsewhere (for example
+// in a participant's own player) gets a temporary entry so it still shows.
 function updateRateControl(rate) {
   const value = Number(rate) || 1;
   const control = $("playback-rate");
-  control.dataset.value = String(value);
-  control.textContent = `${Number(value.toFixed(2))}×`;
-  const index = playbackRates.reduce((best, candidate, candidateIndex) => Math.abs(candidate - value) < Math.abs(playbackRates[best] - value) ? candidateIndex : best, 0);
-  $("rate-decrease").disabled = !canControl() || index === 0;
-  $("rate-increase").disabled = !canControl() || index === playbackRates.length - 1;
+  const key = String(Number(value.toFixed(2)));
+  control.querySelectorAll("option[data-custom]").forEach((option) => { if (option.value !== key) option.remove(); });
+  if (![...control.options].some((option) => option.value === key)) {
+    const option = new Option(rateLabel(value), key);
+    option.dataset.custom = "true";
+    const next = [...control.options].find((candidate) => Number(candidate.value) > value);
+    control.insertBefore(option, next || null);
+  }
+  if (control.value !== key) control.value = key;
+  control.dataset.value = key;
+  control._syncCustomSelect?.();
 }
 
 function stepPlaybackRate(direction) {
+  if (!canControl()) return;
   const current = Number($("playback-rate").dataset.value || 1);
   const index = playbackRates.reduce((best, candidate, candidateIndex) => Math.abs(candidate - current) < Math.abs(playbackRates[best] - current) ? candidateIndex : best, 0);
   const target = playbackRates[clamp(index + direction, 0, playbackRates.length - 1)];
@@ -1442,7 +1469,10 @@ function positionPopover(popover, anchor) {
   const width = popover.offsetWidth;
   const left = rect.left + width > innerWidth - 8 ? rect.right - width : rect.left;
   popover.style.left = `${Math.max(8, Math.min(innerWidth - width - 8, left))}px`;
-  popover.style.top = `${Math.max(8, Math.min(innerHeight - popover.offsetHeight - 8, rect.bottom + 4))}px`;
+  const height = popover.offsetHeight;
+  const below = rect.bottom + 4;
+  const top = below + height > innerHeight - 8 && rect.top - height - 4 >= 8 ? rect.top - height - 4 : below;
+  popover.style.top = `${Math.max(8, Math.min(innerHeight - height - 8, top))}px`;
 }
 
 function togglePopover(popover, anchor) {
@@ -1479,6 +1509,7 @@ function enhanceSelect(select) {
   select.classList.add("native-select-source");
   const wrapper = document.createElement("div");
   wrapper.className = `custom-select ${select.classList.contains("select-compact") || select.classList.contains("participant-role-select") ? "compact" : ""}`;
+  if (select.dataset.selectClass) wrapper.classList.add(select.dataset.selectClass);
   select.parentNode.insertBefore(wrapper, select);
   wrapper.append(select);
   const trigger = document.createElement("button");
@@ -1490,6 +1521,7 @@ function enhanceSelect(select) {
   const menu = document.createElement("div");
   menu.className = "popover-menu custom-select-menu hidden";
   if (select.classList.contains("participant-role-select")) menu.classList.add("participant-custom-menu");
+  if (select.dataset.selectClass) menu.classList.add(`${select.dataset.selectClass}-menu`);
   menu.setAttribute("role", "menu");
   (select.closest("dialog") || document.body).append(menu);
 
@@ -1675,9 +1707,10 @@ $("forward-ten").onclick = () => {
   const target = projectedPlaybackPosition() + Number(preferences.skipSeconds || 10);
   invoke("Seek", duration ? Math.min(duration, target) : target).catch(showError);
 };
-$("rate-decrease").onclick = () => stepPlaybackRate(-1);
-$("rate-increase").onclick = () => stepPlaybackRate(1);
-$("playback-rate").onclick = () => invoke("SetRate", 1).catch(showError);
+$("playback-rate").onchange = (event) => {
+  const rate = Number(event.target.value);
+  if (rate > 0 && rate !== Number(event.target.dataset.value)) invoke("SetRate", rate).catch(showError);
+};
 $("previous-media").onclick = () => playPlaylist(snapshot.playlist.selected - 1);
 $("next-media").onclick = () => playPlaylist(snapshot.playlist.selected + 1);
 
@@ -1745,10 +1778,11 @@ $("undo-playlist").onclick = async () => {
   try { await updatePlaylist(previous, false); }
   catch (error) { playlistHistory.push(previous); showError(error); }
 };
-$("shuffle-playlist").onclick = () => withButtonLoading($("shuffle-playlist"), async () => {
+$("shuffle-playlist").onclick = () => {
+  closePopovers();
   const items = playlistInputs(), selected = snapshot.playlist.selected, start = selected >= 0 ? selected + 1 : 0, tail = items.splice(start);
-  await updatePlaylist([...items, ...shuffled(tail)]);
-}, "Shuffling").catch(showError);
+  updatePlaylist([...items, ...shuffled(tail)]).catch(showError);
+};
 $("playlist-more").onclick = (event) => { event.stopPropagation(); togglePopover($("playlist-menu"), $("playlist-more")); };
 $("add-stream-focus").onclick = () => {
   closePopovers();
@@ -1832,7 +1866,19 @@ function appendTimeline(entry) {
   chatStream.append(entry.kind === "activity" ? renderActivity(entry) : renderChatMessage(entry));
   while (chatStream.childElementCount > 500) chatStream.firstElementChild.remove();
   if (following) chatStream.scrollTop = chatStream.scrollHeight;
+  else if (entry.kind === "chat") $("chat-new-messages")?.classList.remove("hidden");
 }
+
+// Shown when a message arrives while the reader is scrolled up in the feed.
+$("chat").addEventListener("scroll", () => {
+  const chatStream = $("chat");
+  if (chatStream.scrollHeight - chatStream.scrollTop - chatStream.clientHeight < 24) $("chat-new-messages")?.classList.add("hidden");
+});
+$("chat-new-messages")?.addEventListener("click", () => {
+  const chatStream = $("chat");
+  chatStream.scrollTop = chatStream.scrollHeight;
+  $("chat-new-messages").classList.add("hidden");
+});
 
 function activityDescription(activity) {
   const name = activity.participantName || "Someone";
@@ -1921,6 +1967,7 @@ function renderChat() {
   }
   chatStream.replaceChildren(...visible.map((entry) => entry.kind === "activity" ? renderActivity(entry) : renderChatMessage(entry)));
   chatStream.scrollTop = chatStream.scrollHeight;
+  $("chat-new-messages")?.classList.add("hidden");
 }
 
 // Menus and settings dialog
@@ -1932,8 +1979,20 @@ document.addEventListener("click", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closePopovers();
+    return;
   }
-});
+  // Arrow keys, Home and End move through the open menu, as native menus do.
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const menu = [...document.querySelectorAll(".popover-menu:not(.hidden), #context-menu:not(.hidden)")].pop();
+  if (!menu) return;
+  const items = [...menu.querySelectorAll(".popover-btn")].filter((item) => !item.disabled && item.offsetParent !== null);
+  if (!items.length) return;
+  event.preventDefault();
+  const position = items.indexOf(document.activeElement);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+    : event.key === "ArrowDown" ? (position + 1) % items.length : (position <= 0 ? items.length - 1 : position - 1);
+  items[next].focus();
+}, true);
 $("room-chip").onclick = (event) => { event.stopPropagation(); togglePopover($("room-menu"), $("room-chip")); };
 $("copy-room-name").onclick = () => { closePopovers(); copyText(snapshot.room.id, "Room name copied"); };
 $("open-settings").onclick = () => { renderConnectionInfo(); $("settings-dialog").showModal(); };
@@ -2058,18 +2117,26 @@ document.addEventListener("contextmenu", (event) => {
     const item = snapshot.playlist.items[index];
     if (!item) return;
     const selectedHere = index === snapshot.playlist.selected;
+    // The queue can change while the menu is open, so actions find their item
+    // by ID when chosen instead of trusting the row index captured now.
+    const at = (task) => () => {
+      closePopovers();
+      const current = snapshot?.playlist?.items?.findIndex((entry) => entry.id === item.id) ?? -1;
+      if (current < 0) { showToast("That queue item was removed", "error"); return; }
+      task(current);
+    };
     const controls = [selectedHere
       ? menuButton("Resume", () => { closePopovers(); invoke("SetPaused", false).catch(showError); }, { disabled: !canControl() || !snapshot.playback.paused || !isPlaylistItemPlayable(item) })
-      : menuButton("Play now", () => { closePopovers(); playPlaylist(index); }, { disabled: !canControl() || !isPlaylistItemPlayable(item) })];
+      : menuButton("Play now", at((current) => playPlaylist(current)), { disabled: !canControl() || !isPlaylistItemPlayable(item) })];
     if (!item.url && item.media && !availability[item.id]) controls.push(menuButton("Locate matching file…", () => { closePopovers(); locateItem(item.id); }));
     const ownOffer = (snapshot.streamOffers || []).find((offer) => offer.providerId === snapshot.selfId);
     if (ownOffer && item.media && ownOffer.media?.fingerprint === item.media.fingerprint) controls.push(menuButton("Stop sharing file", () => { closePopovers(); invoke("StopOfferingStream").then(() => showToast("File sharing stopped")).catch(showError); }));
     else if (!ownOffer && !item.url && availability[item.id] && streamingAvailable && friendsMissing(item.media)) controls.push(menuButton("Share file", () => { closePopovers(); invoke("OfferPlaylistStream", item.id).then(() => showToast("File sharing started")).catch(showError); }));
     controls.push(
-      menuButton("Move up", () => { closePopovers(); reorderPlaylist(index, index - 1); }, { disabled: !canControl() || index === 0 }),
-      menuButton("Move down", () => { closePopovers(); reorderPlaylist(index, index + 1); }, { disabled: !canControl() || index === snapshot.playlist.items.length - 1 }),
+      menuButton("Move up", at((current) => current > 0 && reorderPlaylist(current, current - 1)), { disabled: !canControl() || index === 0 }),
+      menuButton("Move down", at((current) => current < snapshot.playlist.items.length - 1 && reorderPlaylist(current, current + 1)), { disabled: !canControl() || index === snapshot.playlist.items.length - 1 }),
       menuButton("Copy title", () => { closePopovers(); copyText(item.label, "Title copied"); }),
-      menuButton("Remove from queue", () => { closePopovers(); removePlaylist(index); }, { disabled: !canControl(), danger: true })
+      menuButton("Remove from queue", at((current) => removePlaylist(current)), { disabled: !canControl(), danger: true })
     );
     if (item.url) controls.splice(controls.length - 1, 0, menuButton("Copy video URL", () => { closePopovers(); copyText(item.url, "URL copied"); }));
     showContextMenu(event, controls);
@@ -2208,6 +2275,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "ArrowRight" && canControl()) { event.preventDefault(); $("forward-ten").click(); }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o" && canControl()) { event.preventDefault(); chooseFiles(); }
   if ((event.ctrlKey || event.metaKey) && event.key === ",") { event.preventDefault(); $("settings-dialog").showModal(); }
+  if (!event.ctrlKey && !event.metaKey && !event.altKey && (event.key === ">" || event.key === "<")) { event.preventDefault(); stepPlaybackRate(event.key === ">" ? 1 : -1); }
 });
 
 if (wails?.Events) {

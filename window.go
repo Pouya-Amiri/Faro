@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -27,6 +28,8 @@ type WindowChrome struct {
 	Buttons []string `json:"buttons"`
 	// DoubleClick is "toggle-maximize", "minimize" or "none".
 	DoubleClick string `json:"doubleClick"`
+	// Style is the look the controls take: "gnome", "kde" or "windows".
+	Style string `json:"style"`
 }
 
 // WindowReady is called by the page once its first render is complete.
@@ -35,7 +38,25 @@ func (d *Desktop) WindowReady() { d.revealWindow() }
 // WindowChrome returns the desktop's title bar button layout and double-click
 // behaviour.
 func (d *Desktop) WindowChrome() WindowChrome {
-	return parseWindowChrome(platformWindowChrome())
+	chrome := parseWindowChrome(platformWindowChrome())
+	chrome.Style = windowControlStyle(runtime.GOOS, os.Getenv("XDG_CURRENT_DESKTOP"))
+	return chrome
+}
+
+// windowControlStyle picks the window-control look that matches the desktop.
+// Other Linux desktops get the GNOME/GTK look, which is what GTK4's own
+// client-side decorations use there too.
+func windowControlStyle(goos, desktop string) string {
+	switch {
+	case goos == "windows":
+		return "windows"
+	case goos != "linux":
+		return "windows"
+	case strings.Contains(strings.ToUpper(desktop), "KDE"):
+		return "kde"
+	default:
+		return "gnome"
+	}
 }
 
 // SetWindowBackground remembers the page's resolved background colour so the
