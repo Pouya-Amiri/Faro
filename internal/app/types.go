@@ -54,6 +54,8 @@ type StreamStatus struct {
 	CachedBytes    int64   `json:"cachedBytes,omitempty"`
 	TotalBytes     int64   `json:"totalBytes,omitempty"`
 	BytesPerSecond float64 `json:"bytesPerSecond,omitempty"`
+	// CachedRanges are the cached parts as [start, end) fractions of the file.
+	CachedRanges [][2]float64 `json:"cachedRanges,omitempty"`
 }
 
 type ConnectionStatus struct {
@@ -175,6 +177,7 @@ type Service struct {
 	streamReceiveItemID     string
 	streamIdentity          *protocol.Media
 	chat                    chatOverlay
+	streamCache             mediastream.CacheOptions
 }
 
 func New(root context.Context, sink EventSink) *Service {

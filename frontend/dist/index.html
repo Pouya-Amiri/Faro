@@ -25,7 +25,7 @@
         document.documentElement.style.colorScheme = isDark ? "dark" : "light";
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=35" />
+    <link rel="stylesheet" href="/styles.css?v=36" />
     <link rel="stylesheet" href="/desktop.css?v=18" />
   </head>
   <body>
@@ -300,6 +300,7 @@
 
               <!-- Timeline Range Scrubber -->
               <div class="timeline-control-row">
+                <div id="timeline-cache" class="timeline-cache" aria-hidden="true"></div>
                 <div class="scrubber-wrapper">
                   <div id="timeline-segments" class="timeline-segments" aria-hidden="true"></div>
                   <input id="position" type="range" min="0" max="1" step="any" value="0" aria-label="Playback timeline" />
@@ -771,6 +772,23 @@
                     <span>Add Media Folder...</span>
                   </button>
                   <ul id="media-directories" class="media-directories-list"></ul>
+
+                  <div class="pref-section-head pref-subsection">
+                    <h3>Streamed Files</h3>
+                    <p>Files streamed from other people are cached on this device while you watch, then deleted.</p>
+                  </div>
+
+                  <div class="form-group">
+                    <label for="stream-cache-limit" class="form-label">Stream Cache Limit</label>
+                    <select id="stream-cache-limit" class="form-select">
+                      <option value="0">Whole file (fastest seeking)</option>
+                      <option value="10737418240">Up to 10 GB</option>
+                      <option value="5368709120">Up to 5 GB</option>
+                      <option value="2147483648">Up to 2 GB</option>
+                      <option value="-1">Memory only (512 MB)</option>
+                    </select>
+                    <small class="form-hint">Applies to the next stream. Files larger than the limit keep only the parts you watched most recently.</small>
+                  </div>
                 </section>
 
                 <!-- Page: Session -->
@@ -868,6 +886,6 @@
       </div>
     </div>
 
-    <script type="module" src="/app.js?v=23"></script>
+    <script type="module" src="/app.js?v=24"></script>
   </body>
 </html>

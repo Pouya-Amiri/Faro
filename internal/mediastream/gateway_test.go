@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -247,7 +249,7 @@ func TestGatewayMemoryCacheStaysBounded(t *testing.T) {
 		if body := fixture.get(t, fmt.Sprintf("bytes=%d-%d", start, start+32767)); string(body) != string(content[start:start+32768]) {
 			t.Fatalf("range at %d returned the wrong bytes", start)
 		}
-		store := fixture.gateway.store.(*memoryStore)
+		store := fixture.gateway.store.(*blockStore)
 		store.mu.Lock()
 		blocks := len(store.blocks)
 		store.mu.Unlock()
@@ -282,5 +284,94 @@ func TestGatewayDiskCacheLeavesNothingBehind(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 		t.Fatalf("cache directory not empty after close: %d entries", len(entries))
+	}
+}
+
+func TestGatewayDiskCacheLimitKeepsRecentBlocks(t *testing.T) {
+	previous := minDiskCacheLimit
+	minDiskCacheLimit = 0
+	t.Cleanup(func() { minDiskCacheLimit = previous })
+	content := randomContent(t, 1024*1024)
+	fixture := newGatewayFixture(t, content, 64*1024, func(cfg *GatewayConfig) {
+		cfg.CacheDir = t.TempDir()
+		cfg.ChunkBytes = 64 * 1024
+		cfg.DiskCacheLimit = 256 * 1024
+	})
+	store, ok := fixture.gateway.store.(*blockStore)
+	if !ok || !store.onDisk() {
+		t.Fatalf("expected a bounded disk cache, got %T", fixture.gateway.store)
+	}
+	// Read the whole file twice: the second pass needs evicted blocks again.
+	for pass := range 2 {
+		if body := fixture.get(t, ""); string(body) != string(content) {
+			t.Fatalf("pass %d returned the wrong bytes", pass)
+		}
+	}
+	store.mu.Lock()
+	blocks, slots := len(store.blocks), store.nextSlot
+	store.mu.Unlock()
+	if blocks > 4 || slots > 4 {
+		t.Fatalf("disk cache holds %d blocks in %d slots, limit is 4", blocks, slots)
+	}
+	if progress := fixture.gateway.Progress(); progress.CachedBytes > 256*1024 {
+		t.Fatalf("%d bytes marked cached, limit is %d", progress.CachedBytes, 256*1024)
+	}
+}
+
+type failingStore struct {
+	cacheStore
+	failAfter int64
+	written   atomic.Int64
+}
+
+func (s *failingStore) WriteAt(data []byte, offset int64) ([][2]int64, error) {
+	if s.written.Add(int64(len(data))) > s.failAfter {
+		return nil, errors.New("no space left on device")
+	}
+	return s.cacheStore.WriteAt(data, offset)
+}
+
+func TestGatewayFallsBackToMemoryWhenTheDiskFills(t *testing.T) {
+	content := randomContent(t, 1024*1024)
+	fixture := newGatewayFixture(t, content, 64*1024, func(cfg *GatewayConfig) {
+		cfg.CacheDir = t.TempDir()
+		cfg.ChunkBytes = 64 * 1024
+		cfg.DisableBackgroundFill = true
+	})
+	fixture.gateway.mu.Lock()
+	fixture.gateway.store = &failingStore{cacheStore: fixture.gateway.store, failAfter: 200 * 1024}
+	fixture.gateway.mu.Unlock()
+	if body := fixture.get(t, ""); string(body) != string(content) {
+		t.Fatal("stream returned the wrong bytes after the disk cache failed")
+	}
+	fixture.gateway.mu.Lock()
+	store, ok := fixture.gateway.store.(*blockStore)
+	fixture.gateway.mu.Unlock()
+	if !ok || store.onDisk() {
+		t.Fatalf("expected the memory cache after a disk failure, got %T", fixture.gateway.store)
+	}
+}
+
+func TestGatewayReportsCachedRanges(t *testing.T) {
+	content := randomContent(t, 1024*1024)
+	fixture := newGatewayFixture(t, content, 64*1024, func(cfg *GatewayConfig) {
+		cfg.CacheDir = t.TempDir()
+		cfg.ChunkBytes = 64 * 1024
+		cfg.DisableBackgroundFill = true
+	})
+	if ranges := fixture.gateway.CachedRanges(8); len(ranges) != 0 {
+		t.Fatalf("new gateway reports cached ranges %v", ranges)
+	}
+	fixture.gateway.mu.Lock()
+	for _, unit := range []int64{0, 1, 4, 6, 15} {
+		fixture.gateway.have[0] |= 1 << unit
+	}
+	fixture.gateway.mu.Unlock()
+	if got := fixture.gateway.CachedRanges(8); fmt.Sprint(got) != "[[0 0.125] [0.25 0.3125] [0.375 0.4375] [0.9375 1]]" {
+		t.Fatalf("cached ranges = %v", got)
+	}
+	// Two ranges: the smallest gaps (units 2-3 and 5) merge first.
+	if got := fixture.gateway.CachedRanges(2); fmt.Sprint(got) != "[[0 0.4375] [0.9375 1]]" {
+		t.Fatalf("merged cached ranges = %v", got)
 	}
 }

@@ -182,7 +182,7 @@ const pauseIcon = '<svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"
 
 const defaultPreferences = {
   theme: "system", compact: false, reduceMotion: false, skipSeconds: 10, wheelSound: true,
-  pauseOnLeave: false, sponsorBlock: true, autoOffer: true, chatOverlay: true, youtubeQualities: {}, name: "", player: "mpv", executable: "",
+  pauseOnLeave: false, sponsorBlock: true, autoOffer: true, chatOverlay: true, streamCacheLimit: 0, youtubeQualities: {}, name: "", player: "mpv", executable: "",
   playerArgs: "", publicHost: "localhost", listenAddress: ":8999", room: "watch"
 };
 let preferences = loadPreferences();
@@ -288,6 +288,28 @@ function referenceMedia() {
 function playbackDuration() {
   const duration = Number(referenceMedia()?.durationSeconds || 0);
   return Number.isFinite(duration) && duration > 0 ? duration : 0;
+}
+
+function streamCacheLimit() {
+  const value = Number(preferences.streamCacheLimit);
+  return [0, -1, 2147483648, 5368709120, 10737418240].includes(value) ? value : 0;
+}
+
+// Cached parts of a streamed file, drawn under the played part of the track.
+function renderStreamCache() {
+  const layer = $("timeline-cache");
+  if (!layer) return;
+  const ranges = streamState.state === "active" && Array.isArray(streamState.cachedRanges) ? streamState.cachedRanges : [];
+  if (!ranges.length) {
+    layer.style.background = "";
+    return;
+  }
+  const stops = [];
+  for (const [start, end] of ranges) {
+    const from = (clamp(start, 0, 1) * 100).toFixed(2), to = (clamp(end, 0, 1) * 100).toFixed(2);
+    stops.push(`transparent ${from}%`, `var(--cache-fill) ${from}%`, `var(--cache-fill) ${to}%`, `transparent ${to}%`);
+  }
+  layer.style.background = `linear-gradient(to right, ${stops.join(", ")})`;
 }
 
 function updateScrubberProgress(position = 0, duration = playbackDuration()) {
@@ -443,6 +465,10 @@ function applyPreferences() {
   if ($("sponsorblock-enabled")) $("sponsorblock-enabled").checked = preferences.sponsorBlock !== false;
   if ($("auto-offer-enabled")) $("auto-offer-enabled").checked = preferences.autoOffer !== false;
   if ($("chat-overlay-enabled")) $("chat-overlay-enabled").checked = preferences.chatOverlay !== false;
+  if ($("stream-cache-limit")) {
+    $("stream-cache-limit").value = String(streamCacheLimit());
+    $("stream-cache-limit")._syncCustomSelect?.();
+  }
   if ($("wheel-sound-enabled")) $("wheel-sound-enabled").checked = preferences.wheelSound !== false;
 }
 
@@ -665,6 +691,7 @@ function render() {
   $("media-title").textContent = title;
   $("media-title").title = title;
   renderMediaKind(media);
+  renderStreamCache();
   const mismatches = media ? snapshot.participants.filter((person) => person.media && person.media.fingerprint !== media.fingerprint) : [];
   $("media-warning").classList.toggle("hidden", mismatches.length === 0);
   $("media-warning").textContent = mismatches.length ? `${mismatches.length} participant${mismatches.length === 1 ? " has" : "s have"} different media loaded. Sync paused for mismatched copies.` : "";
@@ -1471,6 +1498,7 @@ async function enterRoom(request) {
   await invoke("SetSponsorBlockEnabled", preferences.sponsorBlock !== false);
   await invoke("SetAutoOfferEnabled", preferences.autoOffer !== false);
   await invoke("SetChatOverlayEnabled", preferences.chatOverlay !== false);
+  await invoke("SetStreamCacheLimit", streamCacheLimit());
   // Indexing can hash thousands of files. The room is already usable, so keep
   // discovery in the background and refresh availability as results arrive.
   void indexSavedDirectories();
@@ -2153,6 +2181,10 @@ $("sponsorblock-enabled").onchange = (event) => {
   if (snapshot) invoke("SetSponsorBlockEnabled", event.target.checked).catch(showError);
 };
 $("wheel-sound-enabled").onchange = (event) => savePreferences({ wheelSound: event.target.checked });
+$("stream-cache-limit").onchange = (event) => {
+  savePreferences({ streamCacheLimit: Number(event.target.value) || 0 });
+  invoke("SetStreamCacheLimit", streamCacheLimit()).catch(showError);
+};
 $("chat-overlay-enabled").onchange = (event) => {
   savePreferences({ chatOverlay: event.target.checked });
   invoke("SetChatOverlayEnabled", event.target.checked).catch(showError);
@@ -2493,8 +2525,12 @@ function receive(event) {
       // Progress ticks only refresh the badge, and a tick that arrives after
       // the stream ended is ignored.
       if (streamState.state === "active" && streamState.offerId === next.offerId) {
-        Object.assign(streamState, { cachedBytes: next.cachedBytes || 0, totalBytes: next.totalBytes, bytesPerSecond: next.bytesPerSecond || 0 });
+        Object.assign(streamState, {
+          cachedBytes: next.cachedBytes || 0, totalBytes: next.totalBytes, bytesPerSecond: next.bytesPerSecond || 0,
+          cachedRanges: next.cachedRanges || [],
+        });
         if (snapshot) renderMediaKind(referenceMedia());
+        renderStreamCache();
       }
     } else {
       streamState = { state: next.state || "idle", offerId: next.offerId || "", route: next.route || "" };

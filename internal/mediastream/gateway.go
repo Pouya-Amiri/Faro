@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,8 +39,9 @@ const (
 	backgroundFetches = 2
 	// memoryCacheBytes bounds the fallback cache when no disk cache is possible.
 	memoryCacheBytes = int64(512 * 1024 * 1024)
-	maxGatewayCache  = int64(4 * 1024 * 1024 * 1024)
-	fetchRetryDelay  = 250 * time.Millisecond
+
+	maxGatewayCache = int64(4 * 1024 * 1024 * 1024)
+	fetchRetryDelay = 250 * time.Millisecond
 	// minAdaptiveChunk is where fetch sizing starts. On a narrow link small
 	// pieces arrive quickly and in playback order; on a fast link fetches
 	// grow towards the chunk size so parallel requests hide the latency.
@@ -56,6 +58,10 @@ const (
 	servePiece    = 256 * 1024
 )
 
+// minDiskCacheLimit keeps a capped cache far larger than the read-ahead
+// window, so blocks being filled are never the least recently used.
+var minDiskCacheLimit = int64(1024 * 1024 * 1024)
+
 type GatewayConfig struct {
 	Viewer     streamtransport.Viewer
 	Capability string
@@ -65,6 +71,10 @@ type GatewayConfig struct {
 	CacheBytes int64
 	// CacheDir holds the disk cache; empty uses the user cache directory.
 	CacheDir string
+	// DiskCacheLimit caps the disk cache. A larger file keeps only the most
+	// recently used parts (at least minDiskCacheLimit) and is not downloaded
+	// in full; 0 caches the whole file.
+	DiskCacheLimit int64
 	// DisableBackgroundFill keeps the gateway to what the player asks for
 	// plus the read-ahead window.
 	DisableBackgroundFill bool
@@ -202,7 +212,11 @@ func openCacheStore(cfg GatewayConfig, chunkBytes int64) (cacheStore, error) {
 			dir = filepath.Join(os.TempDir(), "faro-streams")
 		}
 	}
-	if store, err := newDiskStore(dir, cfg.Media.SizeBytes); err == nil {
+	if limit := cfg.DiskCacheLimit; limit > 0 && limit < cfg.Media.SizeBytes {
+		if store, err := newDiskBlockStore(dir, cfg.Media.SizeBytes, max(limit, minDiskCacheLimit), chunkBytes); err == nil {
+			return store, nil
+		}
+	} else if store, err := newDiskStore(dir, cfg.Media.SizeBytes); err == nil {
 		return store, nil
 	}
 	return newMemoryStore(cfg.Media.SizeBytes, memoryCacheBytes, defaultGatewayChunk), nil
@@ -225,6 +239,51 @@ func (g *Gateway) Progress() Progress {
 	return Progress{CachedBytes: cached, TotalBytes: g.media.SizeBytes, ReceivedBytes: g.received.Load()}
 }
 
+// CachedRanges reports the cached parts of the file as [start, end) fractions
+// of its size, in order. Nearby ranges are merged so there are at most limit.
+func (g *Gateway) CachedRanges(limit int) [][2]float64 {
+	g.mu.Lock()
+	var runs [][2]int64
+	for unit := int64(0); unit < int64(g.units); unit++ {
+		if !g.hasUnitLocked(unit) {
+			continue
+		}
+		if last := len(runs) - 1; last >= 0 && runs[last][1] == unit {
+			runs[last][1] = unit + 1
+		} else {
+			runs = append(runs, [2]int64{unit, unit + 1})
+		}
+	}
+	units := float64(g.units)
+	g.mu.Unlock()
+	if limit < 1 {
+		limit = 1
+	}
+	if len(runs) > limit {
+		// Merge across the smallest gaps first.
+		gaps := make([]int64, 0, len(runs)-1)
+		for index := 1; index < len(runs); index++ {
+			gaps = append(gaps, runs[index][0]-runs[index-1][1])
+		}
+		slices.Sort(gaps)
+		threshold := gaps[len(runs)-limit-1]
+		merged := runs[:1]
+		for _, run := range runs[1:] {
+			if last := len(merged) - 1; run[0]-merged[last][1] <= threshold {
+				merged[last][1] = run[1]
+			} else {
+				merged = append(merged, run)
+			}
+		}
+		runs = merged
+	}
+	ranges := make([][2]float64, len(runs))
+	for index, run := range runs {
+		ranges[index] = [2]float64{float64(run[0]) / units, float64(run[1]) / units}
+	}
+	return ranges
+}
+
 func (g *Gateway) Close() error {
 	var result error
 	g.closeOnce.Do(func() {
@@ -239,7 +298,10 @@ func (g *Gateway) Close() error {
 		serverErr := g.server.Close()
 		g.transport.CloseIdleConnections()
 		<-g.fillDone
-		result = errors.Join(serverErr, g.viewer.Close(), g.store.Close())
+		g.mu.Lock()
+		store := g.store
+		g.mu.Unlock()
+		result = errors.Join(serverErr, g.viewer.Close(), store.Close())
 	})
 	return result
 }
@@ -331,11 +393,13 @@ func (g *Gateway) serve(ctx context.Context, writer io.Writer, start, end int64)
 			g.waiting--
 		}
 		g.scheduleReadAheadLocked(position)
+		store := g.store
 		g.mu.Unlock()
 		piece := buffer[:min(available, int64(len(buffer)))]
-		read, err := g.store.ReadAt(piece, position)
+		read, err := store.ReadAt(piece, position)
 		if errors.Is(err, errEvicted) || (err != nil && read == 0) {
-			// Dropped by the memory cache in the meantime: fetch it again.
+			// Evicted by a bounded cache, or the cache was replaced, in the
+			// meantime: fetch it again.
 			g.forget(position, position+int64(len(piece)))
 			continue
 		}
@@ -556,10 +620,12 @@ func (g *Gateway) download(ctx context.Context, f *fetch) error {
 	if err := g.viewer.WaitForDirect(ctx); err != nil {
 		return err
 	}
+	// clearLocked may move f.start while the fetch runs; the request covers
+	// the range as it was when the fetch began.
 	g.mu.Lock()
-	end := f.end
+	start, end := f.start, f.end
 	g.mu.Unlock()
-	if end < f.start {
+	if end < start {
 		return nil
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://faro.media"+upstreamPath, nil)
@@ -567,15 +633,15 @@ func (g *Gateway) download(ctx context.Context, f *fetch) error {
 		return err
 	}
 	request.Header.Set("Authorization", "Bearer "+g.capability)
-	request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", f.start, end))
+	request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	g.fetchCount.Add(1)
 	response, err := g.transport.RoundTrip(request)
 	if err != nil {
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusPartialContent || response.ContentLength != end-f.start+1 {
-		return fmt.Errorf("stream provider returned %s for range %d-%d", response.Status, f.start, end)
+	if response.StatusCode != http.StatusPartialContent || response.ContentLength != end-start+1 {
+		return fmt.Errorf("stream provider returned %s for range %d-%d", response.Status, start, end)
 	}
 	buffer := make([]byte, 64*1024)
 	began := time.Now()
@@ -583,7 +649,7 @@ func (g *Gateway) download(ctx context.Context, f *fetch) error {
 		// Size the next foreground fetches so each takes about chunkDuration
 		// at the rate this one achieved.
 		elapsed := time.Since(began)
-		received := f.next - f.start
+		received := f.next - start
 		if f.background || received < g.unit || elapsed <= 0 {
 			return
 		}
@@ -595,18 +661,26 @@ func (g *Gateway) download(ctx context.Context, f *fetch) error {
 	for {
 		g.mu.Lock()
 		remaining := f.end - f.next + 1
+		store := g.store
 		g.mu.Unlock()
 		if remaining <= 0 {
 			return nil // shortened: a newer fetch covers the rest
 		}
 		read, err := response.Body.Read(buffer[:min(int64(len(buffer)), remaining)])
 		if read > 0 {
-			evicted, writeErr := g.store.WriteAt(buffer[:read], f.next)
+			evicted, writeErr := store.WriteAt(buffer[:read], f.next)
 			if writeErr != nil {
+				g.mu.Lock()
+				g.replaceFailedStoreLocked(store)
+				g.mu.Unlock()
 				return writeErr
 			}
 			g.received.Add(int64(read))
 			g.mu.Lock()
+			if g.store != store {
+				g.mu.Unlock()
+				return errStoreReplaced
+			}
 			f.next += int64(read)
 			g.markLocked(f)
 			g.observeRateLocked(time.Now())
@@ -648,6 +722,37 @@ func (g *Gateway) clearLocked(start, end int64) {
 			g.haveUnits--
 		}
 	}
+	// A running fetch may already have written into the dropped range: those
+	// bytes are no longer readable through it, and its units there must not be
+	// marked as cached later.
+	for f := range g.fetches {
+		if start < f.next && f.start < end {
+			f.start = min(max(f.start, end), f.next)
+			f.marked = max(f.marked, (end+g.unit-1)/g.unit*g.unit)
+		}
+	}
+}
+
+var errStoreReplaced = errors.New("stream cache was replaced")
+
+// replaceFailedStoreLocked switches to a memory cache after a disk cache
+// write fails, typically because the disk filled up after the stream began.
+// Everything cached on disk is dropped and running fetches restart.
+func (g *Gateway) replaceFailedStoreLocked(failed cacheStore) {
+	if g.store != failed || g.closed {
+		return
+	}
+	if bounded, ok := failed.(*blockStore); ok && !bounded.onDisk() {
+		return
+	}
+	g.store = newMemoryStore(g.media.SizeBytes, memoryCacheBytes, g.chunkBytes)
+	clear(g.have)
+	g.haveUnits = 0
+	for f := range g.fetches {
+		f.cancel()
+	}
+	g.cond.Broadcast()
+	go failed.Close()
 }
 
 func (g *Gateway) forget(start, end int64) {
@@ -677,7 +782,7 @@ func (g *Gateway) fillLoop() {
 		case <-ticker.C:
 		}
 		g.mu.Lock()
-		if closed := g.closed; closed || g.haveUnits == g.units {
+		if closed := g.closed; closed || g.haveUnits == g.units || !g.store.Complete() {
 			g.mu.Unlock()
 			if closed {
 				return

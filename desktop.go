@@ -246,3 +246,5 @@ func mediaFileFilters() []application.FileFilter {
 func (d *Desktop) SetAutoOfferEnabled(enabled bool) { d.service.SetAutoOfferEnabled(enabled) }
 
 func (d *Desktop) SetChatOverlayEnabled(enabled bool) { d.service.SetChatOverlayEnabled(enabled) }
+
+func (d *Desktop) SetStreamCacheLimit(limitBytes int64) { d.service.SetStreamCacheLimit(limitBytes) }

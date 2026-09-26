@@ -651,6 +651,7 @@ svg { display: block; flex: 0 0 auto; }
 .pref-section-head { padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .pref-section-head h3 { margin: 0 0 4px; }
 .pref-section-head p { margin: 0; color: var(--text-muted); }
+.pref-section-head.pref-subsection { margin-top: 12px; }
 .pref-button-cluster { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
 .pref-divider { width: 100%; height: 1px; margin: 4px 0; border: 0; background: var(--line); }
 .media-directories-list { margin: 0; padding: 0; list-style: none; }
@@ -967,6 +968,12 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
   content: ""; position: absolute; z-index: 0; left: 0; top: 9px; height: 2px; pointer-events: none;
 }
 .timeline-control-row::before { width: 100%; background: var(--line-strong); }
+/* Cached parts of a streamed file: between the empty track and the played
+   part, like a player's buffer bar. */
+.timeline-cache {
+  --cache-fill: color-mix(in srgb, var(--text-muted) 55%, var(--line-strong));
+  position: absolute; z-index: 0; left: 0; right: 0; top: 9px; height: 2px; pointer-events: none;
+}
 .timeline-control-row::after { width: var(--range-progress); background: var(--accent); }
 .scrubber-wrapper { z-index: 1; inset: 0; }
 #position { height: 20px; cursor: pointer; }
@@ -1153,7 +1160,7 @@ input[type="number"] { appearance: textfield; }
   background-image: linear-gradient(100deg, var(--flag-tint), color-mix(in srgb, var(--flag-tint), transparent 75%) 65%, transparent);
 }
 .queue-item.needs-file .queue-status-tag { color: var(--text-quiet); }
-#host-mode-hint { color: var(--text-hint); line-height: 1.5; }
+#host-mode-hint, .form-hint { color: var(--text-hint); line-height: 1.5; }
 .queue-meta-col { flex-direction: column; align-items: flex-start; gap: 3px; padding: 8px 0; }
 @media (max-width: 1000px) {
   .queue-duration { display: none; }

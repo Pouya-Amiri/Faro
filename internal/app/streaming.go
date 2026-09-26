@@ -457,7 +457,10 @@ func (s *Service) activateStream(ctx context.Context, client *faroclient.Client,
 		}
 		s.mu.Unlock()
 	}()
-	gateway, err := pending.viewer.StartGateway(ctx, grant, pending.media)
+	s.mu.RLock()
+	cache := s.streamCache
+	s.mu.RUnlock()
+	gateway, err := pending.viewer.StartGateway(ctx, grant, pending.media, cache)
 	if err != nil {
 		s.failStreamActivation(client, grant, pending, nil, "stream_connect", err)
 		return
@@ -533,6 +536,18 @@ func (s *Service) activateStream(ctx context.Context, client *faroclient.Client,
 	finished = true
 }
 
+// streamCacheRanges bounds the cached ranges sent to the seek bar each second.
+const streamCacheRanges = 48
+
+// SetStreamCacheLimit chooses how later streams are cached on this device: a
+// positive limit caps the disk cache, 0 caches whole files and a negative
+// value keeps streams in memory only. A running stream keeps its cache.
+func (s *Service) SetStreamCacheLimit(limitBytes int64) {
+	s.mu.Lock()
+	s.streamCache = mediastream.CacheOptions{DiskLimit: max(limitBytes, 0), MemoryOnly: limitBytes < 0}
+	s.mu.Unlock()
+}
+
 // reportStreamProgress emits the active gateway's cache progress about once a
 // second, until the stream ends or the whole file is cached.
 func (s *Service) reportStreamProgress(gateway *mediastream.Gateway, offerID string) {
@@ -561,6 +576,7 @@ func (s *Service) reportStreamProgress(gateway *mediastream.Gateway, offerID str
 		s.sink(Event{Kind: "stream", Stream: &StreamStatus{
 			State: "active", OfferID: offerID, Route: "direct",
 			CachedBytes: progress.CachedBytes, TotalBytes: progress.TotalBytes, BytesPerSecond: rate,
+			CachedRanges: gateway.CachedRanges(streamCacheRanges),
 		}})
 		if complete {
 			return
