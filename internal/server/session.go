@@ -70,7 +70,7 @@ func newSession(server *Server, connection net.Conn) (*session, error) {
 	return &session{
 		id: id, server: server,
 		log:  server.log.With("remote", connection.RemoteAddr().String(), "session", id),
-		conn: connection, codec: protocol.NewCodec(connection),
+		conn: connection, codec: protocol.NewCodecWithLimits(connection, protocol.MaxFrameSize, protocol.MaxStateFrameSize),
 		out: make(chan outbound, 128), done: make(chan struct{}),
 		capabilities: make(map[protocol.Capability]struct{}),
 		commands:     rateWindow{maximum: 120, window: 10 * time.Second},

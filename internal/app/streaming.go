@@ -247,6 +247,14 @@ func (s *Service) StreamFromOffer(offerID string) error {
 	}
 	pending := &pendingStream{viewer: viewer, media: offer.Media, playlistItemID: playlistItemID}
 	s.mu.Lock()
+	// Reconciliation runs concurrently: another call may have claimed this
+	// offer while the viewer was being prepared. Overwriting its entry would
+	// leak that viewer and orphan its request.
+	if s.pendingStreams[offerID] != nil {
+		s.mu.Unlock()
+		viewer.Close()
+		return errors.New("this media stream is already being requested")
+	}
 	s.pendingStreams[offerID] = pending
 	s.mu.Unlock()
 	accepted, err := client.RequestStream(protocol.MediaStreamRequest{OfferID: offerID, ClientPublicKey: viewer.PublicKey()})

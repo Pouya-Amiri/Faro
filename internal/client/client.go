@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,9 +17,17 @@ import (
 
 const (
 	connectTimeout = 10 * time.Second
-	pingInterval   = 5 * time.Second
+	writeTimeout   = 10 * time.Second
 	commandTimeout = 5 * time.Second
 )
+
+// pingInterval paces pings; tests shorten it. The server answers every ping,
+// so livenessPings intervals without any frame mean the connection is dead
+// (a Wi-Fi switch, NAT rebinding or a sleeping laptop) even though no error
+// was reported.
+var pingInterval = 5 * time.Second
+
+const livenessPings = 4
 
 type commandReply struct {
 	envelope protocol.Envelope
@@ -99,7 +108,7 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, errors.New("TLS dialer returned a non-TLS connection")
 	}
 	client := &Client{
-		cfg: cfg, conn: connection, codec: protocol.NewCodec(connection),
+		cfg: cfg, conn: connection, codec: protocol.NewCodecWithLimits(connection, protocol.MaxStateFrameSize, protocol.MaxFrameSize),
 		events: make(chan Event, 128), done: make(chan struct{}),
 		pending: make(map[string]chan commandReply),
 	}
@@ -126,6 +135,27 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 	return client, nil
 }
 
+// RejectedError is the server refusing a connection during the handshake.
+type RejectedError struct {
+	Code    string
+	Message string
+}
+
+func (e *RejectedError) Error() string {
+	return fmt.Sprintf("server rejected connection (%s): %s", e.Code, e.Message)
+}
+
+// Permanent reports whether sending the same hello again cannot succeed. A
+// full room or server can free up; a revoked join token, a replaced owner or
+// an incompatible client cannot.
+func (e *RejectedError) Permanent() bool {
+	switch e.Code {
+	case "unauthorized", "invalid_owner_token", "invalid_hello":
+		return true
+	}
+	return false
+}
+
 func (c *Client) readHandshake(helloID string) error {
 	gotWelcome := false
 	for !gotWelcome || c.snapshot.SelfID == "" {
@@ -139,7 +169,7 @@ func (c *Client) readHandshake(helloID string) error {
 			if decodeErr != nil {
 				return decodeErr
 			}
-			return fmt.Errorf("server rejected connection (%s): %s", failure.Code, failure.Message)
+			return &RejectedError{Code: failure.Code, Message: failure.Message}
 		case protocol.TypeWelcome:
 			if envelope.ReplyTo != helloID {
 				return errors.New("welcome did not answer hello")
@@ -164,8 +194,12 @@ func (c *Client) readHandshake(helloID string) error {
 func (c *Client) readLoop() {
 	defer c.Close()
 	for {
+		_ = c.conn.SetReadDeadline(time.Now().Add(livenessPings * pingInterval))
 		envelope, err := c.codec.Read()
 		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				err = errors.New("the server stopped responding")
+			}
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 				c.emit(Event{Type: protocol.TypeError, Error: &protocol.Error{Code: "connection_lost", Message: err.Error(), Fatal: true}})
 			}
@@ -453,6 +487,7 @@ func (c *Client) write(messageType protocol.MessageType, id string, payload any)
 	if err != nil {
 		return err
 	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	return c.codec.Write(envelope)
 }
 

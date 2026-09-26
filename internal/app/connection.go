@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -147,7 +148,9 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 				s.applyWheelPlaybackIntent(*event.Wheel)
 				s.sink(Event{Kind: "wheel", Wheel: event.Wheel, ServerNowUnixMs: client.ServerNow().UnixMilli()})
 			}
-			s.emitSnapshot()
+			if changesRoomState(event.Type) {
+				s.emitSnapshot()
+			}
 		case <-client.Done():
 			if ctx.Err() == nil {
 				s.reconnect(ctx, client)
@@ -252,7 +255,7 @@ func (s *Service) reconnect(ctx context.Context, failed *faroclient.Client) {
 		}
 		request, parsed, ownerToken := s.request, s.invite, s.ownerToken
 		s.mu.RUnlock()
-		delay := time.Duration(min(attempt, 15)) * time.Second
+		delay := reconnectDelay(attempt)
 		s.emitConnection("reconnecting", attempt, fmt.Sprintf("retrying in %s", delay))
 		timer := time.NewTimer(delay)
 		select {
@@ -269,6 +272,11 @@ func (s *Service) reconnect(ctx context.Context, failed *faroclient.Client) {
 			Capabilities: []protocol.Capability{protocol.CapabilityMediaStreamV1, protocol.CapabilityMediaAvailabilityV1},
 		})
 		if err != nil {
+			if message, permanent := permanentConnectFailure(err); permanent {
+				s.emitConnection("disconnected", attempt, message)
+				s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "connection_rejected", Message: message}})
+				return
+			}
 			s.emitConnection("reconnecting", attempt, err.Error())
 			continue
 		}
@@ -543,4 +551,42 @@ func (s *Service) LeaveRoom() {
 	s.mu.Lock()
 	s.invite, s.ownerToken = invite.Invite{}, ""
 	s.mu.Unlock()
+}
+
+// reconnectDelay grows by a second per attempt up to 15 s, with jitter so a
+// room whose server restarted is not hit by every client at once.
+func reconnectDelay(attempt int) time.Duration {
+	base := time.Duration(min(attempt, 15)) * time.Second
+	return time.Duration(float64(base) * (0.8 + 0.4*rand.Float64()))
+}
+
+// permanentConnectFailure explains a reconnect failure that retrying cannot
+// fix, such as a host restarting Easy hosting (new join token and address).
+func permanentConnectFailure(err error) (string, bool) {
+	if errors.Is(err, faroclient.ErrFingerprintMismatch) {
+		return "The server's identity changed since this invite was made. Ask for a new invite to rejoin.", true
+	}
+	var rejected *faroclient.RejectedError
+	if !errors.As(err, &rejected) || !rejected.Permanent() {
+		return "", false
+	}
+	switch rejected.Code {
+	case "unauthorized":
+		return "This invite no longer works; the host may have restarted hosting. Ask for a new invite to rejoin.", true
+	case "invalid_owner_token":
+		return "This room now has a different owner, so the owner invite no longer works. Rejoin with a regular invite.", true
+	}
+	return "This version of Faro cannot rejoin the room: " + rejected.Message, true
+}
+
+// changesRoomState reports whether a server message can change the room
+// snapshot. Chat, activity, errors and directed stream messages carry their
+// own events; sending the whole snapshot for them only re-renders the UI.
+func changesRoomState(messageType protocol.MessageType) bool {
+	switch messageType {
+	case protocol.TypeChatMessage, protocol.TypeActivityMessage, protocol.TypeError,
+		protocol.TypeStreamRequested, protocol.TypeStreamGranted, protocol.TypeStreamRevoked:
+		return false
+	}
+	return true
 }

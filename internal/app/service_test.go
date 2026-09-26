@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1461,4 +1464,116 @@ func TestLeaveRoomForgetsInvites(t *testing.T) {
 	if value, err := service.ParticipantInvite(); err == nil {
 		t.Fatalf("invite still available after leaving: %q", value)
 	}
+}
+
+func TestReconnectStopsOnlyOnPermanentFailures(t *testing.T) {
+	for _, test := range []struct {
+		err       error
+		permanent bool
+	}{
+		{fmt.Errorf("connect: %w", faroclient.ErrFingerprintMismatch), true},
+		{&faroclient.RejectedError{Code: "unauthorized"}, true},
+		{&faroclient.RejectedError{Code: "invalid_owner_token"}, true},
+		{&faroclient.RejectedError{Code: "room_full"}, false},
+		{errors.New("connection refused"), false},
+	} {
+		if message, permanent := permanentConnectFailure(test.err); permanent != test.permanent || permanent && message == "" {
+			t.Fatalf("%v: permanent = %v (%q), want %v", test.err, permanent, message, test.permanent)
+		}
+	}
+	for attempt := 1; attempt <= 20; attempt++ {
+		base := time.Duration(min(attempt, 15)) * time.Second
+		if delay := reconnectDelay(attempt); delay < base*8/10 || delay > base*12/10 {
+			t.Fatalf("attempt %d waits %v, want within 20%% of %v", attempt, delay, base)
+		}
+	}
+}
+
+type countingFactory struct {
+	streamtransport.Factory
+	created, closed atomic.Int32
+}
+
+type countedViewer struct {
+	streamtransport.Viewer
+	factory *countingFactory
+	once    sync.Once
+}
+
+func (f *countingFactory) NewViewer() (streamtransport.Viewer, error) {
+	time.Sleep(20 * time.Millisecond) // widen the window between check and claim
+	viewer, err := f.Factory.NewViewer()
+	if err != nil {
+		return nil, err
+	}
+	f.created.Add(1)
+	return &countedViewer{Viewer: viewer, factory: f}, nil
+}
+
+func (v *countedViewer) Close() error {
+	v.once.Do(func() { v.factory.closed.Add(1) })
+	return v.Viewer.Close()
+}
+
+func TestConcurrentStreamRequestsClaimTheOfferOnce(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	network := streamtransport.NewFakeNetwork()
+	host := New(context.Background(), nil)
+	viewer := New(context.Background(), nil)
+	counting := &countingFactory{Factory: network}
+	host.streamFactory, viewer.streamFactory = network, counting
+	status, err := host.StartServer(ServerRequest{Mode: "advanced",
+		ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie",
+		StreamingDERPMapURL: "https://derp.example.test/map.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	t.Cleanup(viewer.Shutdown)
+	host.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	viewer.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	for _, service := range []*Service{host, viewer} {
+		if err := service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Person", Player: "mpv"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 20000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.offerStream(path, 1); err != nil {
+		t.Fatal(err)
+	}
+	var offerID string
+	waitFor(t, "viewer did not receive the stream offer", func() bool {
+		snapshot, err := viewer.Snapshot()
+		if err == nil && len(snapshot.StreamOffers) > 0 {
+			offerID = snapshot.StreamOffers[0].ID
+		}
+		return offerID != ""
+	})
+	var wait sync.WaitGroup
+	var succeeded atomic.Int32
+	for range 8 {
+		wait.Go(func() {
+			if viewer.StreamFromOffer(offerID) == nil {
+				succeeded.Add(1)
+			}
+		})
+	}
+	wait.Wait()
+	if succeeded.Load() != 1 {
+		t.Fatalf("%d concurrent requests claimed the offer, want 1", succeeded.Load())
+	}
+	if created, closed := counting.created.Load(), counting.closed.Load(); closed != created-1 {
+		t.Fatalf("%d viewers prepared but only %d of the losing ones closed", created, closed)
+	}
+	// The winning request must still be tracked, so its grant starts the
+	// stream instead of being revoked as unwanted.
+	waitFor(t, "the claimed stream never started", func() bool {
+		viewer.mu.RLock()
+		defer viewer.mu.RUnlock()
+		return viewer.streamGateway != nil
+	})
 }

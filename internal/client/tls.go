@@ -9,6 +9,10 @@ import (
 	"strings"
 )
 
+// ErrFingerprintMismatch means the server's certificate is not the one the
+// invite pinned: retrying cannot succeed until the invite is replaced.
+var ErrFingerprintMismatch = errors.New("server certificate fingerprint mismatch")
+
 func tlsConfig(serverName, fingerprint string) (*tls.Config, error) {
 	if fingerprint == "" {
 		return &tls.Config{MinVersion: tls.VersionTLS13, ServerName: serverName}, nil
@@ -28,7 +32,7 @@ func tlsConfig(serverName, fingerprint string) (*tls.Config, error) {
 			}
 			actual := sha256.Sum256(state.PeerCertificates[0].Raw)
 			if !equalDigest(actual[:], expected) {
-				return fmt.Errorf("server certificate fingerprint mismatch: got %s", hex.EncodeToString(actual[:]))
+				return fmt.Errorf("%w: got %s", ErrFingerprintMismatch, hex.EncodeToString(actual[:]))
 			}
 			return nil
 		},

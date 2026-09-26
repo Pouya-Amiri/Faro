@@ -2,10 +2,14 @@ package client
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -175,8 +179,25 @@ func TestFingerprintMismatchIsFatal(t *testing.T) {
 		Address: running.address, Fingerprint: strings.Repeat("0", 64),
 		Name: "Ada", Room: "movie", ClientVersion: "test",
 	})
-	if err == nil || !strings.Contains(err.Error(), "fingerprint mismatch") {
+	if !errors.Is(err, ErrFingerprintMismatch) || !strings.Contains(err.Error(), "fingerprint mismatch") {
 		t.Fatalf("expected fingerprint mismatch, got %v", err)
+	}
+}
+
+func TestRejectedHandshakeReportsItsCode(t *testing.T) {
+	running := startServer(t, strings.Repeat("j", 32))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := Connect(ctx, Config{
+		Address: running.address, Fingerprint: running.fingerprint,
+		Name: "Ada", Room: "movie", JoinToken: strings.Repeat("x", 32), ClientVersion: "test",
+	})
+	var rejected *RejectedError
+	if !errors.As(err, &rejected) || rejected.Code != "unauthorized" || !rejected.Permanent() {
+		t.Fatalf("expected a permanent unauthorized rejection, got %v", err)
+	}
+	if (&RejectedError{Code: "room_full"}).Permanent() {
+		t.Fatal("a full room was treated as permanent")
 	}
 }
 
@@ -254,5 +275,108 @@ func TestCustomTransportStillChecksPinnedTLS(t *testing.T) {
 	if c, err := Connect(ctx, cfg); err == nil {
 		c.Close()
 		t.Fatal("custom transport bypassed certificate pin")
+	}
+}
+
+// Room state the server accepted must reach every client even when it is
+// larger than a client's own command frames (audit H1).
+func TestLargeRoomStateStaysDeliverable(t *testing.T) {
+	running := startServer(t, "")
+	owner := connectClient(t, running, "Owner", "movie", "", "")
+	items := make([]protocol.PlaylistItem, 500)
+	fingerprints := make([]string, len(items))
+	for index := range items {
+		fingerprints[index] = fmt.Sprintf("file-v1:%064x", index+1)
+		items[index] = protocol.PlaylistItem{
+			ID: fmt.Sprintf("item-%03d", index), Label: fmt.Sprintf("Movie %03d.mkv", index),
+			Media: &protocol.Media{Title: fmt.Sprintf("Movie %03d.mkv", index), SizeBytes: 1 << 30, DurationSeconds: 5400, Fingerprint: fingerprints[index]},
+		}
+	}
+	if err := owner.SetPlaylist(protocol.PlaylistSet{Items: items}); err != nil {
+		t.Fatal(err)
+	}
+	people := []*Client{owner}
+	for index := range 5 {
+		people = append(people, connectClientWithCapabilities(t, running, fmt.Sprintf("Guest %d", index), "movie", "", "",
+			[]protocol.Capability{protocol.CapabilityMediaAvailabilityV1}))
+	}
+	for _, person := range people[1:] {
+		if err := person.SetMediaAvailability(protocol.MediaAvailabilitySet{Fingerprints: fingerprints}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	late := connectClientWithCapabilities(t, running, "Late", "movie", "", "", []protocol.Capability{protocol.CapabilityMediaAvailabilityV1})
+	raw, err := json.Marshal(late.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) <= protocol.MaxFrameSize {
+		t.Fatalf("snapshot is only %d bytes; the test needs state above %d", len(raw), protocol.MaxFrameSize)
+	}
+	if err := late.SendChat("still here"); err != nil {
+		t.Fatalf("late joiner lost its connection: %v", err)
+	}
+	for _, person := range people {
+		select {
+		case <-person.Done():
+			t.Fatal("a participant was disconnected by the room state")
+		default:
+		}
+	}
+}
+
+// A connection whose server silently stops answering (half-open after a
+// network change) must be noticed so the app can reconnect (audit M5).
+func TestSilentServerIsDetected(t *testing.T) {
+	previous := pingInterval
+	pingInterval = 50 * time.Millisecond
+	t.Cleanup(func() { pingInterval = previous })
+	running := startServer(t, "")
+	proxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { proxy.Close() })
+	var stalled atomic.Bool
+	go func() {
+		for {
+			downstream, err := proxy.Accept()
+			if err != nil {
+				return
+			}
+			upstream, err := net.Dial("tcp", running.address)
+			if err != nil {
+				downstream.Close()
+				return
+			}
+			go func() { _, _ = io.Copy(upstream, downstream) }()
+			go func() {
+				buffer := make([]byte, 32*1024)
+				for {
+					read, err := upstream.Read(buffer)
+					if err != nil {
+						return
+					}
+					if !stalled.Load() {
+						if _, err := downstream.Write(buffer[:read]); err != nil {
+							return
+						}
+					}
+				}
+			}()
+		}
+	}()
+	client := connectClient(t, runningServer{address: proxy.Addr().String(), fingerprint: running.fingerprint}, "Ada", "movie", "", "")
+	time.Sleep(10 * pingInterval)
+	select {
+	case <-client.Done():
+		t.Fatal("a responsive connection was closed")
+	default:
+	}
+	stalled.Store(true)
+	select {
+	case <-client.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("the client never noticed the server went silent")
 	}
 }

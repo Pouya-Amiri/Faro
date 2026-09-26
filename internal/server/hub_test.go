@@ -377,3 +377,49 @@ func TestStreamOffersAndSecretsAreCapabilityScoped(t *testing.T) {
 		t.Fatalf("grant secret entered snapshot: %s", raw)
 	}
 }
+
+func TestUnansweredStreamRequestExpiresSoonButGrantsKeepTheirTTL(t *testing.T) {
+	previous := streamRequestTimeout
+	streamRequestTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { streamRequestTimeout = previous })
+	policy := &protocol.MediaStreamPolicy{MaxOffersPerParticipant: 4, MaxViewersPerOffer: 5, GrantTTLSeconds: 120}
+	h := newHub(1, 4, policy)
+	providerSession, viewerSession := testStreamSession("provider"), testStreamSession("viewer")
+	provider, err := h.join(providerSession, protocol.Hello{Name: "Ada", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewer, err := h.join(viewerSession, protocol.Hello{Name: "Grace", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	media := protocol.Media{Title: "Movie.mkv", DurationSeconds: 3600, SizeBytes: 1 << 30, Fingerprint: "file-v1:" + strings.Repeat("a", 64)}
+	if err := h.publishStreamOffer(provider.participant, protocol.MediaStreamOfferPublish{OfferID: "offer", Media: media}); err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.MediaStreamRequest{OfferID: "offer", ClientPublicKey: "ephemeral-public-key"}
+	accepted, err := h.requestStream(viewer.participant, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The provider may still grant for the full TTL.
+	if remaining := time.Until(time.UnixMilli(accepted.ExpiresAtUnixMs)); remaining < 100*time.Second {
+		t.Fatalf("grant expiry shrank to %v", remaining)
+	}
+	if _, err := h.requestStream(viewer.participant, request); err == nil {
+		t.Fatal("a second request was accepted while the first was pending")
+	}
+	// The provider never answers: the request is revoked and may be retried.
+	deadline := time.After(2 * time.Second)
+	for revoked := false; !revoked; {
+		select {
+		case frame := <-viewerSession.out:
+			revoked = frame.envelope.Type == protocol.TypeStreamRevoked
+		case <-deadline:
+			t.Fatal("the unanswered request was never revoked")
+		}
+	}
+	if _, err := h.requestStream(viewer.participant, request); err != nil {
+		t.Fatalf("retry after expiry failed: %v", err)
+	}
+}

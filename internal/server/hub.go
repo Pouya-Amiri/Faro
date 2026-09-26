@@ -36,6 +36,10 @@ const (
 	wheelDuration          = 4800 * time.Millisecond
 )
 
+// streamRequestTimeout is how long a stream request waits for the provider's
+// answer before it is revoked and may be made again.
+var streamRequestTimeout = time.Minute
+
 type commandError struct {
 	code    string
 	message string
@@ -586,7 +590,12 @@ func (h *hub) requestStream(p *participant, request protocol.MediaStreamRequest)
 		return protocol.MediaStreamRequestAccepted{}, err
 	}
 	now := time.Now()
-	expiresAt := now.Add(time.Duration(h.streaming.GrantTTLSeconds) * time.Second)
+	// expiresAt bounds the grant the provider may issue; answerBy bounds how
+	// long the request waits for that answer, so an unresponsive provider
+	// does not block the viewer from asking again for hours.
+	grantTTL := time.Duration(h.streaming.GrantTTLSeconds) * time.Second
+	expiresAt := now.Add(grantTTL)
+	answerBy := now.Add(min(streamRequestTimeout, grantTTL))
 	h.mu.Lock()
 	r := h.roomForLocked(p)
 	if r == nil {
@@ -632,14 +641,14 @@ func (h *hub) requestStream(p *participant, request protocol.MediaStreamRequest)
 		h.mu.Unlock()
 		return protocol.MediaStreamRequestAccepted{}, invalid("stream_offer_full", "stream offer has reached its viewer limit")
 	}
-	r.streamRequests[requestID] = &streamRequest{id: requestID, offerID: offer.ID, provider: provider, viewer: p, expiresAt: expiresAt}
+	r.streamRequests[requestID] = &streamRequest{id: requestID, offerID: offer.ID, provider: provider, viewer: p, expiresAt: answerBy}
 	roomID := r.state.ID
 	h.mu.Unlock()
 	provider.session.sendMessage(protocol.TypeStreamRequested, "", "", protocol.MediaStreamRequested{
 		RequestID: requestID, OfferID: offer.ID, ViewerID: p.state.ID, ViewerName: p.state.Name,
 		ClientPublicKey: request.ClientPublicKey, ExpiresAtUnixMs: expiresAt.UnixMilli(),
 	})
-	time.AfterFunc(time.Until(expiresAt), func() { h.expireStreamRequest(roomID, requestID) })
+	time.AfterFunc(time.Until(answerBy), func() { h.expireStreamRequest(roomID, requestID) })
 	return protocol.MediaStreamRequestAccepted{RequestID: requestID, OfferID: offer.ID, ExpiresAtUnixMs: expiresAt.UnixMilli()}, nil
 }
 
