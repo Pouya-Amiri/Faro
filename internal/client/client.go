@@ -507,7 +507,18 @@ func (c *Client) pingLoop() {
 
 func (c *Client) nextID() string { return fmt.Sprintf("c-%d", c.seq.Add(1)) }
 
+// emit delivers an event to the app. State updates may be dropped when the
+// app falls behind, since the snapshot already holds the newest state; stream
+// handshakes, chat and errors exist only as events, so those wait for room
+// (until the connection closes) instead of being lost.
 func (c *Client) emit(event Event) {
+	if event.StreamRequest != nil || event.StreamGrant != nil || event.StreamRevoked != nil || event.Chat != nil || event.Error != nil {
+		select {
+		case c.events <- event:
+		case <-c.done:
+		}
+		return
+	}
 	select {
 	case c.events <- event:
 	case <-c.done:

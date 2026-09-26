@@ -663,7 +663,7 @@
                 <section data-page="appearance" class="pref-page">
                   <div class="pref-section-head">
                     <h3>Appearance &amp; Density</h3>
-                    <p>Theme, density, and motion.</p>
+                    <p>Theme, density, motion, and how Faro runs.</p>
                   </div>
 
                   <div class="form-group">
@@ -699,6 +699,14 @@
                     <span class="checkbox-content">
                       <strong>Keep running in the tray</strong>
                       <small id="close-to-tray-hint">Closing the window keeps rooms, hosting and shared files running. Quit from the tray icon.</small>
+                    </span>
+                  </label>
+
+                  <label class="checkbox-row" for="check-updates">
+                    <input id="check-updates" class="form-checkbox" type="checkbox" checked />
+                    <span class="checkbox-content">
+                      <strong>Check for updates</strong>
+                      <small>Ask GitHub for the latest release when Faro starts. Nothing about you or your rooms is sent.</small>
                     </span>
                   </label>
 
@@ -894,6 +902,6 @@
       </div>
     </div>
 
-    <script type="module" src="/app.js?v=26"></script>
+    <script type="module" src="/app.js?v=27"></script>
   </body>
 </html>

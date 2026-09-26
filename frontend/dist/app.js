@@ -182,7 +182,7 @@ const pauseIcon = '<svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"
 
 const defaultPreferences = {
   theme: "system", compact: false, reduceMotion: false, skipSeconds: 10, wheelSound: true,
-  pauseOnLeave: false, sponsorBlock: true, autoOffer: true, chatOverlay: true, streamCacheLimit: 0, youtubeQualities: {}, name: "", player: "mpv", executable: "",
+  pauseOnLeave: false, sponsorBlock: true, autoOffer: true, chatOverlay: true, streamCacheLimit: 0, checkUpdates: true, youtubeQualities: {}, name: "", player: "mpv", executable: "",
   playerArgs: "", publicHost: "localhost", listenAddress: ":8999", room: "watch"
 };
 let preferences = loadPreferences();
@@ -467,6 +467,7 @@ function applyPreferences() {
   if ($("sponsorblock-enabled")) $("sponsorblock-enabled").checked = preferences.sponsorBlock !== false;
   if ($("auto-offer-enabled")) $("auto-offer-enabled").checked = preferences.autoOffer !== false;
   if ($("chat-overlay-enabled")) $("chat-overlay-enabled").checked = preferences.chatOverlay !== false;
+  if ($("check-updates")) $("check-updates").checked = preferences.checkUpdates !== false;
   if ($("stream-cache-limit")) {
     $("stream-cache-limit").value = String(streamCacheLimit());
     $("stream-cache-limit")._syncCustomSelect?.();
@@ -819,6 +820,15 @@ function wheelCanvasSize(canvas) {
   return size;
 }
 
+// A queue position owns its color. When the count is one more than a
+// multiple of the palette, the last segment would repeat the first, which is
+// its neighbour on the wheel; it takes the palette's middle color instead.
+function wheelSegmentColor(index, count, palette) {
+  const size = palette.length;
+  if (count > size && index === count - 1 && index % size === 0) return palette[Math.floor(size / 2)];
+  return palette[index % size];
+}
+
 function wheelFace(items, theme, size, highlight) {
   const key = JSON.stringify([document.documentElement.dataset.theme, size, highlight, items.map((item) => item.label)]);
   if (wheelFaceCache.key === key && wheelFaceCache.canvas) return wheelFaceCache.canvas;
@@ -836,7 +846,7 @@ function wheelFace(items, theme, size, highlight) {
     ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, radius, start, end); ctx.closePath();
     // A queue position owns its color. The spin seed only affects trajectory,
     // so opening or spinning the same wheel never repaints its segments.
-    ctx.fillStyle = theme.segments[index % theme.segments.length];
+    ctx.fillStyle = wheelSegmentColor(index, items.length, theme.segments);
     ctx.fill();
     ctx.strokeStyle = theme.separator; ctx.lineWidth = 3 * scale; ctx.stroke();
     if (index === highlight) {
@@ -2631,4 +2641,5 @@ $("hardware-acceleration").onchange = (event) => {
     .then(() => showToast("Restart Faro to apply the rendering change"))
     .catch((error) => { event.target.checked = !event.target.checked; showError(error); });
 };
-if (hasBackend) void checkForUpdates();
+if (hasBackend && preferences.checkUpdates !== false) void checkForUpdates();
+$("check-updates").onchange = (event) => savePreferences({ checkUpdates: event.target.checked });
