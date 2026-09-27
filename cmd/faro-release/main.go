@@ -18,8 +18,9 @@ var (
 	// Do not anchor at the end of the line: on a CRLF checkout the value is
 	// followed by \r before \n. The character class stops before either line
 	// ending, so replacing the match preserves the file's original EOL style.
-	configPattern    = regexp.MustCompile(`(?m)^  version: [^\r\n]+`)
-	appstreamPattern = regexp.MustCompile(`<release version="[^"]+" date="[^"]+">`)
+	configPattern = regexp.MustCompile(`(?m)^  version: [^\r\n]+`)
+	// Only the newest AppStream release is generated; older release notes stay intact.
+	appstreamPattern = regexp.MustCompile(`(?s)(<releases>\s*)<release version="[^"]+" date="[^"]+">`)
 )
 
 func main() {
@@ -60,7 +61,7 @@ func syncMetadata(date string) error {
 	return replaceExactlyOnce(
 		"packaging/linux/io.github.pouya_amiri.Faro.metainfo.xml",
 		appstreamPattern,
-		[]byte(fmt.Sprintf(`<release version="%s" date="%s">`, version, date)),
+		[]byte(fmt.Sprintf(`${1}<release version="%s" date="%s">`, version, date)),
 	)
 }
 
