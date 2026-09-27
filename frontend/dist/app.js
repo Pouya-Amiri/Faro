@@ -235,7 +235,12 @@ function showToast(message, type = "success") {
   toastTimer = setTimeout(() => toast.classList.remove("show"), 3200);
 }
 
-function showError(error) { showToast(error?.message || String(error), "error"); }
+// Backend errors are Go error strings, which start in lower case.
+function errorText(error) {
+  const text = String(error?.message || error || "Something went wrong").trim();
+  return text ? text[0].toUpperCase() + text.slice(1) : "Something went wrong";
+}
+function showError(error) { showToast(errorText(error), "error"); }
 
 // A busy button ignores repeated presses immediately, but only shows its
 // loading state if the task is still running after a moment. Disabling it for
@@ -1552,6 +1557,7 @@ async function enterRoom(request) {
   // Indexing can hash thousands of files. The room is already usable, so keep
   // discovery in the background and refresh availability as results arrive.
   void indexSavedDirectories();
+  addPendingLaunchPaths();
 }
 
 function switchConnectMode(mode) {
@@ -1579,22 +1585,55 @@ async function copyInvite(owner = false) {
   } catch (error) { showError(error); }
 }
 
+// New items are appended by the backend to the room's latest queue, so a
+// friend's edit made while files are being inspected is not overwritten.
+async function appendToPlaylist(additions, play = false) {
+  const previous = snapshot ? playlistInputs() : null;
+  const count = await invoke("AppendPlaylist", additions, play);
+  if (previous) {
+    playlistHistory.push(previous);
+    if (playlistHistory.length > 20) playlistHistory.shift();
+  }
+  return count;
+}
+
 async function addMediaPaths(paths, playImmediately = false) {
   if (!snapshot || !canControl() || !paths?.length) return;
   try {
     const expanded = hasBackend ? await invoke("ExpandMediaPaths", paths) : paths;
-    if (!expanded.length) return;
-    if (playImmediately && expanded.length === 1) {
-      const next = [...playlistInputs(), { id: "", label: basename(expanded[0]), source: expanded[0], url: "", media: null }];
-      await updatePlaylist(next);
-      await invoke("SelectPlaylist", next.length - 1);
-      showToast(`Opening ${basename(expanded[0])}`);
+    if (!expanded.length) {
+      showToast("No media files found there", "error");
       return;
     }
+    const play = playImmediately && expanded.length === 1;
     const additions = expanded.map((source) => ({ id: "", label: basename(source), source, url: "", media: null }));
-    await updatePlaylist([...playlistInputs(), ...additions]);
-    showToast(`${additions.length} item${additions.length === 1 ? "" : "s"} added to queue`);
+    const count = await appendToPlaylist(additions, play);
+    showToast(play ? `Opening ${basename(expanded[0])}` : `${count} item${count === 1 ? "" : "s"} added to queue`);
   } catch (error) { showError(error); }
+}
+
+// Files opened with Faro from a file manager wait until there is a room.
+let pendingLaunchPaths = [];
+async function collectLaunchPaths() {
+  if (!hasBackend) return;
+  try { pendingLaunchPaths.push(...((await invoke("TakeLaunchPaths")) || [])); } catch (_) { return; }
+  addPendingLaunchPaths();
+}
+
+function addPendingLaunchPaths() {
+  if (!pendingLaunchPaths.length) return;
+  if (!snapshot) {
+    const what = pendingLaunchPaths.length === 1 ? basename(pendingLaunchPaths[0]) : `${pendingLaunchPaths.length} files`;
+    showToast(`Join or host a room to add ${what} to the queue`);
+    return;
+  }
+  const paths = pendingLaunchPaths;
+  pendingLaunchPaths = [];
+  if (!canControl()) {
+    showToast("Only moderators can add to this room's queue", "error");
+    return;
+  }
+  void addMediaPaths(paths);
 }
 
 async function chooseFiles(button) {
@@ -1646,7 +1685,7 @@ function menuButton(label, action, { checked = false, disabled = false, danger =
   if (hint) {
     const keys = document.createElement("kbd");
     keys.className = "menu-hint";
-    keys.textContent = hint;
+    keys.textContent = document.body.dataset.platform === "mac" ? hint.replace(/^Ctrl\+/, "⌘") : hint;
     button.append(keys);
   }
   button.onclick = action;
@@ -1722,18 +1761,35 @@ function enhanceAllSelects() {
 
 function askConfirmation(title, message, acceptLabel = "Continue") {
   const dialog = $("confirm-dialog");
+  // Only one question at a time; a newer one answers the older with "no".
+  if (dialog.open) dialog.close("cancel");
   $("confirm-title").textContent = title;
   $("confirm-message").textContent = message;
   $("confirm-accept").textContent = acceptLabel;
+  // Escape closes the dialog without a value, which would otherwise keep the
+  // previous answer and count as "accept".
+  dialog.returnValue = "";
   dialog.showModal();
+  $("confirm-cancel").focus();
   return new Promise((resolve) => dialog.addEventListener("close", () => resolve(dialog.returnValue === "accept"), { once: true }));
+}
+
+// Leaving a room this Faro hosts stops its server and disconnects everyone.
+async function confirmLeaveRoom() {
+  if (!hosted.running) return true;
+  return askConfirmation("End the room?", "You are hosting this room. Leaving stops it and disconnects everyone watching.", "End room");
+}
+
+async function leaveRoomWithConfirmation() {
+  if (await confirmLeaveRoom()) await leaveRoom();
 }
 
 async function leaveRoom() {
   if (preferences.pauseOnLeave && canControl() && snapshot && !snapshot.playback.paused) {
     try { await invoke("SetPaused", true); } catch (error) { showError(error); }
   }
-  await invoke("LeaveRoom");
+  try { await invoke("LeaveRoom"); }
+  catch (error) { showError(error); }
   hosted = { running: false };
   snapshot = null; timeline = []; playlistHistory = [];
   playlistRenderKey = ""; participantsRenderKey = ""; availabilityKey = "";
@@ -1777,7 +1833,7 @@ $("join-form").onsubmit = async (event) => {
   const button = event.submitter || $("join-form").querySelector("[type=submit]");
   await withButtonLoading(button, async () => {
     try { rememberConnectPreferences("join"); await enterRoom(connectionRequest("join", $("join-invite").value.trim())); }
-    catch (error) { $("join-error").textContent = error?.message || String(error); }
+    catch (error) { $("join-error").textContent = errorText(error); }
   }, "Connecting");
 };
 $("host-mode").onchange = () => {
@@ -1805,7 +1861,7 @@ $("host-form").onsubmit = async (event) => {
       startedServer = true;
       await enterRoom(connectionRequest("host", hosted.localInvite));
     } catch (error) {
-      $("host-error").textContent = error?.message || String(error);
+      $("host-error").textContent = errorText(error);
       if (startedServer) {
         try { await invoke("StopServer"); } catch (_) {}
         hosted = { running: false };
@@ -1831,8 +1887,10 @@ if ($("stats-open-session")) {
   };
 }
 $("leave-room").onclick = (event) => { event.stopPropagation(); togglePopover($("session-menu"), $("leave-room")); };
-$("disconnect").onclick = () => { closePopovers(); leaveRoom().catch(showError); };
-$("settings-leave").onclick = () => withButtonLoading($("settings-leave"), leaveRoom, "Leaving").catch(showError);
+$("disconnect").onclick = () => { closePopovers(); leaveRoomWithConfirmation().catch(showError); };
+$("settings-leave").onclick = async () => {
+  if (await confirmLeaveRoom()) withButtonLoading($("settings-leave"), leaveRoom, "Leaving").catch(showError);
+};
 $("reconnect").onclick = async () => { if (!lastConnectionRequest) return; await withButtonLoading($("reconnect"), async () => { try { await enterRoom(lastConnectionRequest); showToast("Connection restored"); } catch (error) { showError(error); } }, "Reconnecting"); };
 $("room-mode").onchange = (event) => invoke("SetRoomMode", event.target.value).catch(showError);
 $("pause").onclick = () => invoke("SetPaused", !snapshot.playback.paused).catch(showError);
@@ -1888,7 +1946,7 @@ $("copy-invite").onclick = () => hosted.running && hosted.shareInvite ? copyText
 $("settings-copy-invite").onclick = () => $("copy-invite").click();
 $("owner-invite").onclick = () => copyInvite(true);
 $("settings-owner-invite").onclick = () => copyInvite(true);
-$("stop-server").onclick = () => { closePopovers(); leaveRoom().catch(showError); };
+$("stop-server").onclick = () => { closePopovers(); leaveRoomWithConfirmation().catch(showError); };
 
 // Playlist wiring
 $("add-file").onclick = () => chooseFiles($("add-file"));
@@ -1916,7 +1974,7 @@ $("add-playlist").onclick = async () => {
   try {
     const info = await prepareYouTubeSource(source);
     const label = info?.title || playlistSourceLabel(source);
-    await updatePlaylist([...playlistInputs(), { id: "", label, source, url: "", media: null, durationSeconds: Number(info?.duration) || 0 }]);
+    await appendToPlaylist([{ id: "", label, source, url: "", media: null, durationSeconds: Number(info?.duration) || 0 }]);
     input.value = "";
     streamDrawer.classList.add("hidden");
   } catch (error) { showError(error); }
@@ -2152,9 +2210,19 @@ document.addEventListener("click", (event) => {
     closePopovers();
   }
 });
+function openPopover() {
+  return document.querySelector(".popover:not(.hidden), .popover-menu:not(.hidden), #context-menu:not(.hidden)");
+}
+
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    closePopovers();
+    // Escape closes one layer at a time, as native menus do: an open menu
+    // closes and the dialog under it stays.
+    if (openPopover()) {
+      event.preventDefault();
+      event.stopPropagation();
+      closePopovers();
+    }
     return;
   }
   // Arrow keys, Home and End move through the open menu, as native menus do.
@@ -2473,7 +2541,7 @@ document.addEventListener("contextmenu", (event) => {
       menuButton("Server & session info…", act(() => $("stats-open-session").click())),
       menuButton("Preferences…", act(openPreferences), { hint: "Ctrl+," }),
       menuSeparator(),
-      menuButton("Leave room", act(() => leaveRoom().catch(showError)), { danger: true }),
+      menuButton("Leave room", act(() => leaveRoomWithConfirmation().catch(showError)), { danger: true }),
       ...windowItems()
     ]);
     return;
@@ -2532,7 +2600,7 @@ document.addEventListener("drop", async (event) => {
   if (/^https?:\/\//i.test(value.trim()) && snapshot && canControl()) {
     try {
       const source = value.trim(), info = await prepareYouTubeSource(source);
-      await updatePlaylist([...playlistInputs(), { id: "", label: info?.title || "", source, url: "", media: null, durationSeconds: Number(info?.duration) || 0 }]);
+      await appendToPlaylist([{ id: "", label: info?.title || playlistSourceLabel(source), source, url: "", media: null, durationSeconds: Number(info?.duration) || 0 }]);
     } catch (error) { showError(error); }
   }
 });
@@ -2611,12 +2679,19 @@ function receive(event) {
 // Global keyboard shortcuts
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    closePopovers();
-    if ($("settings-dialog").open) $("settings-dialog").close();
-    dismissWheelWindow();
+    // Only the topmost dialog closes; the confirmation sits above the others.
+    event.preventDefault();
+    if ($("confirm-dialog").open) $("confirm-dialog").close("cancel");
+    else if ($("wheel-dialog").open) dismissWheelWindow();
+    else if ($("settings-dialog").open) $("settings-dialog").close();
+    return;
   }
+  // Playback shortcuts belong to the room view, not to an open dialog or menu,
+  // and Space or Enter on a focused button activates that button.
   if (!snapshot || event.target.matches("input, select, textarea") || event.target.isContentEditable) return;
-  if (event.code === "Space" && canControl()) { event.preventDefault(); $("pause").click(); }
+  if (document.querySelector("dialog[open]") || openPopover()) return;
+  if (event.code === "Space" && event.target.closest("button, a, [role=button], [role=menuitem], [tabindex]:not(body)")) return;
+  if (event.code === "Space" && canControl()) { event.preventDefault(); if (!event.repeat) $("pause").click(); }
   if (event.key === "ArrowLeft" && canControl()) { event.preventDefault(); $("back-ten").click(); }
   if (event.key === "ArrowRight" && canControl()) { event.preventDefault(); $("forward-ten").click(); }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o" && canControl()) { event.preventDefault(); chooseFiles(); }
@@ -2628,6 +2703,18 @@ if (wails?.Events) {
   wails.Events.On("faro:event", (event) => receive(event.data));
   wails.Events.On("faro:file-drop", (event) => receiveFileDrop(event.data?.paths, event.data?.target));
   wails.Events.On("faro:window-state", (event) => setWindowState(event.data));
+  wails.Events.On("faro:open-files", () => { void collectLaunchPaths(); });
+  wails.Events.On("faro:confirm-quit", async (event) => {
+    const hosting = Boolean(event.data?.hosting);
+    const quit = await askConfirmation("Quit Faro?", hosting
+      ? "You are hosting this room. Quitting ends it for everyone watching."
+      : "Quitting takes you out of the room.", "Quit");
+    if (!quit) return;
+    if (preferences.pauseOnLeave && canControl() && snapshot && !snapshot.playback.paused) {
+      try { await invoke("SetPaused", true); } catch (_) {}
+    }
+    invoke("Quit").catch(showError);
+  });
 }
 
 setInterval(() => {
@@ -2656,6 +2743,7 @@ applyPreferences();
 renderMediaDirectories();
 renderConnectionInfo();
 if (hasBackend) invoke("WindowReady").catch(() => {});
+void collectLaunchPaths();
 // Only WebKitGTK offers a choice of rendering path.
 if (hasBackend && document.body.dataset.platform === "linux") {
   invoke("HardwareAcceleration").then((enabled) => {

@@ -24,8 +24,12 @@ func main() {
 	preferWayland()
 
 	var tray *trayController
+	var desktop *Desktop
 	wailsApp := application.New(application.Options{
-		SingleInstance: singleInstance(func() {
+		SingleInstance: singleInstance(func(data application.SecondInstanceData) {
+			if desktop != nil && len(data.Args) > 1 {
+				desktop.queueLaunchPaths(launchPaths(data.Args[1:], data.WorkingDir))
+			}
 			if tray != nil {
 				tray.showWindow()
 			}
@@ -44,7 +48,8 @@ func main() {
 	})
 
 	background := loadWindowBackground()
-	desktop := NewDesktop(wailsApp, background)
+	desktop = NewDesktop(wailsApp, background)
+	desktop.launchPaths = launchPaths(os.Args[1:], workingDirectory())
 	wailsApp.RegisterService(application.NewService(desktop))
 
 	mainWindow := wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
@@ -73,7 +78,8 @@ func main() {
 		},
 	})
 	desktop.setWindow(mainWindow)
-	tray = setupTray(wailsApp, mainWindow)
+	tray = setupTray(wailsApp, mainWindow, desktop)
+	desktop.tray = tray
 
 	mainWindow.OnWindowEvent(events.Common.WindowFilesDropped, func(event *application.WindowEvent) {
 		wailsApp.Event.Emit("faro:file-drop", map[string]any{

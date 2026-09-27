@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -230,9 +231,15 @@ func loadWindowSettings() windowSettings {
 	return settings
 }
 
+// windowSettingsMu serialises read-modify-write updates, which the page can
+// start concurrently (theme and preference switches).
+var windowSettingsMu sync.Mutex
+
 // updateWindowSettings applies change to the stored settings and writes them
 // back atomically, keeping fields the change does not touch.
 func updateWindowSettings(change func(*windowSettings)) error {
+	windowSettingsMu.Lock()
+	defer windowSettingsMu.Unlock()
 	path, err := windowSettingsPath()
 	if err != nil {
 		return err

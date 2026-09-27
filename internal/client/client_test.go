@@ -159,7 +159,8 @@ func TestModeratedRoomRejectsMemberPlayback(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, owner, func(event Event) bool { return event.Type == protocol.TypeRoomUpdated })
-	if err := member.SetPlayback(protocol.PlaybackSet{PositionSeconds: 12, Paused: false, Rate: 1}); err == nil || !strings.Contains(err.Error(), "forbidden") {
+	var rejection *CommandError
+	if err := member.SetPlayback(protocol.PlaybackSet{PositionSeconds: 12, Paused: false, Rate: 1}); !errors.As(err, &rejection) || rejection.Code != "forbidden" || err.Error() != rejection.Message {
 		t.Fatalf("expected acknowledged rejection, got %v", err)
 	}
 	if err := owner.SetPlayback(protocol.PlaybackSet{PositionSeconds: 12, Paused: false, Rate: 1}); err != nil {

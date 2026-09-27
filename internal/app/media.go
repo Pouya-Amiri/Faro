@@ -138,16 +138,80 @@ func (s *Service) SetPlaylist(inputs []PlaylistInput) error {
 	if err != nil {
 		return err
 	}
+	items, skipped, err := s.resolvePlaylistInputs(inputs)
+	if err != nil {
+		return err
+	}
+	if err := s.publishPlaylist(client, items); err != nil {
+		return err
+	}
+	s.reportSkippedMedia(skipped)
+	return nil
+}
+
+// AppendPlaylist adds items to the end of the room's queue and reports how
+// many were added. The new items are inspected first and the queue is read
+// only afterwards, so changes other participants made in the meantime are
+// kept rather than overwritten by a stale copy. With play set, the first new
+// item is selected.
+func (s *Service) AppendPlaylist(inputs []PlaylistInput, play bool) (int, error) {
+	client, err := s.connected()
+	if err != nil {
+		return 0, err
+	}
+	additions, skipped, err := s.resolvePlaylistInputs(inputs)
+	if err != nil {
+		return 0, err
+	}
+	if len(additions) == 0 {
+		return 0, errors.New("nothing to add")
+	}
+	current := client.Snapshot().Playlist.Items
+	items := make([]protocol.PlaylistItem, 0, len(current)+len(additions))
+	for _, item := range current {
+		item.Media = cloneStreamMedia(item.Media)
+		items = append(items, item)
+	}
+	items = append(items, additions...)
+	if err := s.publishPlaylist(client, items); err != nil {
+		return 0, err
+	}
+	s.reportSkippedMedia(skipped)
+	if play {
+		if err := client.SelectPlaylist(len(current)); err != nil {
+			return len(additions), err
+		}
+	}
+	return len(additions), nil
+}
+
+// skippedMedia is a queue entry that could not be added, such as a file that
+// was moved or cannot be read.
+type skippedMedia struct {
+	source string
+	err    error
+}
+
+// resolvePlaylistInputs turns the page's queue entries into room items,
+// identifying new local files and URLs. A local file that cannot be read is
+// skipped instead of failing the whole batch; it is an error only when
+// nothing new could be added at all.
+func (s *Service) resolvePlaylistInputs(inputs []PlaylistInput) ([]protocol.PlaylistItem, []skippedMedia, error) {
 	items := make([]protocol.PlaylistItem, 0, len(inputs))
 	probes := make(map[int]string)
+	var skipped []skippedMedia
+	added := 0
 	for _, input := range inputs {
 		item := protocol.PlaylistItem{ID: input.ID, Label: strings.TrimSpace(input.Label), URL: input.URL, Media: cloneStreamMedia(input.Media)}
 		localPath := ""
 		if input.Source != "" || input.URL != "" {
-			result, inspectErr := mediaid.Inspect(firstNonEmpty(input.Source, input.URL), item.Label, max(input.DurationSeconds, 0))
+			source := firstNonEmpty(input.Source, input.URL)
+			result, inspectErr := mediaid.Inspect(source, item.Label, max(input.DurationSeconds, 0))
 			if inspectErr != nil {
-				return inspectErr
+				skipped = append(skipped, skippedMedia{source: source, err: inspectErr})
+				continue
 			}
+			added++
 			item.URL, item.Media = result.URL, &result.Media
 			if result.Path != "" {
 				s.rememberSource(result.Media.Fingerprint, result.Path)
@@ -173,7 +237,14 @@ func (s *Service) SetPlaylist(inputs []PlaylistInput) error {
 		}
 		items = append(items, item)
 	}
+	if len(skipped) != 0 && added == 0 {
+		return nil, nil, skipped[0].err
+	}
 	probePlaylistDurations(items, probes)
+	return items, skipped, nil
+}
+
+func (s *Service) publishPlaylist(client *faroclient.Client, items []protocol.PlaylistItem) error {
 	if err := client.SetPlaylist(protocol.PlaylistSet{Items: items}); err != nil {
 		return err
 	}
@@ -200,6 +271,30 @@ func (s *Service) SetPlaylist(inputs []PlaylistInput) error {
 	// The event performs the same transfer reconciliation for every participant.
 	go s.reconcilePlaylistStreams(s.root, client)
 	return nil
+}
+
+func skipReason(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "the file no longer exists"
+	case errors.Is(err, fs.ErrPermission):
+		return "Faro is not allowed to read it"
+	}
+	return err.Error()
+}
+
+// reportSkippedMedia tells the page which entries of an otherwise successful
+// batch were left out.
+func (s *Service) reportSkippedMedia(skipped []skippedMedia) {
+	if len(skipped) == 0 {
+		return
+	}
+	name := filepath.Base(skipped[0].source)
+	message := fmt.Sprintf("%s could not be added: %s", name, skipReason(skipped[0].err))
+	if len(skipped) > 1 {
+		message = fmt.Sprintf("%d files could not be added because they are missing or unreadable, including %s", len(skipped), name)
+	}
+	s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "playlist_skipped", Message: message}})
 }
 
 // probePlaylistDurations reads durations for the given item indexes in

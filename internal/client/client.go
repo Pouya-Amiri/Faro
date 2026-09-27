@@ -41,7 +41,14 @@ type CommandError struct {
 	Message string
 }
 
-func (e *CommandError) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message) }
+// Error is the server's explanation alone: it is shown to people as is, and
+// callers that need the code match it with errors.As.
+func (e *CommandError) Error() string {
+	if e.Message == "" {
+		return e.Code
+	}
+	return e.Message
+}
 
 type Event struct {
 	Type          protocol.MessageType
@@ -142,7 +149,10 @@ type RejectedError struct {
 }
 
 func (e *RejectedError) Error() string {
-	return fmt.Sprintf("server rejected connection (%s): %s", e.Code, e.Message)
+	if e.Message == "" {
+		return fmt.Sprintf("the server refused the connection (%s)", e.Code)
+	}
+	return "the server refused the connection: " + e.Message
 }
 
 // Permanent reports whether sending the same hello again cannot succeed. A

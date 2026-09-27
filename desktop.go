@@ -25,6 +25,10 @@ type Desktop struct {
 
 	backgroundMu sync.Mutex
 	background   application.RGBA
+
+	tray        *trayController
+	launchMu    sync.Mutex
+	launchPaths []string
 }
 
 func NewDesktop(wailsApp *application.App, background application.RGBA) *Desktop {
@@ -112,6 +116,10 @@ func (d *Desktop) TimelineSegments() []app.TimelineSegment {
 
 func (d *Desktop) SetPlaylist(items []app.PlaylistInput) error {
 	return d.service.SetPlaylist(items)
+}
+
+func (d *Desktop) AppendPlaylist(items []app.PlaylistInput, play bool) (int, error) {
+	return d.service.AppendPlaylist(items, play)
 }
 
 func (d *Desktop) SelectPlaylist(index int) error { return d.service.SelectPlaylist(index) }

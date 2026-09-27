@@ -545,6 +545,14 @@ func (s *Service) Disconnect() {
 	streams.close()
 }
 
+// InRoom reports whether this participant is in a room, including while it
+// reconnects to one.
+func (s *Service) InRoom() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sessionCtx != nil
+}
+
 func (s *Service) Shutdown() {
 	s.LeaveRoom()
 }

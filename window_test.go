@@ -1,6 +1,10 @@
 package main
 
 import (
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -116,5 +120,22 @@ func TestWindowSettingsKeepUnrelatedFields(t *testing.T) {
 	}
 	if desktop.HardwareAcceleration() || loadWindowBackground() != application.NewRGB(0x11, 0x22, 0x33) {
 		t.Fatal("turning acceleration off changed the other settings")
+	}
+}
+
+func TestLaunchPathsKeepsExistingMedia(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file URLs of drive paths are covered by mediaid's tests")
+	}
+	directory := t.TempDir()
+	movie := filepath.Join(directory, "movie night.mkv")
+	if err := os.WriteFile(movie, []byte("movie"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileURL := (&url.URL{Scheme: "file", Path: filepath.ToSlash(movie)}).String()
+	got := launchPaths([]string{"--flag", "movie night.mkv", fileURL, "missing.mkv", "https://example.com/a.mkv", directory, ""}, directory)
+	want := []string{movie, movie, directory}
+	if !slices.Equal(got, want) {
+		t.Fatalf("launchPaths() = %q, want %q", got, want)
 	}
 }
