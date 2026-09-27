@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/big"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -336,6 +337,10 @@ func (h *hub) setPlaylist(p *participant, request protocol.PlaylistSet) error {
 		h.mu.Unlock()
 		return invalid("forbidden", "this participant cannot change the playlist")
 	}
+	if request.BaseRevision != nil && *request.BaseRevision != r.playlist.Revision {
+		h.mu.Unlock()
+		return invalid(protocol.ErrorPlaylistConflict, "the queue changed while you were editing it; try again")
+	}
 	cancelled := cancelWheelLocked(r, "The queue changed before the spin finished")
 	selectedID := ""
 	var previousItem *protocol.PlaylistItem
@@ -388,12 +393,20 @@ func samePlaylistSource(a, b protocol.PlaylistItem) bool {
 	return a.Media != nil && b.Media != nil && a.Media.Fingerprint == b.Media.Fingerprint
 }
 
-func (h *hub) selectPlaylist(p *participant, index int) error {
+func (h *hub) selectPlaylist(p *participant, request protocol.PlaylistSelect) error {
+	index := request.Index
 	h.mu.Lock()
 	r := h.roomForLocked(p)
 	if r == nil || !r.canControl(p) {
 		h.mu.Unlock()
 		return invalid("forbidden", "this participant cannot select playlist items")
+	}
+	if request.ItemID != "" {
+		index = slices.IndexFunc(r.playlist.Items, func(item protocol.PlaylistItem) bool { return item.ID == request.ItemID })
+		if index < 0 {
+			h.mu.Unlock()
+			return invalid(protocol.ErrorPlaylistItemNotFound, "that queue item was removed")
+		}
 	}
 	if index < -1 || index >= len(r.playlist.Items) {
 		h.mu.Unlock()

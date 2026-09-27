@@ -124,22 +124,38 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 	} else {
 		_ = connection.SetDeadline(time.Now().Add(connectTimeout))
 	}
+	// Cancelling ctx interrupts the handshake at once rather than after the
+	// connect timeout.
+	interrupt := context.AfterFunc(ctx, func() { _ = connection.SetDeadline(time.Now()) })
 	helloID := client.nextID()
 	if err := client.write(protocol.TypeHello, helloID, protocol.Hello{
 		ClientVersion: cfg.ClientVersion, Name: cfg.Name, Room: cfg.Room,
 		JoinToken: cfg.JoinToken, OwnerToken: cfg.OwnerToken, Capabilities: append([]protocol.Capability(nil), cfg.Capabilities...),
 	}); err != nil {
+		interrupt()
 		connection.Close()
-		return nil, err
+		return nil, handshakeError(ctx, err)
 	}
 	if err := client.readHandshake(helloID); err != nil {
+		interrupt()
 		connection.Close()
-		return nil, err
+		return nil, handshakeError(ctx, err)
+	}
+	if !interrupt() {
+		connection.Close()
+		return nil, ctx.Err()
 	}
 	_ = connection.SetDeadline(time.Time{})
 	go client.readLoop()
 	go client.pingLoop()
 	return client, nil
+}
+
+func handshakeError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 // RejectedError is the server refusing a connection during the handshake.
@@ -401,8 +417,8 @@ func (c *Client) SetMedia(value protocol.MediaSet) error {
 func (c *Client) SetPlaylist(value protocol.PlaylistSet) error {
 	return c.command(protocol.TypePlaylistSet, value)
 }
-func (c *Client) SelectPlaylist(index int) error {
-	return c.command(protocol.TypePlaylistSelect, protocol.PlaylistSelect{Index: index})
+func (c *Client) SelectPlaylist(value protocol.PlaylistSelect) error {
+	return c.command(protocol.TypePlaylistSelect, value)
 }
 func (c *Client) SpinPlaylistWheel() error {
 	return c.command(protocol.TypePlaylistWheelSpin, protocol.PlaylistWheelSpin{})

@@ -1105,9 +1105,12 @@ function renderSyncBadge(media = referenceMedia(), mismatches = mismatchCount(me
         title = "Sync starts once your player has the media open";
     }
   }
-  badge.textContent = text;
-  badge.title = title;
-  badge.className = `badge badge-sync ${tone}`;
+  // Drift updates arrive every second or so; unchanged values are not
+  // rewritten, so the badge is only restyled when it changes.
+  if (badge.textContent !== text) badge.textContent = text;
+  if (badge.title !== title) badge.title = title;
+  const className = `badge badge-sync ${tone}`;
+  if (badge.className !== className) badge.className = className;
 }
 
 function renderMediaKind(media) {
@@ -1224,6 +1227,7 @@ function renderPlaylist() {
     row.className = `queue-item ${index === snapshot.playlist.selected ? "active" : ""}`;
     row.draggable = false;
     row.dataset.index = String(index);
+    row.dataset.id = item.id;
 
     const handle = document.createElement("span");
     handle.className = "queue-drag-handle";
@@ -1275,7 +1279,7 @@ function renderPlaylist() {
       actions.append(actionButton("Share file", () => invoke("OfferPlaylistStream", item.id).then(() => showToast("Sharing started; friends without the file will connect automatically")).catch(showError), false, "Automatically stream your copy to friends who need it"));
     }
     if (isPlaylistItemPlayable(item) && index !== snapshot.playlist.selected) actions.append(actionButton("Play", () => playPlaylist(index), !allowed, "Play now"));
-    actions.append(actionButton("×", () => removePlaylist(index), !allowed, "Remove from queue"));
+    actions.append(actionButton("×", () => removePlaylistItem(item.id), !allowed, "Remove from queue"));
 
     row.append(handle, indexBadge, metaCol, duration, actions);
 
@@ -1291,7 +1295,7 @@ function beginPlaylistReorder(event, sourceRow, sourceIndex, allowed) {
   event.preventDefault();
   event.stopPropagation();
   draggedPlaylistIndex = sourceIndex;
-  let targetIndex = sourceIndex;
+  let targetIndex = sourceIndex, targetID = sourceRow.dataset.id;
   const startY = event.clientY;
   const rowHeight = sourceRow.getBoundingClientRect().height;
   sourceRow.classList.add("dragging");
@@ -1314,6 +1318,7 @@ function beginPlaylistReorder(event, sourceRow, sourceIndex, allowed) {
       document.querySelectorAll(".queue-item.drag-over").forEach((node) => node.classList.remove("drag-over"));
       target.classList.add("drag-over");
       targetIndex = Number(target.dataset.index);
+      targetID = target.dataset.id;
     }
     updatePreview(moveEvent.clientY, targetIndex);
   };
@@ -1324,7 +1329,9 @@ function beginPlaylistReorder(event, sourceRow, sourceIndex, allowed) {
     sourceRow.classList.remove("dragging");
     clearPreview();
     draggedPlaylistIndex = -1;
-    if (targetIndex !== sourceIndex) reorderPlaylist(sourceIndex, targetIndex);
+    // Rows are not rebuilt during a drag, so their IDs are the ones the
+    // person saw; the backend moves them wherever they are now.
+    if (targetIndex !== sourceIndex) movePlaylistItem(sourceRow.dataset.id, targetID);
   };
   document.addEventListener("pointermove", move, true);
   document.addEventListener("pointerup", finish, true);
@@ -1359,7 +1366,8 @@ async function playPlaylist(index) {
   if (!item || !canControl()) return;
   try {
     if (item.url) await prepareYouTubeSource(item.url);
-    await invoke("SelectPlaylist", index);
+    // The ID picks the right item even if the queue moved meanwhile.
+    await invoke("SelectPlaylist", index, item.id);
     await invoke("SetPaused", false);
   } catch (error) { showError(error); }
 }
@@ -1448,17 +1456,38 @@ function selectedSourceURL() {
   return selected >= 0 ? snapshot.playlist.items[selected]?.url || "" : "";
 }
 
-async function updatePlaylist(items, remember = true) {
-  if (remember && snapshot) {
-    playlistHistory.push(playlistInputs());
-    if (playlistHistory.length > 20) playlistHistory.shift();
-  }
-  try { await invoke("SetPlaylist", items); }
-  catch (error) { if (remember) playlistHistory.pop(); throw error; }
+function rememberPlaylist(previous) {
+  if (!previous) return;
+  playlistHistory.push(previous);
+  if (playlistHistory.length > 20) playlistHistory.shift();
 }
 
-async function removePlaylist(index) { const items = playlistInputs(); items.splice(index, 1); try { await updatePlaylist(items); } catch (error) { showError(error); } }
-async function reorderPlaylist(from, to) { if (from === to) return; const items = playlistInputs(), [item] = items.splice(from, 1); items.splice(to, 0, item); try { await updatePlaylist(items); } catch (error) { showError(error); } }
+// Replaces the whole queue. Edits computed from the queue on screen (a
+// shuffle, an undo) pass its revision, so if a friend changed the queue in the
+// meantime the server refuses instead of silently discarding their change.
+async function updatePlaylist(items, { remember = true, basedOnScreen = false } = {}) {
+  const previous = remember && snapshot ? playlistInputs() : null;
+  const baseRevision = basedOnScreen && snapshot ? snapshot.playlist.revision : null;
+  await invoke("SetPlaylist", items, baseRevision);
+  rememberPlaylist(previous);
+}
+
+// Single-item edits go by item ID and are applied by the backend to the
+// latest queue, so they never overwrite a concurrent edit.
+async function editPlaylistItem(method, ...args) {
+  const previous = snapshot ? playlistInputs() : null;
+  await invoke(method, ...args);
+  rememberPlaylist(previous);
+}
+
+async function removePlaylistItem(itemID) {
+  try { await editPlaylistItem("RemovePlaylistItem", itemID); } catch (error) { showError(error); }
+}
+// Moves an item to the place targetID holds, as dropping one row onto another.
+async function movePlaylistItem(itemID, targetID) {
+  if (!itemID || !targetID || itemID === targetID) return;
+  try { await editPlaylistItem("MovePlaylistItem", itemID, targetID); } catch (error) { showError(error); }
+}
 async function locateItem(id) { try { const path = await invoke("ChooseMediaFile"); if (!path) return; await invoke("LocatePlaylistItem", id, path); await refreshAvailability(); showToast("Matching file located"); } catch (error) { showError(error); } }
 
 function shuffled(items) {
@@ -1590,10 +1619,7 @@ async function copyInvite(owner = false) {
 async function appendToPlaylist(additions, play = false) {
   const previous = snapshot ? playlistInputs() : null;
   const count = await invoke("AppendPlaylist", additions, play);
-  if (previous) {
-    playlistHistory.push(previous);
-    if (playlistHistory.length > 20) playlistHistory.shift();
-  }
+  rememberPlaylist(previous);
   return count;
 }
 
@@ -1828,13 +1854,41 @@ window.addEventListener("focus", () => document.body.classList.remove("window-in
 // Connection forms wiring
 $("join-tab").onclick = () => switchConnectMode("join");
 $("host-tab").onclick = () => switchConnectMode("host");
+// A connection attempt can take a while (a relayed peer, an unreachable
+// server), so the form offers Cancel until it finishes.
+let connectAttempt = null;
+async function withCancellableConnect(prefix, task) {
+  const attempt = { cancelled: false };
+  connectAttempt = attempt;
+  const cancel = $(`${prefix}-cancel`);
+  cancel.classList.remove("hidden");
+  try {
+    await task(attempt);
+    // Cancel pressed just as the room opened: leave it again.
+    if (attempt.cancelled && snapshot) await leaveRoom();
+  } catch (error) {
+    if (!attempt.cancelled) $(`${prefix}-error`).textContent = errorText(error);
+  } finally {
+    if (connectAttempt === attempt) connectAttempt = null;
+    cancel.classList.add("hidden");
+  }
+}
+for (const prefix of ["join", "host"]) {
+  $(`${prefix}-cancel`).onclick = () => {
+    if (!connectAttempt) return;
+    connectAttempt.cancelled = true;
+    $(`${prefix}-error`).textContent = "";
+    invoke("CancelConnect").catch(() => {});
+  };
+}
+
 $("join-form").onsubmit = async (event) => {
   event.preventDefault(); $("join-error").textContent = "";
   const button = event.submitter || $("join-form").querySelector("[type=submit]");
-  await withButtonLoading(button, async () => {
-    try { rememberConnectPreferences("join"); await enterRoom(connectionRequest("join", $("join-invite").value.trim())); }
-    catch (error) { $("join-error").textContent = errorText(error); }
-  }, "Connecting");
+  await withButtonLoading(button, () => withCancellableConnect("join", async () => {
+    rememberConnectPreferences("join");
+    await enterRoom(connectionRequest("join", $("join-invite").value.trim()));
+  }), "Connecting");
 };
 $("host-mode").onchange = () => {
   const advanced = $("host-mode").value === "advanced";
@@ -1847,7 +1901,7 @@ $("host-mode").onchange();
 $("host-form").onsubmit = async (event) => {
   event.preventDefault(); $("host-error").textContent = "";
   const button = event.submitter || $("host-form").querySelector("[type=submit]");
-  await withButtonLoading(button, async () => {
+  await withButtonLoading(button, () => withCancellableConnect("host", async () => {
     let startedServer = false;
     try {
       rememberConnectPreferences("host");
@@ -1861,13 +1915,13 @@ $("host-form").onsubmit = async (event) => {
       startedServer = true;
       await enterRoom(connectionRequest("host", hosted.localInvite));
     } catch (error) {
-      $("host-error").textContent = errorText(error);
       if (startedServer) {
         try { await invoke("StopServer"); } catch (_) {}
         hosted = { running: false };
       }
+      throw error;
     }
-  }, "Starting");
+  }), "Starting");
 };
 
 // Room controls wiring
@@ -2003,13 +2057,13 @@ $("undo-playlist").onclick = async () => {
   closePopovers();
   const previous = playlistHistory.pop();
   if (!previous) return;
-  try { await updatePlaylist(previous, false); }
+  try { await updatePlaylist(previous, { remember: false, basedOnScreen: true }); }
   catch (error) { playlistHistory.push(previous); showError(error); }
 };
 $("shuffle-playlist").onclick = () => {
   closePopovers();
   const items = playlistInputs(), selected = snapshot.playlist.selected, start = selected >= 0 ? selected + 1 : 0, tail = items.splice(start);
-  updatePlaylist([...items, ...shuffled(tail)]).catch(showError);
+  updatePlaylist([...items, ...shuffled(tail)], { basedOnScreen: true }).catch(showError);
 };
 $("playlist-more").onclick = (event) => { event.stopPropagation(); togglePopover($("playlist-menu"), $("playlist-more")); };
 $("add-stream-focus").onclick = () => {
@@ -2018,7 +2072,7 @@ $("add-stream-focus").onclick = () => {
   $("playlist-source").focus();
 };
 $("save-playlist").onclick = () => { closePopovers(); copyText(snapshot.playlist.items.map((item) => item.url || item.label).join("\n"), "Playlist copied as text"); };
-$("shuffle-all").onclick = () => { closePopovers(); updatePlaylist(shuffled(playlistInputs())).catch(showError); };
+$("shuffle-all").onclick = () => { closePopovers(); updatePlaylist(shuffled(playlistInputs()), { basedOnScreen: true }).catch(showError); };
 $("load-playlist-file").onclick = () => loadPlaylistFromFile();
 $("save-playlist-file").onclick = async () => { closePopovers(); try { const path = await invoke("SavePlaylistFile"); if (path) showToast("Playlist saved"); } catch (error) { showError(error); } };
 $("spin-wheel").onclick = () => { closePopovers(); openWheelWindow(); };
@@ -2394,10 +2448,10 @@ document.addEventListener("contextmenu", (event) => {
     if (ownOffer && item.media && ownOffer.media?.fingerprint === item.media.fingerprint) controls.push(menuButton("Stop sharing file", () => { closePopovers(); invoke("StopOfferingStream").then(() => showToast("File sharing stopped")).catch(showError); }));
     else if (!ownOffer && !item.url && availability[item.id] && streamingAvailable && friendsMissing(item.media)) controls.push(menuButton("Share file", () => { closePopovers(); invoke("OfferPlaylistStream", item.id).then(() => showToast("File sharing started")).catch(showError); }));
     controls.push(
-      menuButton("Move up", at((current) => current > 0 && reorderPlaylist(current, current - 1)), { disabled: !canControl() || index === 0 }),
-      menuButton("Move down", at((current) => current < snapshot.playlist.items.length - 1 && reorderPlaylist(current, current + 1)), { disabled: !canControl() || index === snapshot.playlist.items.length - 1 }),
+      menuButton("Move up", at((current) => current > 0 && movePlaylistItem(item.id, snapshot.playlist.items[current - 1].id)), { disabled: !canControl() || index === 0 }),
+      menuButton("Move down", at((current) => current < snapshot.playlist.items.length - 1 && movePlaylistItem(item.id, snapshot.playlist.items[current + 1].id)), { disabled: !canControl() || index === snapshot.playlist.items.length - 1 }),
       menuButton("Copy title", () => { closePopovers(); copyText(item.label, "Title copied"); }),
-      menuButton("Remove from queue", at((current) => removePlaylist(current)), { disabled: !canControl(), danger: true })
+      menuButton("Remove from queue", at(() => removePlaylistItem(item.id)), { disabled: !canControl(), danger: true })
     );
     if (item.url) controls.splice(controls.length - 1, 0, menuButton("Copy video URL", () => { closePopovers(); copyText(item.url, "URL copied"); }));
     showContextMenu(event, controls);
@@ -2703,6 +2757,11 @@ if (wails?.Events) {
   wails.Events.On("faro:event", (event) => receive(event.data));
   wails.Events.On("faro:file-drop", (event) => receiveFileDrop(event.data?.paths, event.data?.target));
   wails.Events.On("faro:window-state", (event) => setWindowState(event.data));
+  wails.Events.On("faro:window-chrome", (event) => {
+    if (!event.data) return;
+    windowChrome = { ...windowChrome, ...event.data };
+    applyWindowChrome();
+  });
   wails.Events.On("faro:open-files", () => { void collectLaunchPaths(); });
   wails.Events.On("faro:confirm-quit", async (event) => {
     const hosting = Boolean(event.data?.hosting);

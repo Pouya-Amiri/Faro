@@ -62,6 +62,15 @@ func StartRoom(ctx context.Context, address string) (string, error) {
 }
 
 // RoomDialer owns one ephemeral Tailcat client per Faro connection.
+//
+// Unlike shared media, the room connection does not wait for a direct path.
+// It starts over Tailcat's DERP relay, which carries WireGuard packets it
+// cannot read (the room's TLS, pinned by the invite, runs inside them), and
+// Tailcat moves it to a direct UDP path by itself once NAT traversal
+// succeeds. Room traffic is small: pings every few seconds, playback
+// commands, chat and a queue of at most 64 KiB of text, well within the
+// relay's rate limits. Guests behind carrier-grade or symmetric NAT can
+// therefore still join; only file sharing needs the direct path.
 func RoomDialer(address string) func(context.Context, string, string) (net.Conn, error) {
 	if address == "" {
 		return nil
@@ -71,11 +80,6 @@ func RoomDialer(address string) func(context.Context, string, string) (net.Conn,
 			return nil, err
 		}
 		client := &upstream.Client{Server: upstream.Addr(address), Logf: discardLog}
-		route := &viewer{client: client, set: true}
-		if err := route.WaitForDirect(ctx); err != nil {
-			client.Close()
-			return nil, err
-		}
 		conn, err := client.DialTCPPort(ctx, roomPort)
 		if err != nil {
 			client.Close()

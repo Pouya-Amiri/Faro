@@ -65,6 +65,28 @@ func windowControlStyle(goos, desktop string) string {
 	}
 }
 
+// windowChromeListener receives the new chrome when the desktop's title bar
+// settings change while Faro runs.
+var (
+	windowChromeMu       sync.Mutex
+	windowChromeListener func(WindowChrome)
+)
+
+func (d *Desktop) watchWindowChrome() {
+	windowChromeMu.Lock()
+	windowChromeListener = func(chrome WindowChrome) { d.app.Event.Emit("faro:window-chrome", chrome) }
+	windowChromeMu.Unlock()
+}
+
+func notifyWindowChromeChanged() {
+	windowChromeMu.Lock()
+	listener := windowChromeListener
+	windowChromeMu.Unlock()
+	if listener != nil {
+		listener((&Desktop{}).WindowChrome())
+	}
+}
+
 // SetWindowBackground remembers the page's resolved background colour so the
 // next launch paints the window in the right theme before the page loads.
 func (d *Desktop) SetWindowBackground(colour string) error {

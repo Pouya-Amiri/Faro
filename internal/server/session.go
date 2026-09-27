@@ -220,7 +220,7 @@ func (s *session) handle(envelope protocol.Envelope) error {
 		if err != nil {
 			return err
 		}
-		return s.server.hub.selectPlaylist(s.participant, request.Index)
+		return s.server.hub.selectPlaylist(s.participant, request)
 	case protocol.TypePlaylistWheelSpin:
 		if _, err := decode[protocol.PlaylistWheelSpin](envelope); err != nil {
 			return err

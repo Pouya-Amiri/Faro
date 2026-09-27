@@ -146,9 +146,23 @@ func (s *Service) sourceForPlayback(client *faroclient.Client) string {
 }
 
 func (s *Service) Seek(seconds float64) error {
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return errors.New("seek position must be a number")
+	}
+	seconds = max(seconds, 0)
 	client, mediaPlayer, err := s.connectedPlayer()
 	if err != nil {
-		return err
+		// Like pause and speed, the position is room state: with no local
+		// player it is still published, and players follow it when opened.
+		client, err = s.connected()
+		if err != nil {
+			return err
+		}
+		snapshot := localClockSnapshot(client)
+		return client.SetPlayback(protocol.PlaybackSet{
+			PositionSeconds: seconds, Paused: snapshot.Playback.Paused,
+			Rate: normalizedRate(snapshot.Playback.Rate), Seek: true,
+		})
 	}
 	ctx, cancel := context.WithTimeout(s.root, 3*time.Second)
 	defer cancel()

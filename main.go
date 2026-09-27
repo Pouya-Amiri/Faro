@@ -78,6 +78,7 @@ func main() {
 		},
 	})
 	desktop.setWindow(mainWindow)
+	desktop.watchWindowChrome()
 	tray = setupTray(wailsApp, mainWindow, desktop)
 	desktop.tray = tray
 

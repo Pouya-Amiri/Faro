@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -157,7 +158,7 @@ func TestSelectingPlaylistItemResetsPlaybackClock(t *testing.T) {
 	}
 	room := joined.room
 	room.playback = protocol.Playback{Revision: 7, PositionSeconds: 481, Paused: false, Rate: 1.5, SetBy: "someone-else"}
-	if err := h.selectPlaylist(joined.participant, 0); err != nil {
+	if err := h.selectPlaylist(joined.participant, protocol.PlaylistSelect{Index: 0}); err != nil {
 		t.Fatal(err)
 	}
 	if room.playback.PositionSeconds != 0 || !room.playback.Paused || room.playback.Rate != 1 {
@@ -179,7 +180,7 @@ func TestPlaylistReorderKeepsSelectedItemIdentity(t *testing.T) {
 	if err := h.setPlaylist(joined.participant, protocol.PlaylistSet{Items: []protocol.PlaylistItem{one, two}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.selectPlaylist(joined.participant, 0); err != nil {
+	if err := h.selectPlaylist(joined.participant, protocol.PlaylistSelect{Index: 0}); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.setPlaylist(joined.participant, protocol.PlaylistSet{Items: []protocol.PlaylistItem{two, one}}); err != nil {
@@ -204,7 +205,7 @@ func TestPlaylistRemovalAndSourceReplacementResetPlayback(t *testing.T) {
 		if err := h.setPlaylist(joined.participant, protocol.PlaylistSet{Items: []protocol.PlaylistItem{original}}); err != nil {
 			t.Fatal(err)
 		}
-		if err := h.selectPlaylist(joined.participant, 0); err != nil {
+		if err := h.selectPlaylist(joined.participant, protocol.PlaylistSelect{Index: 0}); err != nil {
 			t.Fatal(err)
 		}
 		joined.room.playback = protocol.Playback{Revision: 7, PositionSeconds: 20, Paused: false, Rate: 1.5}
@@ -421,5 +422,63 @@ func TestUnansweredStreamRequestExpiresSoonButGrantsKeepTheirTTL(t *testing.T) {
 	}
 	if _, err := h.requestStream(viewer.participant, request); err != nil {
 		t.Fatalf("retry after expiry failed: %v", err)
+	}
+}
+
+func TestPlaylistBaseRevisionRejectsStaleEdits(t *testing.T) {
+	h := newHub(1, 2)
+	joined, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := func(id string) protocol.PlaylistItem {
+		return protocol.PlaylistItem{ID: id, Label: id, URL: "https://example.com/" + id + ".mp4"}
+	}
+	if err := h.setPlaylist(joined.participant, protocol.PlaylistSet{Items: []protocol.PlaylistItem{item("one")}}); err != nil {
+		t.Fatal(err)
+	}
+	base := joined.room.playlist.Revision
+	// A friend's edit lands first.
+	if err := h.setPlaylist(joined.participant, protocol.PlaylistSet{Items: []protocol.PlaylistItem{item("one"), item("two")}, BaseRevision: &base}); err != nil {
+		t.Fatal(err)
+	}
+	var failure *commandError
+	err = h.setPlaylist(joined.participant, protocol.PlaylistSet{Items: nil, BaseRevision: &base})
+	if !errors.As(err, &failure) || failure.code != protocol.ErrorPlaylistConflict {
+		t.Fatalf("stale edit returned %v, want a playlist conflict", err)
+	}
+	if len(joined.room.playlist.Items) != 2 {
+		t.Fatalf("stale edit changed the playlist: %#v", joined.room.playlist.Items)
+	}
+	// Without a base revision the update applies, as for older clients.
+	if err := h.setPlaylist(joined.participant, protocol.PlaylistSet{Items: []protocol.PlaylistItem{item("two")}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSelectingPlaylistItemByID(t *testing.T) {
+	h := newHub(1, 2)
+	joined, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := []protocol.PlaylistItem{
+		{ID: "one", Label: "One", URL: "https://example.com/one.mp4"},
+		{ID: "two", Label: "Two", URL: "https://example.com/two.mp4"},
+	}
+	if err := h.setPlaylist(joined.participant, protocol.PlaylistSet{Items: items}); err != nil {
+		t.Fatal(err)
+	}
+	// The index is stale (the queue was reordered); the ID wins.
+	if err := h.selectPlaylist(joined.participant, protocol.PlaylistSelect{Index: 0, ItemID: "two"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := joined.room.playlist.Selected; got != 1 {
+		t.Fatalf("selected %d, want the item with ID two", got)
+	}
+	var failure *commandError
+	err = h.selectPlaylist(joined.participant, protocol.PlaylistSelect{Index: 0, ItemID: "gone"})
+	if !errors.As(err, &failure) || failure.code != protocol.ErrorPlaylistItemNotFound || joined.room.playlist.Selected != 1 {
+		t.Fatalf("selecting a removed item returned %v and selected %d", err, joined.room.playlist.Selected)
 	}
 }

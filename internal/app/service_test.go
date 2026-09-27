@@ -218,10 +218,10 @@ func TestStreamInterruptedReconnectRestoresSyncWithoutPublishingDeadGateway(t *t
 	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 1000)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	wait := func(message string, check func() bool) {
@@ -382,10 +382,10 @@ func TestSelectedPlaylistItemReloadsWhenIdentityChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	const stableID = "same-item"
-	if err := service.SetPlaylist([]PlaylistInput{{ID: stableID, Label: "Movie", Source: first}}); err != nil {
+	if err := service.SetPlaylist([]PlaylistInput{{ID: stableID, Label: "Movie", Source: first}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.SelectPlaylist(0); err != nil {
+	if err := service.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForSource := func(want string) {
@@ -403,7 +403,7 @@ func TestSelectedPlaylistItemReloadsWhenIdentityChanges(t *testing.T) {
 		}
 	}
 	waitForSource(first)
-	if err := service.SetPlaylist([]PlaylistInput{{ID: stableID, Label: "Replacement", Source: second}}); err != nil {
+	if err := service.SetPlaylist([]PlaylistInput{{ID: stableID, Label: "Replacement", Source: second}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitForSource(second)
@@ -437,10 +437,10 @@ func TestPlayAfterRemovingClosedPlayerSourceOpensSelectedItem(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := service.SetPlaylist([]PlaylistInput{{Label: "Removed", Source: removed}, {Label: "Winner", Source: winner}}); err != nil {
+	if err := service.SetPlaylist([]PlaylistInput{{Label: "Removed", Source: removed}, {Label: "Winner", Source: winner}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.SelectPlaylist(0); err != nil {
+	if err := service.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -464,10 +464,10 @@ func TestPlayAfterRemovingClosedPlayerSourceOpensSelectedItem(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	service.releasePlayer(first, "")
-	if err := service.SetPlaylist([]PlaylistInput{{Label: "Winner", Source: winner}}); err != nil {
+	if err := service.SetPlaylist([]PlaylistInput{{Label: "Winner", Source: winner}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.SelectPlaylist(0); err != nil {
+	if err := service.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.SetPaused(false); err != nil {
@@ -503,7 +503,7 @@ func TestLocalWheelSpinPreservesDismissalUntilWinner(t *testing.T) {
 	if err := service.SetPlaylist([]PlaylistInput{
 		{Label: "One", Source: "https://example.com/one.mp4"},
 		{Label: "Two", Source: "https://example.com/two.mp4"},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	service.mu.Lock()
@@ -560,10 +560,10 @@ func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
 	if err := os.WriteFile(path, []byte("removed file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetPlaylist([]PlaylistInput{{Label: "Removed", Source: path}}); err != nil {
+	if err := s.SetPlaylist([]PlaylistInput{{Label: "Removed", Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SelectPlaylist(0); err != nil {
+	if err := s.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
@@ -582,7 +582,7 @@ func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
 	if err := s.SetPaused(false); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetPlaylist(nil); err != nil {
+	if err := s.SetPlaylist(nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(3 * time.Second)
@@ -615,10 +615,10 @@ func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
 	if starts != 1 {
 		t.Fatalf("started %d players after removal, want 1", starts)
 	}
-	if err := s.SetPlaylist([]PlaylistInput{{Label: "Returned", Source: path}}); err != nil {
+	if err := s.SetPlaylist([]PlaylistInput{{Label: "Returned", Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SelectPlaylist(0); err != nil {
+	if err := s.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(3 * time.Second)
@@ -644,7 +644,7 @@ func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
 	if reopenedItem == "" {
 		t.Fatal("explicit Play did not retain queue ownership")
 	}
-	if err := s.SetPlaylist(nil); err != nil {
+	if err := s.SetPlaylist(nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	s.mu.RLock()
@@ -681,13 +681,13 @@ func TestExplicitPlayRequestsAvailableStreamForDismissedViewer(t *testing.T) {
 	if err := os.WriteFile(path, []byte(strings.Repeat("shared-media-", 1000)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Label: "Shared", Source: path}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Shared", Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	viewer.mu.Lock()
 	viewer.playerDismissed = true
 	viewer.mu.Unlock()
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, _ := host.Snapshot()
@@ -758,10 +758,10 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 	if err := host.SetPlaylist([]PlaylistInput{
 		{Label: "Movie", Source: path},
 		{Label: "Next", URL: nextURL},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForState := func(message string, check func() bool) {
@@ -790,7 +790,7 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 	if err := host.SetPlaylist([]PlaylistInput{{
 		ID: snapshot.Playlist.Items[1].ID, Label: snapshot.Playlist.Items[1].Label,
 		URL: snapshot.Playlist.Items[1].URL, Media: snapshot.Playlist.Items[1].Media,
-	}}); err != nil {
+	}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitForState("removed queue file kept streaming", func() bool {
@@ -815,10 +815,10 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 			URL: snapshot.Playlist.Items[1].URL, Media: snapshot.Playlist.Items[1].Media},
 		{ID: snapshot.Playlist.Items[0].ID, Label: snapshot.Playlist.Items[0].Label,
 			URL: snapshot.Playlist.Items[0].URL, Media: snapshot.Playlist.Items[0].Media},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SelectPlaylist(1); err != nil {
+	if err := host.SelectPlaylist(1, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := host.OfferPlaylistStream(snapshot.Playlist.Items[0].ID); err != nil {
@@ -837,7 +837,7 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 		defer viewer.mu.RUnlock()
 		return viewer.streamGateway == nil && viewer.currentSource == "" && viewer.selectedItem == ""
 	})
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForState("viewer kept playing the removed stream instead of the next item", func() bool {
@@ -873,7 +873,7 @@ func TestRemovedPlaylistOfferIsWithdrawnAfterPlayerWasClosed(t *testing.T) {
 	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 1000)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, _ := host.Snapshot()
@@ -883,7 +883,7 @@ func TestRemovedPlaylistOfferIsWithdrawnAfterPlayerWasClosed(t *testing.T) {
 	host.mu.Lock()
 	host.playerDismissed = true
 	host.mu.Unlock()
-	if err := host.SetPlaylist(nil); err != nil {
+	if err := host.SetPlaylist(nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	host.mu.RLock()
@@ -896,7 +896,7 @@ func TestRemovedPlaylistOfferIsWithdrawnAfterPlayerWasClosed(t *testing.T) {
 	if err := os.WriteFile(other, []byte("another file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Label: "Other", Source: other}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Other", Source: other}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, _ = host.Snapshot()
@@ -1077,10 +1077,10 @@ func TestIndexingSavedDirectoryStartsPlayerForSelectedRemoteItem(t *testing.T) {
 	if err := os.WriteFile(mediaPath, []byte("matching media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: mediaPath}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: mediaPath}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1146,7 +1146,7 @@ func TestPlaylistAvailabilitySharedAndClosedSelectionWaitsForExplicitPlay(t *tes
 	if err := os.WriteFile(path, []byte("a matching file"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Source: path}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	wait := func(check func() bool) {
@@ -1177,7 +1177,7 @@ func TestPlaylistAvailabilitySharedAndClosedSelectionWaitsForExplicitPlay(t *tes
 		}
 		return false
 	})
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	wait(func() bool { host.mu.RLock(); defer host.mu.RUnlock(); return host.selectedItem == id })
@@ -1342,7 +1342,7 @@ func TestSetPlaylistFillsInDurations(t *testing.T) {
 	if err := service.SetPlaylist([]PlaylistInput{
 		{Label: "Episode", Source: mediaPath},
 		{Label: "Talk", URL: "https://www.youtube.com/watch?v=abc", DurationSeconds: 3601},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := service.Snapshot()
@@ -1385,7 +1385,7 @@ func TestSelectedFileIsSharedAutomaticallyWithParticipantsWithoutIt(t *testing.T
 	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 1000)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}, {Label: "Next", URL: "https://example.test/next.mp4"}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}, {Label: "Next", URL: "https://example.test/next.mp4"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitFor := func(message string, check func() bool) {
@@ -1411,20 +1411,20 @@ func TestSelectedFileIsSharedAutomaticallyWithParticipantsWithoutIt(t *testing.T
 
 	// Selecting the file (as clicking it or a wheel win does) shares it
 	// without anyone pressing "Share file", and the viewer streams it.
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitFor("the selected file was not shared automatically", offering)
 	waitFor("the viewer did not stream the automatically shared file", receiving)
 
 	// Moving to another item withdraws the automatic offer.
-	if err := host.SelectPlaylist(1); err != nil {
+	if err := host.SelectPlaylist(1, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitFor("the automatic offer outlived its selection", func() bool { return !offering() })
 
 	// An explicit stop is respected until the selection changes.
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitFor("the file was not shared again when reselected", offering)
@@ -1438,10 +1438,10 @@ func TestSelectedFileIsSharedAutomaticallyWithParticipantsWithoutIt(t *testing.T
 
 	// With the preference off nothing is shared.
 	host.SetAutoOfferEnabled(false)
-	if err := host.SelectPlaylist(1); err != nil {
+	if err := host.SelectPlaylist(1, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(4 * autoOfferStagger / 3)
@@ -1582,10 +1582,10 @@ func TestConcurrentStreamRequestsClaimTheOfferOnce(t *testing.T) {
 // queue, select it, and wait for the player to open it.
 func openThroughQueue(t *testing.T, service *Service, path string) error {
 	t.Helper()
-	if err := service.SetPlaylist([]PlaylistInput{{Label: filepath.Base(path), Source: path}}); err != nil {
+	if err := service.SetPlaylist([]PlaylistInput{{Label: filepath.Base(path), Source: path}}, nil); err != nil {
 		return err
 	}
-	if err := service.SelectPlaylist(0); err != nil {
+	if err := service.SelectPlaylist(0, ""); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(5 * time.Second)

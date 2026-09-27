@@ -128,6 +128,7 @@ type Service struct {
 
 	mu                      sync.RWMutex
 	sessionCtx              context.Context
+	connectCancel           context.CancelFunc
 	cancel                  context.CancelFunc
 	client                  *faroclient.Client
 	player                  player.Player
@@ -189,6 +190,7 @@ type Service struct {
 	chat                    chatOverlay
 	streamCache             mediastream.CacheOptions
 	syncState               string
+	syncDrift               float64
 }
 
 func New(root context.Context, sink EventSink) *Service {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"strings"
 	"time"
@@ -33,6 +34,9 @@ func (s *Service) Connect(request ConnectionRequest) error {
 	}
 	s.Disconnect()
 	ctx, cancel := context.WithCancel(s.root)
+	s.mu.Lock()
+	s.connectCancel = cancel
+	s.mu.Unlock()
 	client, err := faroclient.Connect(ctx, faroclient.Config{
 		DialContext: tailcattransport.RoomDialer(parsed.Tailcat),
 		Address:     parsed.Address, Fingerprint: parsed.Fingerprint,
@@ -40,6 +44,16 @@ func (s *Service) Connect(request ConnectionRequest) error {
 		Name: request.Name, Room: parsed.Room, ClientVersion: request.ClientVersion,
 		Capabilities: []protocol.Capability{protocol.CapabilityMediaStreamV1, protocol.CapabilityMediaAvailabilityV1},
 	})
+	s.mu.Lock()
+	s.connectCancel = nil
+	s.mu.Unlock()
+	if ctx.Err() != nil {
+		if client != nil {
+			_ = client.Close()
+		}
+		cancel()
+		return ErrConnectCancelled
+	}
 	if err != nil {
 		cancel()
 		return err
@@ -77,6 +91,27 @@ func (s *Service) Connect(request ConnectionRequest) error {
 	s.emitConnection("connected", 0, "")
 	s.emitSnapshot()
 	return nil
+}
+
+// ErrConnectCancelled is returned by Connect after CancelConnect.
+var ErrConnectCancelled = errors.New("connection cancelled")
+
+// CancelConnect stops a connection attempt in progress, including starting
+// the local server it would connect to. A connected room is not affected.
+func (s *Service) CancelConnect() {
+	s.mu.Lock()
+	cancelConnect := s.connectCancel
+	var cancelServer context.CancelFunc
+	if s.serverStarting {
+		cancelServer = s.serverCancel
+	}
+	s.mu.Unlock()
+	if cancelConnect != nil {
+		cancelConnect()
+	}
+	if cancelServer != nil {
+		cancelServer()
+	}
 }
 
 func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) {
@@ -527,7 +562,7 @@ func (s *Service) Disconnect() {
 	streams := s.detachStreamingLocked()
 	s.sessionCtx, s.cancel, s.playerCancel, s.client, s.player, s.sync = nil, nil, nil, nil, nil, nil
 	s.playerDismissed = false
-	s.syncState = ""
+	s.syncState, s.syncDrift = "", 0
 	s.mu.Unlock()
 	s.playerLifecycleMu.Unlock()
 	if cancel != nil {
@@ -617,14 +652,20 @@ func syncStatusOf(status syncer.Status) SyncStatus {
 	return SyncStatus{State: "catching-up", DriftSeconds: status.DriftSeconds}
 }
 
-// reportSync tells the page when the sync state changes; drift alone
-// changing within a state is not worth a message every second.
+// reportSync tells the page when the sync state changes, or when the drift
+// its tooltip shows has moved by a visible amount. Drift jitter below that is
+// not worth a message every second.
 func (s *Service) reportSync(status SyncStatus) {
 	s.mu.Lock()
-	changed := s.syncState != status.State
-	s.syncState = status.State
+	changed := s.syncState != status.State || math.Abs(s.syncDrift-status.DriftSeconds) >= syncDriftStep
+	if changed {
+		s.syncState, s.syncDrift = status.State, status.DriftSeconds
+	}
 	s.mu.Unlock()
 	if changed {
 		s.sink(Event{Kind: "sync", Sync: &status})
 	}
 }
+
+// syncDriftStep is the smallest drift change worth showing in the tooltip.
+const syncDriftStep = 0.05

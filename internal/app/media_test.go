@@ -9,8 +9,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Pouya-Amiri/Faro/internal/player"
+	"github.com/Pouya-Amiri/Faro/internal/protocol"
 )
 
 func TestExpandMediaPathsIncludesFilesAndDirectories(t *testing.T) {
@@ -107,7 +109,7 @@ func TestAppendPlaylistKeepsOtherEditsAndSkipsMissingFiles(t *testing.T) {
 		return path
 	}
 	existing, added := write("existing.mkv"), write("added.mkv")
-	if err := service.SetPlaylist([]PlaylistInput{{Label: "Existing", Source: existing}}); err != nil {
+	if err := service.SetPlaylist([]PlaylistInput{{Label: "Existing", Source: existing}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	count, err := service.AppendPlaylist([]PlaylistInput{
@@ -131,5 +133,91 @@ func TestAppendPlaylistKeepsOtherEditsAndSkipsMissingFiles(t *testing.T) {
 	}
 	if _, err := service.AppendPlaylist([]PlaylistInput{{Label: "Gone", Source: filepath.Join(directory, "gone.mkv")}}, false); err == nil {
 		t.Fatal("a batch with nothing readable must fail")
+	}
+}
+
+func TestQueueEditsAreRebasedInsteadOfOverwritingOthers(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	host := New(context.Background(), nil)
+	status, err := host.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "queue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	guest := New(context.Background(), nil)
+	t.Cleanup(guest.Shutdown)
+	for _, service := range []*Service{host, guest} {
+		service.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	}
+	if err := host.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Host", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := guest.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Guest", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	url := func(name string) PlaylistInput {
+		return PlaylistInput{Label: name, URL: "https://example.com/" + name + ".mp4"}
+	}
+	if _, err := host.AppendPlaylist([]PlaylistInput{url("one"), url("two"), url("three")}, false); err != nil {
+		t.Fatal(err)
+	}
+	labels := func(service *Service) []string {
+		result := []string{}
+		for _, item := range service.client.Snapshot().Playlist.Items {
+			result = append(result, item.Label)
+		}
+		return result
+	}
+	waitForLabels := func(service *Service, want []string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for !slices.Equal(labels(service), want) {
+			if time.Now().After(deadline) {
+				t.Fatalf("queue = %q, want %q", labels(service), want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitForLabels(guest, []string{"one", "two", "three"})
+
+	// The guest's edit is computed from a queue the host changes before the
+	// edit is published, so the server rejects it and it is redone.
+	attempts := 0
+	err = guest.editPlaylist(guest.client, func(items []protocol.PlaylistItem) ([]protocol.PlaylistItem, error) {
+		attempts++
+		if attempts == 1 {
+			if _, err := host.AppendPlaylist([]PlaylistInput{url("four")}, false); err != nil {
+				return nil, err
+			}
+		}
+		return slices.DeleteFunc(items, func(item protocol.PlaylistItem) bool { return item.Label == "one" }), nil
+	})
+	if err != nil || attempts != 2 {
+		t.Fatalf("edit returned %v after %d attempts, want success on the second", err, attempts)
+	}
+	waitForLabels(host, []string{"two", "three", "four"})
+
+	// Removing and moving work on item IDs, wherever the items are now.
+	items := host.client.Snapshot().Playlist.Items
+	if err := guest.MovePlaylistItem(items[2].ID, items[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	waitForLabels(host, []string{"four", "two", "three"})
+	if err := guest.RemovePlaylistItem(items[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	waitForLabels(host, []string{"four", "two"})
+	if err := guest.RemovePlaylistItem(items[1].ID); err != nil {
+		t.Fatalf("removing an item that is already gone returned %v", err)
+	}
+	if err := guest.SelectPlaylist(0, items[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for host.client.Snapshot().Playlist.Selected != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("selected %d, want the item with ID %q at index 1", host.client.Snapshot().Playlist.Selected, items[0].ID)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

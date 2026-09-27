@@ -161,7 +161,7 @@ func (v *viewer) Close() error { return v.client.Close() }
 func discardLog(string, ...any) {}
 
 func directPathError() error {
-	return errors.New("direct peer-to-peer path unavailable (check UDP/firewall access; use Advanced hosting for rooms or a local copy for shared media)")
+	return errors.New("no direct peer-to-peer path for the shared file (check UDP/firewall access, or use a local copy)")
 }
 
 var _ streamtransport.Factory = Factory{}

@@ -29,6 +29,25 @@ static void faroSetFrameStyle(const char *css) {
 	gtk_css_provider_load_from_string(provider, css);
 }
 
+extern void faroWindowChromeChanged(void);
+
+static void faroChromeSettingChanged(GObject *settings, GParamSpec *spec, gpointer data) {
+	faroWindowChromeChanged();
+}
+
+// faroWatchWindowChrome follows changes to the desktop's title bar button
+// layout and double-click action, which GNOME and KDE apply without a restart.
+static void faroWatchWindowChrome(void) {
+	static gboolean watching = FALSE;
+	GtkSettings *settings = gtk_settings_get_default();
+	if (watching || settings == NULL) {
+		return;
+	}
+	watching = TRUE;
+	g_signal_connect(settings, "notify::gtk-decoration-layout", G_CALLBACK(faroChromeSettingChanged), NULL);
+	g_signal_connect(settings, "notify::gtk-titlebar-double-click", G_CALLBACK(faroChromeSettingChanged), NULL);
+}
+
 // faroPrepareWindow must run before the window is first mapped: GTK does not
 // promise that a title bar can be replaced on a visible window.
 static void faroPrepareWindow(GtkWindow *window) {
@@ -36,6 +55,7 @@ static void faroPrepareWindow(GtkWindow *window) {
 		return;
 	}
 	g_object_set_data(G_OBJECT(window), "faro-prepared", GINT_TO_POINTER(1));
+	faroWatchWindowChrome();
 
 	GtkWidget *titlebar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
 	gtk_widget_set_visible(titlebar, FALSE);
