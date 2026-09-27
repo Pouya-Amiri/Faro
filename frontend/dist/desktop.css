@@ -1,6 +1,6 @@
 /* Wails platform integration */
-/* Faro is frameless: window controls are embedded in the app toolbar and the
-   platform owns dragging through the --wails-draggable regions below. */
+/* Faro draws its own title bar: window controls are embedded in the app toolbar
+   and the platform owns dragging through the --wails-draggable regions below. */
 .window-titlebar,
 .app-command-bar,
 .sidebar-brand {
@@ -21,22 +21,64 @@ dialog,
   --wails-draggable: no-drag;
 }
 
-/* Faro is frameless on Linux too. The GTK4 toplevel is made transparent and
-   clipped to the rounded window shape by the desktop adapter, including the
-   flush shape used while maximised, fullscreen or tiled. The page therefore
-   must not round or clip itself: the window shape has exactly one owner
-   (surface_linux.go). */
+/* On Linux GTK owns the window frame: the rounded corners, shadow and resize
+   borders come from its client-side decorations, with only its title bar
+   replaced (surface_linux.go). The page therefore must not round or clip
+   itself. */
+
+/* The embedded window controls follow the desktop's button layout
+   (gtk-decoration-layout on Linux). app.js sets the side and the width. */
+:root { --window-controls-width: 144px; }
 
 /* macOS draws its own inset traffic lights over the command bar. */
 body[data-platform="mac"] .window-controls { display: none; }
 body[data-platform="mac"] .app-command-bar { padding-left: 82px; padding-right: 12px; }
-body[data-platform="mac"] .sidebar-brand { padding-left: 82px; }
 
-/* Reserve the top-right corner for the embedded window controls. */
-body:not([data-platform="mac"]) .app-command-bar { padding-right: 148px; }
+/* Reserve the corner used by the embedded window controls. */
+body:not([data-platform="mac"]) .app-command-bar { padding-right: calc(var(--window-controls-width) + 4px); }
+body:not([data-platform="mac"]) .window-drag-region { right: var(--window-controls-width); }
 body:not([data-platform="mac"]) .connect-main-panel { padding-top: 30px; }
 
+body[data-controls-side="left"]:not([data-platform="mac"]) .window-controls { right: auto; left: 0; }
+body[data-controls-side="left"]:not([data-platform="mac"]) .app-command-bar {
+  padding-left: calc(var(--window-controls-width) + 8px);
+  padding-right: 12px;
+}
+body[data-controls-side="left"]:not([data-platform="mac"]) .window-drag-region { right: 0; }
+
+/* When the window controls sit on the left (macOS traffic lights, or a GNOME
+   layout such as "close,minimize:"), they own the sidebar's top row and the
+   brand moves below it, as in Files or Finder, instead of squeezing beside
+   the buttons. The row stays draggable because it is part of .sidebar-brand. */
+body[data-platform="mac"] .sidebar-brand,
+body[data-controls-side="left"] .sidebar-brand {
+  height: auto;
+  align-items: flex-end;
+  padding: var(--command-height) 20px 14px;
+}
+body[data-platform="mac"] .sidebar-brand { padding-top: 44px; }
+
+/* Like native title bars, the controls recede while the window is inactive. */
+body.window-inactive .window-control { opacity: .55; }
+body.window-inactive .window-control:hover { opacity: 1; }
+
+/* Thin scrollbars that stay out of the way, closer to GTK and Windows 11
+   overlay scrollbars than WebKit's default in-page bars. macOS keeps its own. */
+body:not([data-platform="mac"]) ::-webkit-scrollbar { width: 10px; height: 10px; }
+body:not([data-platform="mac"]) ::-webkit-scrollbar-track,
+body:not([data-platform="mac"]) ::-webkit-scrollbar-corner { background: transparent; }
+body:not([data-platform="mac"]) ::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 10px;
+  background: var(--line-strong) padding-box;
+}
+body:not([data-platform="mac"]) ::-webkit-scrollbar-thumb:hover { background-color: var(--line-hover); }
+
+/* A fixed-size window should not rubber-band its panes. */
+.queue-scroll-container,
+.connect-main-panel,
+#chat { overscroll-behavior: contain; }
+
 @media (max-width: 1100px) {
-  .workspace-grid { grid-template-columns: minmax(0, 1fr) 330px; }
   .connect-shell { grid-template-columns: 230px minmax(0, 1fr); }
 }

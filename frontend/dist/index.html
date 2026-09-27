@@ -25,10 +25,15 @@
         document.documentElement.style.colorScheme = isDark ? "dark" : "light";
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=31" />
-    <link rel="stylesheet" href="/desktop.css?v=16" />
+    <link rel="stylesheet" href="/styles.css?v=37" />
+    <link rel="stylesheet" href="/desktop.css?v=18" />
   </head>
   <body>
+    <script>
+      /* Pick the platform chrome before the first paint; app.js confirms it
+         with the Wails runtime once that has loaded. */
+      document.body.dataset.platform = /Mac/i.test(navigator.platform) ? "mac" : /Win/i.test(navigator.platform) ? "windows" : "linux";
+    </script>
     <main id="app">
       <!-- Native Window Chrome / Titlebar -->
       <header id="window-titlebar" class="window-titlebar">
@@ -56,7 +61,7 @@
             <div class="sidebar-brand">
               <div class="sidebar-brand-text">
                 <span class="sidebar-title">Faro</span>
-                <span class="sidebar-subtitle">Version <span id="version">2</span></span>
+                <span class="sidebar-subtitle">Version <span id="version"></span></span>
               </div>
             </div>
 
@@ -143,6 +148,7 @@
 
               <div class="form-actions">
                 <div id="join-error" class="form-error" role="alert"></div>
+                <button id="join-cancel" class="btn btn-secondary hidden" type="button">Cancel</button>
                 <button class="btn btn-primary btn-submit" type="submit">
                   <span>Connect</span>
                   <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -223,6 +229,7 @@
 
               <div class="form-actions">
                 <div id="host-error" class="form-error" role="alert"></div>
+                <button id="host-cancel" class="btn btn-secondary hidden" type="button">Cancel</button>
                 <button class="btn btn-primary btn-submit" type="submit">
                   <span>Start and connect</span>
                   <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -295,6 +302,7 @@
 
               <!-- Timeline Range Scrubber -->
               <div class="timeline-control-row">
+                <div id="timeline-cache" class="timeline-cache" aria-hidden="true"></div>
                 <div class="scrubber-wrapper">
                   <div id="timeline-segments" class="timeline-segments" aria-hidden="true"></div>
                   <input id="position" type="range" min="0" max="1" step="any" value="0" aria-label="Playback timeline" />
@@ -308,15 +316,13 @@
                     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 20 9 12l10-8v16ZM5 19V5"/></svg>
                   </button>
                   <button id="back-ten" class="btn btn-transport skip-btn" type="button" title="Skip backward 10 seconds" aria-label="Back 10 seconds">
-                    <svg class="icon icon-skip" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 4v4h4"/></svg>
-                    <span class="skip-num">10</span>
+                    <svg class="icon icon-skip" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5A8.5 8.5 0 1 1 4.64 8.75M14.5 2 12 4.5 14.5 7"/><text class="skip-num" x="12" y="15.7" text-anchor="middle" font-size="7.5">10</text></svg>
                   </button>
                   <button id="pause" class="btn btn-play-pause" type="button" aria-label="Play / Pause" title="Play / Pause">
                     <svg class="play-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M8 5v14l11-7L8 5Z" fill="currentColor"/></svg>
                   </button>
                   <button id="forward-ten" class="btn btn-transport skip-btn" type="button" title="Skip forward 10 seconds" aria-label="Forward 10 seconds">
-                    <svg class="icon icon-skip" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 4v4h-4"/></svg>
-                    <span class="skip-num">10</span>
+                    <svg class="icon icon-skip" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5A8.5 8.5 0 1 0 19.36 8.75M9.5 2 12 4.5 9.5 7"/><text class="skip-num" x="12" y="15.7" text-anchor="middle" font-size="7.5">10</text></svg>
                   </button>
                   <button id="next-media" class="btn btn-transport" type="button" title="Next in queue" aria-label="Next media">
                     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 4 10 8-10 8V4ZM19 5v14"/></svg>
@@ -329,13 +335,26 @@
                     <span class="clock-divider">/</span>
                     <span id="duration">--:--</span>
                   </div>
-                  <div class="inline-select-group rate-group" title="Playback speed">
-                    <span class="select-label">Speed</span>
-                    <div class="rate-stepper" role="group" aria-label="Playback speed">
-                      <button id="rate-decrease" type="button" aria-label="Decrease playback speed" title="Slower"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6h7"/></svg></button>
-                      <button id="playback-rate" class="rate-value" data-value="1" type="button" aria-label="Reset playback speed" title="Reset to normal speed">1×</button>
-                      <button id="rate-increase" type="button" aria-label="Increase playback speed" title="Faster"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6h7M6 2.5v7"/></svg></button>
-                    </div>
+<div class="rate-control" role="group" aria-label="Playback speed">
+                    <button id="rate-decrease" class="rate-step" type="button" aria-label="Slower" title="Slower (−0.1×)">
+                      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"/></svg>
+                    </button>
+                    <select id="playback-rate" class="form-select select-compact" data-select-class="rate-select" aria-label="Playback speed" title="Playback speed">
+                      <option value="0.25">0.25×</option>
+                      <option value="0.5">0.5×</option>
+                      <option value="0.75">0.75×</option>
+                      <option value="1" selected>1×</option>
+                      <option value="1.25">1.25×</option>
+                      <option value="1.5">1.5×</option>
+                      <option value="1.75">1.75×</option>
+                      <option value="2">2×</option>
+                      <option value="2.5">2.5×</option>
+                      <option value="3">3×</option>
+                      <option value="4">4×</option>
+                    </select>
+                    <button id="rate-increase" class="rate-step" type="button" aria-label="Faster" title="Faster (+0.1×)">
+                      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12M12 6v12"/></svg>
+                    </button>
                   </div>
                 </div>
               </div>
@@ -344,7 +363,8 @@
             <!-- Shared Queue / Playlist Data Grid Table -->
             <article id="playlist-panel" class="deck-card queue-card" data-file-drop-target>
               <div class="panel-header-toolbar">
-                <div class="panel-heading">
+                <div class="panel-heading inspector-title-wrap">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>
                   <span class="panel-title">Queue</span>
                   <span id="playlist-count" class="counter-badge">0</span>
                 </div>
@@ -357,9 +377,9 @@
                     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></svg>
                     <span>Add URL</span>
                   </button>
-                  <button id="shuffle-playlist" class="btn btn-secondary btn-sm" type="button" title="Shuffle upcoming items">
-                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5-5 5M21 8h-4c-5 0-5 8-10 8H3M16 21l5-5-5-5M21 16h-4c-1.2 0-2.1-.5-2.9-1.2M3 8h4c1.2 0 2.1.5 2.9 1.2"/></svg>
-                    <span>Shuffle</span>
+                  <button id="spin-wheel" class="btn btn-secondary btn-sm" type="button" title="Spin the wheel to pick the next item for everyone">
+                    <svg class="icon spin-icon" viewBox="0 0 24 24" aria-hidden="true"><g class="spin-face"><circle cx="12" cy="13" r="8.5"/><path d="M12 13V5A8 8 0 0 1 17.66 7.34ZM12 13H20A8 8 0 0 1 17.66 18.66ZM12 13V21A8 8 0 0 1 6.34 18.66ZM12 13H4A8 8 0 0 1 6.34 7.34Z" fill="currentColor" fill-opacity=".7" stroke="none"/><circle cx="12" cy="13" r="1.8" fill="currentColor" stroke="none"/></g><path d="M12 7.4 9.2 2.2h5.6Z" fill="currentColor" stroke-linejoin="round"/></svg>
+                    <span>Spin</span>
                   </button>
                   <button id="playlist-more" class="btn btn-secondary btn-icon" type="button" aria-haspopup="menu" aria-label="More queue actions" title="Queue Options">
                     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
@@ -441,7 +461,13 @@
                   <button id="clear-chat" class="btn btn-ghost btn-xs" type="button" title="Clear message feed">Clear</button>
                 </div>
 
-                <div id="chat" class="chat-feed-stream" role="log" aria-live="polite"></div>
+                <div class="chat-feed-wrap">
+                  <div id="chat" class="chat-feed-stream" role="log" aria-live="polite"></div>
+                  <button id="chat-new-messages" class="chat-new-messages hidden" type="button">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
+                    <span>New messages</span>
+                  </button>
+                </div>
 
                 <form id="chat-form" class="chat-compose-bar">
                   <input id="chat-message" class="form-input form-input-sm" autocomplete="off" maxlength="512" placeholder="Message the room" required />
@@ -473,10 +499,9 @@
             <span>Undo Last Queue Change</span>
           </button>
           <hr class="popover-sep" />
-          <button id="spin-wheel" class="popover-btn" role="menuitem">
-            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 2v12M2 8h12M3.8 3.8l8.4 8.4M3.8 12.2l8.4-8.4" stroke="currentColor" stroke-width="1.1"/></svg>
-            <span>Spin Selection Wheel...</span>
-            <small class="popover-badge">Synced</small>
+          <button id="shuffle-playlist" class="popover-btn" role="menuitem">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M11 3h3v3M14 3l-5 5M11 13h3v-3M14 13l-5-5M2 3l4 4M2 13l4-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Shuffle Upcoming</span>
           </button>
           <button id="shuffle-all" class="popover-btn" role="menuitem">
             <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M11 3h3v3M14 3l-5 5M11 13h3v-3M14 13l-5-5M2 3l4 4M2 13l4-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -572,7 +597,7 @@
             </header>
             <div class="wheel-stage-wrapper">
               <div class="wheel-pointer-needle" aria-hidden="true"></div>
-              <canvas id="wheel-canvas" width="1000" height="1000" aria-label="Playlist selection wheel"></canvas>
+              <canvas id="wheel-canvas" width="700" height="700" aria-label="Playlist selection wheel"></canvas>
               <div class="wheel-center-hub" aria-hidden="true">
                 <img src="/logo.png" alt="" />
               </div>
@@ -640,7 +665,7 @@
                 <section data-page="appearance" class="pref-page">
                   <div class="pref-section-head">
                     <h3>Appearance &amp; Density</h3>
-                    <p>Theme, density, and motion.</p>
+                    <p>Theme, density, motion, and how Faro runs.</p>
                   </div>
 
                   <div class="form-group">
@@ -670,6 +695,30 @@
                       <small>Turn off interface animations</small>
                     </span>
                   </label>
+
+                  <label id="close-to-tray-row" class="checkbox-row hidden" for="close-to-tray">
+                    <input id="close-to-tray" class="form-checkbox" type="checkbox" />
+                    <span class="checkbox-content">
+                      <strong>Keep running in the tray</strong>
+                      <small id="close-to-tray-hint">Closing the window keeps rooms, hosting and shared files running. Quit from the tray icon.</small>
+                    </span>
+                  </label>
+
+                  <label class="checkbox-row" for="check-updates">
+                    <input id="check-updates" class="form-checkbox" type="checkbox" checked />
+                    <span class="checkbox-content">
+                      <strong>Check for updates</strong>
+                      <small>Ask GitHub for the latest release when Faro starts. Nothing about you or your rooms is sent.</small>
+                    </span>
+                  </label>
+
+                  <label id="hardware-acceleration-row" class="checkbox-row hidden" for="hardware-acceleration">
+                    <input id="hardware-acceleration" class="form-checkbox" type="checkbox" />
+                    <span class="checkbox-content">
+                      <strong>Hardware-accelerated rendering</strong>
+                      <small>Smoother on high-refresh displays. Turn off if the window renders blank. Applies after restarting Faro.</small>
+                    </span>
+                  </label>
                 </section>
 
                 <!-- Page: Playback -->
@@ -693,6 +742,22 @@
                     <span class="checkbox-content">
                       <strong>Pause on Disconnect</strong>
                       <small>Automatically pause media playback before leaving a room</small>
+                    </span>
+                  </label>
+
+                  <label class="checkbox-row" for="auto-offer-enabled">
+                    <input id="auto-offer-enabled" class="form-checkbox" type="checkbox" checked />
+                    <span class="checkbox-content">
+                      <strong>Share files automatically</strong>
+                      <small>When the queue plays a file some people don't have, stream your copy to them</small>
+                    </span>
+                  </label>
+
+                  <label class="checkbox-row" for="chat-overlay-enabled">
+                    <input id="chat-overlay-enabled" class="form-checkbox" type="checkbox" checked />
+                    <span class="checkbox-content">
+                      <strong>Show chat in player</strong>
+                      <small>Show new messages over the video for a few seconds (mpv and mpv.net)</small>
                     </span>
                   </label>
 
@@ -725,6 +790,23 @@
                     <span>Add Media Folder...</span>
                   </button>
                   <ul id="media-directories" class="media-directories-list"></ul>
+
+                  <div class="pref-section-head pref-subsection">
+                    <h3>Streamed Files</h3>
+                    <p>Files streamed from other people are cached on this device while you watch, then deleted.</p>
+                  </div>
+
+                  <div class="form-group">
+                    <label for="stream-cache-limit" class="form-label">Stream Cache Limit</label>
+                    <select id="stream-cache-limit" class="form-select">
+                      <option value="0">Whole file (fastest seeking)</option>
+                      <option value="10737418240">Up to 10 GB</option>
+                      <option value="5368709120">Up to 5 GB</option>
+                      <option value="2147483648">Up to 2 GB</option>
+                      <option value="-1">Memory only (512 MB)</option>
+                    </select>
+                    <small class="form-hint">Applies to the next stream. Files larger than the limit keep only the parts you watched most recently.</small>
+                  </div>
                 </section>
 
                 <!-- Page: Session -->
@@ -822,6 +904,6 @@
       </div>
     </div>
 
-    <script type="module" src="/app.js?v=19"></script>
+    <script type="module" src="/app.js?v=28"></script>
   </body>
 </html>

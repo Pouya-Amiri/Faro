@@ -89,7 +89,16 @@ func PrepareViewer(factory streamtransport.Factory) (*PreparedViewer, error) {
 
 func (v *PreparedViewer) PublicKey() string { return v.viewer.PublicKey() }
 
-func (v *PreparedViewer) StartGateway(ctx context.Context, grant protocol.MediaStreamGranted, media protocol.Media) (*Gateway, error) {
+// CacheOptions chooses where a stream is cached on the viewer.
+type CacheOptions struct {
+	// DiskLimit caps the disk cache (see GatewayConfig.DiskCacheLimit); 0
+	// caches the whole file.
+	DiskLimit int64
+	// MemoryOnly keeps the stream out of the disk cache entirely.
+	MemoryOnly bool
+}
+
+func (v *PreparedViewer) StartGateway(ctx context.Context, grant protocol.MediaStreamGranted, media protocol.Media, cache CacheOptions) (*Gateway, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.used {
@@ -106,7 +115,11 @@ func (v *PreparedViewer) StartGateway(ctx context.Context, grant protocol.MediaS
 		v.viewer.Close()
 		return nil, err
 	}
-	gateway, err := NewGateway(GatewayConfig{Viewer: v.viewer, Capability: grant.TransferCapability, Media: media})
+	config := GatewayConfig{Viewer: v.viewer, Capability: grant.TransferCapability, Media: media, DiskCacheLimit: cache.DiskLimit}
+	if cache.MemoryOnly {
+		config.CacheBytes = memoryCacheBytes
+	}
+	gateway, err := NewGateway(config)
 	if err != nil {
 		v.viewer.Close()
 		return nil, err

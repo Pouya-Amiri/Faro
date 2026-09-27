@@ -39,7 +39,7 @@ func TestPreparedViewerRefusesRelayedMedia(t *testing.T) {
 	_, err = viewer.StartGateway(context.Background(), protocol.MediaStreamGranted{
 		ConnectionBlob: "opaque", TransferCapability: strings.Repeat("c", 32),
 		ExpiresAtUnixMs: time.Now().Add(time.Minute).UnixMilli(),
-	}, protocol.Media{Title: "Movie.mkv", SizeBytes: 1024, Fingerprint: "file-v1:" + strings.Repeat("a", 64)})
+	}, protocol.Media{Title: "Movie.mkv", SizeBytes: 1024, Fingerprint: "file-v1:" + strings.Repeat("a", 64)}, CacheOptions{})
 	if err == nil || !strings.Contains(err.Error(), "direct") {
 		t.Fatalf("unexpected direct-route error: %v", err)
 	}

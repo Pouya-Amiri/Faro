@@ -22,7 +22,7 @@ let wheelRotation = 0;
 let isScrubbing = false;
 let seekCommandPending = false;
 let seekReleaseTimer = 0;
-let appVersion = "2";
+let appVersion = "";
 let timelineSegments = [];
 let timelineSegmentKey = "";
 let timelineSegmentsRetryKey = "";
@@ -33,6 +33,8 @@ let lastWheelSoundTime = -Infinity;
 let addingPlaylistURL = false;
 let streamingAvailable = false;
 let streamState = { state: "idle", offerId: "", route: "" };
+// How closely this participant's own player follows the room (from the backend).
+let syncStatus = { state: "idle", driftSeconds: 0 };
 let legalInfoLoaded = false;
 let legalSourceURL = "";
 let updateReleaseURL = "";
@@ -182,7 +184,7 @@ const pauseIcon = '<svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"
 
 const defaultPreferences = {
   theme: "system", compact: false, reduceMotion: false, skipSeconds: 10, wheelSound: true,
-  pauseOnLeave: false, sponsorBlock: true, youtubeQualities: {}, name: "", player: "mpv", executable: "",
+  pauseOnLeave: false, sponsorBlock: true, autoOffer: true, chatOverlay: true, streamCacheLimit: 0, checkUpdates: true, youtubeQualities: {}, name: "", player: "mpv", executable: "",
   playerArgs: "", publicHost: "localhost", listenAddress: ":8999", room: "watch"
 };
 let preferences = loadPreferences();
@@ -233,31 +235,40 @@ function showToast(message, type = "success") {
   toastTimer = setTimeout(() => toast.classList.remove("show"), 3200);
 }
 
-function showError(error) { showToast(error?.message || String(error), "error"); }
+// Backend errors are Go error strings, which start in lower case.
+function errorText(error) {
+  const text = String(error?.message || error || "Something went wrong").trim();
+  return text ? text[0].toUpperCase() + text.slice(1) : "Something went wrong";
+}
+function showError(error) { showToast(errorText(error), "error"); }
 
+// A busy button ignores repeated presses immediately, but only shows its
+// loading state if the task is still running after a moment. Disabling it for
+// instant actions made it blink.
 async function withButtonLoading(button, task, loadingLabel = "") {
   if (!button || button.dataset.busy === "true") return;
   const label = button.querySelector("span");
   const previousLabel = label?.textContent || "";
   button.dataset.busy = "true";
-  button.disabled = true;
-  button.classList.add("is-loading");
   button.setAttribute("aria-busy", "true");
-  if (label && loadingLabel) label.textContent = loadingLabel;
+  const showLoading = setTimeout(() => {
+    button.classList.add("is-loading");
+    if (label && loadingLabel) label.textContent = loadingLabel;
+  }, 150);
   try { return await task(); }
   finally {
+    clearTimeout(showLoading);
     if (label && loadingLabel) label.textContent = previousLabel;
     button.dataset.busy = "false";
     button.classList.remove("is-loading");
     button.removeAttribute("aria-busy");
-    button.disabled = false;
     if (snapshot) render();
   }
 }
 
 function setDisabled(id, disabled) {
   const element = $(id);
-  if (element) element.disabled = Boolean(disabled) || element.dataset.busy === "true";
+  if (element && element.disabled !== Boolean(disabled)) element.disabled = Boolean(disabled);
 }
 
 function formatTime(seconds) {
@@ -284,6 +295,28 @@ function referenceMedia() {
 function playbackDuration() {
   const duration = Number(referenceMedia()?.durationSeconds || 0);
   return Number.isFinite(duration) && duration > 0 ? duration : 0;
+}
+
+function streamCacheLimit() {
+  const value = Number(preferences.streamCacheLimit);
+  return [0, -1, 2147483648, 5368709120, 10737418240].includes(value) ? value : 0;
+}
+
+// Cached parts of a streamed file, drawn under the played part of the track.
+function renderStreamCache() {
+  const layer = $("timeline-cache");
+  if (!layer) return;
+  const ranges = streamState.state === "active" && Array.isArray(streamState.cachedRanges) ? streamState.cachedRanges : [];
+  if (!ranges.length) {
+    layer.style.background = "";
+    return;
+  }
+  const stops = [];
+  for (const [start, end] of ranges) {
+    const from = (clamp(start, 0, 1) * 100).toFixed(2), to = (clamp(end, 0, 1) * 100).toFixed(2);
+    stops.push(`transparent ${from}%`, `var(--cache-fill) ${from}%`, `var(--cache-fill) ${to}%`, `transparent ${to}%`);
+  }
+  layer.style.background = `linear-gradient(to right, ${stops.join(", ")})`;
 }
 
 function updateScrubberProgress(position = 0, duration = playbackDuration()) {
@@ -334,6 +367,7 @@ function refreshTimelineSegments() {
   timelineSegmentKey = key;
   timelineSegments = [];
   renderTimelineSegments();
+  refreshRateRange();
   if (!media || !hasBackend) return;
   fetchTimelineSegments(key);
 }
@@ -357,11 +391,13 @@ function releaseScrubber(delay = 650) {
 
 function parseArguments(value) {
   const matches = value.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
-  return matches.map((item) => item.replace(/^("|')|("|')$/g, ""));
+  // Quotes group words, wherever they appear: --title="My Movie" becomes
+  // --title=My Movie, as a shell would pass it.
+  return matches.map((item) => item.replace(/"([^"]*)"|'([^']*)'/g, (_, double, single) => double ?? single));
 }
 
 function basename(path) { return String(path).split(/[\\/]/).filter(Boolean).pop() || path; }
-function isYouTubeURL(source) { return /^https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/|youtu\.be\/)/i.test(String(source || "").trim()); }
+function isYouTubeURL(source) { return /^https?:\/\/(?:(?:www\.|m\.|music\.)?youtube\.com|youtu\.be|(?:www\.)?youtube-nocookie\.com)(?:[\/?#:]|$)/i.test(String(source || "").trim()); }
 function self() { return snapshot?.participants?.find((person) => person.id === snapshot.selfId); }
 function canControl() { const me = self(); return snapshot?.room?.mode === "collaborative" || me?.role === "owner" || me?.role === "moderator"; }
 function playlistInputs() { return (snapshot?.playlist?.items || []).map(({ id, label, url, media }) => ({ id, label, url: url || "", media: media || null, source: "" })); }
@@ -400,20 +436,22 @@ function applyPreferences() {
   const resolved = preferences.theme === "system" ? (systemDark ? "dark" : "light") : preferences.theme;
   const isDark = resolved === "dark" || resolved === "midnight" || resolved === "pine";
   // data-theme carries the resolved theme, never the preference, so styles.css
-  // defines each palette once.
-  document.documentElement.dataset.theme = resolved;
-  document.documentElement.style.colorScheme = isDark ? "dark" : "light";
+  // defines each palette once. Every palette is keyed on this attribute, so it
+  // is written only when it actually changes: a redundant write restyles the
+  // whole document.
+  const root = document.documentElement;
+  if (root.dataset.theme !== resolved) root.dataset.theme = resolved;
+  const colorScheme = isDark ? "dark" : "light";
+  if (root.style.colorScheme !== colorScheme) root.style.colorScheme = colorScheme;
   document.body.classList.toggle("compact", Boolean(preferences.compact));
   document.body.classList.toggle("reduce-motion", Boolean(preferences.reduceMotion));
   const themeButton = $("welcome-theme");
-  if (themeButton) {
-    const iconSpan = themeButton.querySelector(".theme-btn-icon");
-    if (iconSpan) {
-      iconSpan.innerHTML = isDark ? sunIcon : moonIcon;
-    } else {
-      themeButton.innerHTML = isDark ? sunIcon : moonIcon;
-    }
+  const themeIcon = themeButton?.querySelector(".theme-btn-icon") || themeButton;
+  if (themeIcon && themeIcon.dataset.icon !== colorScheme) {
+    themeIcon.dataset.icon = colorScheme;
+    themeIcon.innerHTML = isDark ? sunIcon : moonIcon;
   }
+  rememberWindowBackground();
   if ($("theme-select")) {
     $("theme-select").value = preferences.theme;
     $("theme-select")._syncCustomSelect?.();
@@ -421,10 +459,88 @@ function applyPreferences() {
   if ($("compact-mode")) $("compact-mode").checked = Boolean(preferences.compact);
   if ($("reduce-motion")) $("reduce-motion").checked = Boolean(preferences.reduceMotion);
   if ($("skip-seconds")) $("skip-seconds").value = preferences.skipSeconds;
-  document.querySelectorAll(".skip-num").forEach((node) => node.textContent = preferences.skipSeconds);
+  document.querySelectorAll(".skip-num").forEach((node) => {
+    const label = String(preferences.skipSeconds);
+    if (node.textContent !== label) node.textContent = label;
+    node.setAttribute("font-size", label.length > 2 ? "6" : "7.5");
+  });
+  for (const [id, direction] of [["back-ten", "backward"], ["forward-ten", "forward"]]) {
+    const button = $(id);
+    if (!button) continue;
+    button.title = `Skip ${direction} ${preferences.skipSeconds} seconds`;
+    button.setAttribute("aria-label", button.title);
+  }
   if ($("pause-on-leave")) $("pause-on-leave").checked = Boolean(preferences.pauseOnLeave);
   if ($("sponsorblock-enabled")) $("sponsorblock-enabled").checked = preferences.sponsorBlock !== false;
+  if ($("auto-offer-enabled")) $("auto-offer-enabled").checked = preferences.autoOffer !== false;
+  if ($("chat-overlay-enabled")) $("chat-overlay-enabled").checked = preferences.chatOverlay !== false;
+  if ($("check-updates")) $("check-updates").checked = preferences.checkUpdates !== false;
+  if ($("stream-cache-limit")) {
+    $("stream-cache-limit").value = String(streamCacheLimit());
+    $("stream-cache-limit")._syncCustomSelect?.();
+  }
   if ($("wheel-sound-enabled")) $("wheel-sound-enabled").checked = preferences.wheelSound !== false;
+}
+
+// The native window paints this colour before the page exists, so the next
+// launch starts in the right theme instead of flashing the default dark one.
+// On Linux it is also the GTK frame colour under the rounded corners, which
+// are the sidebar and toolbar surfaces, so --panel-alt is the colour the
+// anti-aliased corner edge must blend into.
+let rememberedWindowBackground = "";
+function rememberWindowBackground() {
+  if (!hasBackend) return;
+  let colour = getComputedStyle(document.documentElement).getPropertyValue("--panel-alt").trim().toLowerCase();
+  if (!/^#[0-9a-f]{6}$/.test(colour)) {
+    const match = getComputedStyle(document.body).backgroundColor.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+    if (!match) return;
+    colour = `#${match.slice(1, 4).map((channel) => Number(channel).toString(16).padStart(2, "0")).join("")}`;
+  }
+  if (colour === rememberedWindowBackground) return;
+  rememberedWindowBackground = colour;
+  invoke("SetWindowBackground", colour).catch(() => {});
+}
+
+// Window controls mirror the desktop's title bar conventions.
+let windowChrome = { buttonsSide: "right", buttons: ["minimize", "maximize", "close"], doubleClick: "toggle-maximize", style: "windows" };
+// Space each control style needs: [per button, gap between buttons, outer padding].
+const windowControlMetrics = { windows: [46, 0, 0], gnome: [24, 12, 24], kde: [22, 6, 20] };
+const maximiseIcon = '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
+const restoreIcon = '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><rect x="2" y="4" width="6" height="6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 4V3.2c0-.66.54-1.2 1.2-1.2h3.1c.66 0 1.2.54 1.2 1.2v3.1c0 .66-.54 1.2-1.2 1.2H8" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
+
+async function loadWindowChrome() {
+  if (!hasBackend) return;
+  try { windowChrome = { ...windowChrome, ...(await invoke("WindowChrome")) }; } catch (_) {}
+}
+
+function applyWindowChrome() {
+  const controls = document.querySelector(".window-controls");
+  const byName = { minimize: $("window-minimise"), maximize: $("window-maximise"), close: $("window-close") };
+  const names = (Array.isArray(windowChrome.buttons) ? windowChrome.buttons : []).filter((name) => byName[name]);
+  for (const [name, button] of Object.entries(byName)) button.classList.toggle("hidden", !names.includes(name));
+  for (const name of names) controls.append(byName[name]);
+  const style = windowControlMetrics[windowChrome.style] ? windowChrome.style : "windows";
+  const [button, gap, padding] = windowControlMetrics[style];
+  document.body.dataset.controlsSide = windowChrome.buttonsSide === "left" ? "left" : "right";
+  document.body.dataset.controlsStyle = style;
+  const width = names.length ? names.length * button + (names.length - 1) * gap + padding : 0;
+  document.documentElement.style.setProperty("--window-controls-width", `${width}px`);
+}
+
+function setWindowState(state = {}) {
+  const maximised = Boolean(state.maximised || state.fullscreen);
+  const button = $("window-maximise");
+  if (button.dataset.maximised === String(maximised)) return;
+  button.dataset.maximised = String(maximised);
+  button.innerHTML = maximised ? restoreIcon : maximiseIcon;
+  button.title = maximised ? "Restore" : "Maximise";
+  button.setAttribute("aria-label", maximised ? "Restore window" : "Maximise window");
+}
+
+function titlebarDoubleClick(event) {
+  if (event.target.closest("button, input, select, textarea, a")) return;
+  if (windowChrome.doubleClick === "minimize") wails?.Window?.Minimise();
+  else if (windowChrome.doubleClick !== "none") wails?.Window?.ToggleMaximise();
 }
 
 function hydrateConnectForms() {
@@ -577,22 +693,20 @@ function render() {
   $("owner-invite").classList.toggle("hidden", me?.role !== "owner");
   $("settings-owner-invite").classList.toggle("hidden", me?.role !== "owner");
 
-  for (const id of ["pause", "position", "back-ten", "forward-ten", "playback-rate", "rate-decrease", "rate-increase", "add-file", "empty-add-file", "add-stream-btn", "add-playlist", "shuffle-playlist", "shuffle-all", "load-playlist-file", "save-playlist-file", "clear-playlist", "spin-wheel", "wheel-spin-again", "previous-media", "next-media"]) setDisabled(id, !allowed);
+  for (const id of ["pause", "position", "back-ten", "forward-ten", "add-file", "empty-add-file", "add-stream-btn", "add-playlist", "shuffle-playlist", "shuffle-all", "load-playlist-file", "save-playlist-file", "clear-playlist", "spin-wheel", "wheel-spin-again", "previous-media", "next-media"]) setDisabled(id, !allowed);
   setDisabled("add-playlist", !allowed || addingPlaylistURL);
 
   const media = me?.media || snapshot.participants.find((person) => person.media)?.media;
   const title = media?.title || "No media loaded";
   $("media-title").textContent = title;
   $("media-title").title = title;
-  const mediaSourceKind = streamState.state === "active" ? "Direct P2P" : media?.fingerprint ? "Local media" : "Stream";
-  $("media-kind").textContent = media ? `${media.sizeBytes ? formatBytes(media.sizeBytes) + " · " : ""}${mediaSourceKind}` : "No media loaded";
+  renderMediaKind(media);
+  renderStreamCache();
   const mismatches = media ? snapshot.participants.filter((person) => person.media && person.media.fingerprint !== media.fingerprint) : [];
   $("media-warning").classList.toggle("hidden", mismatches.length === 0);
   $("media-warning").textContent = mismatches.length ? `${mismatches.length} participant${mismatches.length === 1 ? " has" : "s have"} different media loaded. Sync paused for mismatched copies.` : "";
 
-  const syncState = $("sync-state");
-  syncState.textContent = media ? (mismatches.length ? "Mismatch" : "In sync") : "Waiting for media";
-  syncState.className = `badge badge-sync ${media ? (mismatches.length ? "badge-warning" : "badge-success") : ""}`;
+  renderSyncBadge(media, mismatches.length);
 
   const playback = snapshot.playback;
   const duration = Number(media?.durationSeconds || 0);
@@ -611,8 +725,12 @@ function render() {
   refreshTimelineSegments();
 
   const pauseBtn = $("pause");
-  pauseBtn.innerHTML = playback.paused ? playIcon : pauseIcon;
-  pauseBtn.setAttribute("aria-label", playback.paused ? "Play" : "Pause");
+  const pauseState = playback.paused ? "paused" : "playing";
+  if (pauseBtn.dataset.state !== pauseState) {
+    pauseBtn.dataset.state = pauseState;
+    pauseBtn.innerHTML = playback.paused ? playIcon : pauseIcon;
+    pauseBtn.setAttribute("aria-label", playback.paused ? "Play" : "Pause");
+  }
 
   updateRateControl(playback.rate || 1);
   renderParticipants(media);
@@ -621,21 +739,65 @@ function render() {
   renderConnectionInfo();
 }
 
-const playbackRates = [0.5, 0.75, 1, 1.25, 1.5, 2];
+const playbackRates = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
+const rateStep = 0.1;
+// The backend reports the speeds the room and this participant's player
+// support; until it answers, the protocol range is assumed.
+let rateRange = { min: 0.25, max: 4, supported: true };
+function rateLabel(value) { return `${Number(value.toFixed(2))}×`; }
+
+// The speed menu lists the standard rates. A rate set elsewhere (for example
+// in a participant's own player) gets a temporary entry so it still shows.
 function updateRateControl(rate) {
   const value = Number(rate) || 1;
   const control = $("playback-rate");
-  control.dataset.value = String(value);
-  control.textContent = `${Number(value.toFixed(2))}×`;
-  const index = playbackRates.reduce((best, candidate, candidateIndex) => Math.abs(candidate - value) < Math.abs(playbackRates[best] - value) ? candidateIndex : best, 0);
-  $("rate-decrease").disabled = !canControl() || index === 0;
-  $("rate-increase").disabled = !canControl() || index === playbackRates.length - 1;
+  const key = String(Number(value.toFixed(2)));
+  control.querySelectorAll("option[data-custom]").forEach((option) => { if (option.value !== key) option.remove(); });
+  if (![...control.options].some((option) => option.value === key)) {
+    const option = new Option(rateLabel(value), key);
+    option.dataset.custom = "true";
+    const next = [...control.options].find((candidate) => Number(candidate.value) > value);
+    control.insertBefore(option, next || null);
+  }
+  if (control.value !== key) control.value = key;
+  control.dataset.value = key;
+  for (const option of control.options) option.disabled = Number(option.value) < rateRange.min || Number(option.value) > rateRange.max;
+  const unavailable = !canControl() || !rateRange.supported;
+  control.disabled = unavailable;
+  $("rate-decrease").disabled = unavailable || value <= rateRange.min + 1e-9;
+  $("rate-increase").disabled = unavailable || value >= rateRange.max - 1e-9;
+  const title = rateRange.supported ? "Playback speed" : "This media player cannot change playback speed";
+  control.title = title;
+  control.parentElement.title = title;
+  control._syncCustomSelect?.();
+}
+
+// Fine steps between the presets, rounded so repeated steps never drift.
+function nudgePlaybackRate(direction) {
+  if (!canControl() || !rateRange.supported) return;
+  const current = Number($("playback-rate").dataset.value || 1);
+  const target = Math.round(clamp(current + direction * rateStep, rateRange.min, rateRange.max) * 100) / 100;
+  if (target !== current) invoke("SetRate", target).catch(showError);
+}
+
+async function refreshRateRange() {
+  if (!hasBackend || !snapshot) return;
+  try {
+    const next = await invoke("PlaybackRateRange");
+    if (next && typeof next.supported === "boolean") rateRange = next;
+  } catch (_) {}
+  if (snapshot) updateRateControl(snapshot.playback.rate || 1);
 }
 
 function stepPlaybackRate(direction) {
+  if (!canControl() || !rateRange.supported) return;
   const current = Number($("playback-rate").dataset.value || 1);
   const index = playbackRates.reduce((best, candidate, candidateIndex) => Math.abs(candidate - current) < Math.abs(playbackRates[best] - current) ? candidateIndex : best, 0);
-  const target = playbackRates[clamp(index + direction, 0, playbackRates.length - 1)];
+  let next = clamp(index + direction, 0, playbackRates.length - 1);
+  // From an in-between speed, the first step lands on the neighbouring preset.
+  if (direction > 0 && playbackRates[index] > current) next = index;
+  if (direction < 0 && playbackRates[index] < current) next = index;
+  const target = clamp(playbackRates[next], rateRange.min, rateRange.max);
   if (target !== current) invoke("SetRate", target).catch(showError);
 }
 
@@ -647,29 +809,51 @@ function wheelTargetRotation(wheel) {
   return Number(wheel.turns || 8) * Math.PI * 2 - (Number(wheel.winner || 0) + 0.5) * arc - jitter;
 }
 
-function drawWheel(wheel, rotation = 0, highlight = -1) {
-  const canvas = $("wheel-canvas"), ctx = canvas.getContext("2d");
-  const items = wheel?.items?.length ? wheel.items : (snapshot?.playlist?.items || []).map(({ id, label }) => ({ id, label }));
-  const theme = wheelTheme();
-  const size = canvas.width, center = size / 2, radius = center - 14;
-  ctx.clearRect(0, 0, size, size);
-  if (!items.length) {
-    ctx.beginPath(); ctx.arc(center, center, radius, 0, Math.PI * 2);
-    ctx.fillStyle = theme.empty; ctx.fill();
-    return;
+// The wheel face is drawn once per queue/theme/size into an offscreen canvas
+// and each animation frame only rotates that bitmap. Redrawing every segment
+// and shadowed label per frame was expensive with CPU rendering. Geometry is
+// expressed against a 1000px reference wheel and scaled to the real size.
+const wheelFaceCache = { key: "", canvas: null };
+
+function wheelCanvasSize(canvas) {
+  const cssSize = canvas.clientWidth || 350;
+  const size = Math.max(200, Math.min(1400, Math.round(cssSize * (window.devicePixelRatio || 1))));
+  if (canvas.width !== size) {
+    canvas.width = size;
+    canvas.height = size;
   }
+  return size;
+}
+
+// A queue position owns its color. When the count is one more than a
+// multiple of the palette, the last segment would repeat the first, which is
+// its neighbour on the wheel; it takes the palette's middle color instead.
+function wheelSegmentColor(index, count, palette) {
+  const size = palette.length;
+  if (count > size && index === count - 1 && index % size === 0) return palette[Math.floor(size / 2)];
+  return palette[index % size];
+}
+
+function wheelFace(items, theme, size, highlight) {
+  const key = JSON.stringify([document.documentElement.dataset.theme, size, highlight, items.map((item) => item.label)]);
+  if (wheelFaceCache.key === key && wheelFaceCache.canvas) return wheelFaceCache.canvas;
+  const face = wheelFaceCache.canvas || document.createElement("canvas");
+  face.width = size;
+  face.height = size;
+  const ctx = face.getContext("2d");
+  const scale = size / 1000, center = size / 2, radius = center - 14 * scale;
   const arc = Math.PI * 2 / items.length;
+  ctx.clearRect(0, 0, size, size);
   ctx.save();
   ctx.translate(center, center);
-  ctx.rotate(rotation);
   for (let index = 0; index < items.length; index++) {
     const start = -Math.PI / 2 + index * arc, end = start + arc;
     ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, radius, start, end); ctx.closePath();
     // A queue position owns its color. The spin seed only affects trajectory,
     // so opening or spinning the same wheel never repaints its segments.
-    ctx.fillStyle = theme.segments[index % theme.segments.length];
+    ctx.fillStyle = wheelSegmentColor(index, items.length, theme.segments);
     ctx.fill();
-    ctx.strokeStyle = theme.separator; ctx.lineWidth = 3; ctx.stroke();
+    ctx.strokeStyle = theme.separator; ctx.lineWidth = 3 * scale; ctx.stroke();
     if (index === highlight) {
       ctx.save(); ctx.globalAlpha = 0.28; ctx.fillStyle = "#ffffff"; ctx.fill(); ctx.restore();
     }
@@ -682,19 +866,40 @@ function drawWheel(wheel, rotation = 0, highlight = -1) {
       ctx.rotate(start + arc / 2);
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
-      ctx.font = `600 ${items.length > 12 ? 32 : 38}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+      ctx.font = `600 ${(items.length > 12 ? 32 : 38) * scale}px -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif`;
       ctx.fillStyle = ink.color;
       ctx.shadowColor = ink.shadow;
-      ctx.shadowBlur = 4;
-      ctx.fillText(text, radius - 34, 0, radius * 0.65);
+      ctx.shadowBlur = 4 * scale;
+      ctx.fillText(text, radius - 34 * scale, 0, radius * 0.65);
       ctx.restore();
     }
   }
   ctx.restore();
+  wheelFaceCache.key = key;
+  wheelFaceCache.canvas = face;
+  return face;
+}
+
+function drawWheel(wheel, rotation = 0, highlight = -1) {
+  const canvas = $("wheel-canvas"), ctx = canvas.getContext("2d");
+  const items = wheel?.items?.length ? wheel.items : (snapshot?.playlist?.items || []).map(({ id, label }) => ({ id, label }));
+  const theme = wheelTheme();
+  const size = wheelCanvasSize(canvas), center = size / 2, scale = size / 1000, radius = center - 14 * scale;
+  ctx.clearRect(0, 0, size, size);
+  if (!items.length) {
+    ctx.beginPath(); ctx.arc(center, center, radius, 0, Math.PI * 2);
+    ctx.fillStyle = theme.empty; ctx.fill();
+    return;
+  }
+  ctx.save();
+  ctx.translate(center, center);
+  ctx.rotate(rotation);
+  ctx.drawImage(wheelFace(items, theme, size, highlight), -center, -center);
+  ctx.restore();
   ctx.beginPath();
   ctx.arc(center, center, radius, 0, Math.PI * 2);
   ctx.strokeStyle = theme.rim;
-  ctx.lineWidth = 4;
+  ctx.lineWidth = 4 * scale;
   ctx.stroke();
 }
 
@@ -867,6 +1072,72 @@ function dismissWheelWindow() {
   if ($("wheel-dialog").open) $("wheel-dialog").close();
 }
 
+function mismatchCount(media) {
+  return media ? (snapshot?.participants || []).filter((person) => person.media && person.media.fingerprint !== media.fingerprint).length : 0;
+}
+
+// The badge reports this participant's own player: other people's positions
+// are not shared, so "In sync" claims nothing about them.
+function renderSyncBadge(media = referenceMedia(), mismatches = mismatchCount(media)) {
+  const badge = $("sync-state");
+  let text = "Waiting for media", tone = "", title = "";
+  if (media && mismatches) {
+    text = "Mismatch"; tone = "badge-warning";
+    title = "Someone has a different file loaded; their playback is not synced";
+  } else if (media) {
+    const drift = Math.abs(Number(syncStatus.driftSeconds) || 0);
+    const behind = Number(syncStatus.driftSeconds) > 0;
+    switch (syncStatus.state) {
+      case "synced":
+        text = "In sync"; tone = "badge-success";
+        title = `Your player is within ${drift < 0.05 ? "0.05" : drift.toFixed(2)} s of the room`;
+        break;
+      case "catching-up":
+        text = "Syncing"; tone = "badge-warning";
+        title = `Your player is ${drift.toFixed(1)} s ${behind ? "behind" : "ahead of"} the room and is catching up`;
+        break;
+      case "buffering":
+        text = "Buffering"; tone = "badge-warning";
+        title = "Your player is buffering";
+        break;
+      default:
+        text = "Waiting for player";
+        title = "Sync starts once your player has the media open";
+    }
+  }
+  // Drift updates arrive every second or so; unchanged values are not
+  // rewritten, so the badge is only restyled when it changes.
+  if (badge.textContent !== text) badge.textContent = text;
+  if (badge.title !== title) badge.title = title;
+  const className = `badge badge-sync ${tone}`;
+  if (badge.className !== className) badge.className = className;
+}
+
+function renderMediaKind(media) {
+  const badge = $("media-kind");
+  if (!media) {
+    badge.textContent = "No media loaded";
+    badge.title = "";
+    return;
+  }
+  const parts = media.sizeBytes ? [formatBytes(media.sizeBytes)] : [];
+  if (streamState.state === "active") {
+    parts.push("Direct P2P");
+    const { cachedBytes = 0, totalBytes = 0, bytesPerSecond = 0 } = streamState;
+    if (totalBytes > 0) {
+      const percent = Math.floor(cachedBytes / totalBytes * 100);
+      parts.push(cachedBytes >= totalBytes ? "Cached" : `${percent}% cached`);
+      if (bytesPerSecond >= 1024 && cachedBytes < totalBytes) parts.push(`${formatBytes(bytesPerSecond)}/s`);
+    }
+  } else {
+    parts.push(media.fingerprint ? "Local media" : "Stream");
+  }
+  badge.textContent = parts.join(" · ");
+  badge.title = streamState.state === "active" && streamState.totalBytes > 0
+    ? `${formatBytes(streamState.cachedBytes) || "0 B"} of ${formatBytes(streamState.totalBytes)} cached on this device`
+    : "";
+}
+
 function formatBytes(bytes) {
   if (!bytes) return "";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -874,12 +1145,19 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
 }
 
+// Rebuilding a list replaces the element under the pointer (hover flicker),
+// the focused control and any open role menu, so lists are rebuilt only when
+// what they display has changed.
+let participantsRenderKey = "";
 function renderParticipants(referenceMedia) {
   const me = self();
   const list = $("participants");
   if (!list || !snapshot) return;
-  document.querySelectorAll(".participant-custom-menu").forEach((menu) => menu.remove());
   if ($("people-count")) $("people-count").textContent = snapshot.participants.length;
+  const key = JSON.stringify([snapshot.selfId, me?.role, referenceMedia?.fingerprint || "", snapshot.participants.map((person) => [person.id, person.name, person.role, person.media?.fingerprint || ""])]);
+  if (key === participantsRenderKey && list.childElementCount === snapshot.participants.length) return;
+  participantsRenderKey = key;
+  document.querySelectorAll(".participant-custom-menu").forEach((menu) => menu.remove());
 
   list.replaceChildren(...snapshot.participants.map((person) => {
     const item = document.createElement("li");
@@ -921,6 +1199,7 @@ function renderParticipants(referenceMedia) {
 
 function capitalize(value) { return value ? value[0].toUpperCase() + value.slice(1) : ""; }
 
+let playlistRenderKey = "";
 function renderPlaylist() {
   if (!snapshot) return;
   const allowed = canControl(), items = snapshot.playlist.items || [];
@@ -936,11 +1215,19 @@ function renderPlaylist() {
 
   const list = $("playlist");
   if (draggedPlaylistIndex >= 0) return;
+  const key = JSON.stringify([
+    items, snapshot.playlist.selected, allowed, availability, streamingAvailable, streamState,
+    snapshot.selfId, snapshot.streamOffers || [], preferences.youtubeQualities || {},
+    snapshot.participants.map((person) => [person.id, person.availableMedia])
+  ]);
+  if (key === playlistRenderKey && list.childElementCount === items.length) return;
+  playlistRenderKey = key;
   list.replaceChildren(...items.map((item, index) => {
     const row = document.createElement("li");
     row.className = `queue-item ${index === snapshot.playlist.selected ? "active" : ""}`;
     row.draggable = false;
     row.dataset.index = String(index);
+    row.dataset.id = item.id;
 
     const handle = document.createElement("span");
     handle.className = "queue-drag-handle";
@@ -976,7 +1263,9 @@ function renderPlaylist() {
     actions.className = "queue-row-actions";
 
     if (isYouTubeURL(item.url)) {
-      const qualityButton = actionButton("Quality", () => showYouTubeQualityMenu(qualityButton, item.url), !allowed, `YouTube quality: ${savedYouTubeQuality(item.url) ? `${savedYouTubeQuality(item.url)}p` : "Auto"}`);
+      // Quality is a personal preference, so it stays available in moderated rooms.
+      const qualityButton = actionButton("Quality", () => showYouTubeQualityMenu(qualityButton, item.url), false, `YouTube quality: ${savedYouTubeQuality(item.url) ? `${savedYouTubeQuality(item.url)}p` : "Auto"}`);
+      qualityButton.setAttribute("aria-haspopup", "menu");
       actions.append(qualityButton);
     }
     if (!local && item.media) {
@@ -990,7 +1279,7 @@ function renderPlaylist() {
       actions.append(actionButton("Share file", () => invoke("OfferPlaylistStream", item.id).then(() => showToast("Sharing started; friends without the file will connect automatically")).catch(showError), false, "Automatically stream your copy to friends who need it"));
     }
     if (isPlaylistItemPlayable(item) && index !== snapshot.playlist.selected) actions.append(actionButton("Play", () => playPlaylist(index), !allowed, "Play now"));
-    actions.append(actionButton("×", () => removePlaylist(index), !allowed, "Remove from queue"));
+    actions.append(actionButton("×", () => removePlaylistItem(item.id), !allowed, "Remove from queue"));
 
     row.append(handle, indexBadge, metaCol, duration, actions);
 
@@ -1006,7 +1295,7 @@ function beginPlaylistReorder(event, sourceRow, sourceIndex, allowed) {
   event.preventDefault();
   event.stopPropagation();
   draggedPlaylistIndex = sourceIndex;
-  let targetIndex = sourceIndex;
+  let targetIndex = sourceIndex, targetID = sourceRow.dataset.id;
   const startY = event.clientY;
   const rowHeight = sourceRow.getBoundingClientRect().height;
   sourceRow.classList.add("dragging");
@@ -1029,6 +1318,7 @@ function beginPlaylistReorder(event, sourceRow, sourceIndex, allowed) {
       document.querySelectorAll(".queue-item.drag-over").forEach((node) => node.classList.remove("drag-over"));
       target.classList.add("drag-over");
       targetIndex = Number(target.dataset.index);
+      targetID = target.dataset.id;
     }
     updatePreview(moveEvent.clientY, targetIndex);
   };
@@ -1039,7 +1329,9 @@ function beginPlaylistReorder(event, sourceRow, sourceIndex, allowed) {
     sourceRow.classList.remove("dragging");
     clearPreview();
     draggedPlaylistIndex = -1;
-    if (targetIndex !== sourceIndex) reorderPlaylist(sourceIndex, targetIndex);
+    // Rows are not rebuilt during a drag, so their IDs are the ones the
+    // person saw; the backend moves them wherever they are now.
+    if (targetIndex !== sourceIndex) movePlaylistItem(sourceRow.dataset.id, targetID);
   };
   document.addEventListener("pointermove", move, true);
   document.addEventListener("pointerup", finish, true);
@@ -1074,7 +1366,8 @@ async function playPlaylist(index) {
   if (!item || !canControl()) return;
   try {
     if (item.url) await prepareYouTubeSource(item.url);
-    await invoke("SelectPlaylist", index);
+    // The ID picks the right item even if the queue moved meanwhile.
+    await invoke("SelectPlaylist", index, item.id);
     await invoke("SetPaused", false);
   } catch (error) { showError(error); }
 }
@@ -1163,17 +1456,38 @@ function selectedSourceURL() {
   return selected >= 0 ? snapshot.playlist.items[selected]?.url || "" : "";
 }
 
-async function updatePlaylist(items, remember = true) {
-  if (remember && snapshot) {
-    playlistHistory.push(playlistInputs());
-    if (playlistHistory.length > 20) playlistHistory.shift();
-  }
-  try { await invoke("SetPlaylist", items); }
-  catch (error) { if (remember) playlistHistory.pop(); throw error; }
+function rememberPlaylist(previous) {
+  if (!previous) return;
+  playlistHistory.push(previous);
+  if (playlistHistory.length > 20) playlistHistory.shift();
 }
 
-async function removePlaylist(index) { const items = playlistInputs(); items.splice(index, 1); try { await updatePlaylist(items); } catch (error) { showError(error); } }
-async function reorderPlaylist(from, to) { if (from === to) return; const items = playlistInputs(), [item] = items.splice(from, 1); items.splice(to, 0, item); try { await updatePlaylist(items); } catch (error) { showError(error); } }
+// Replaces the whole queue. Edits computed from the queue on screen (a
+// shuffle, an undo) pass its revision, so if a friend changed the queue in the
+// meantime the server refuses instead of silently discarding their change.
+async function updatePlaylist(items, { remember = true, basedOnScreen = false } = {}) {
+  const previous = remember && snapshot ? playlistInputs() : null;
+  const baseRevision = basedOnScreen && snapshot ? snapshot.playlist.revision : null;
+  await invoke("SetPlaylist", items, baseRevision);
+  rememberPlaylist(previous);
+}
+
+// Single-item edits go by item ID and are applied by the backend to the
+// latest queue, so they never overwrite a concurrent edit.
+async function editPlaylistItem(method, ...args) {
+  const previous = snapshot ? playlistInputs() : null;
+  await invoke(method, ...args);
+  rememberPlaylist(previous);
+}
+
+async function removePlaylistItem(itemID) {
+  try { await editPlaylistItem("RemovePlaylistItem", itemID); } catch (error) { showError(error); }
+}
+// Moves an item to the place targetID holds, as dropping one row onto another.
+async function movePlaylistItem(itemID, targetID) {
+  if (!itemID || !targetID || itemID === targetID) return;
+  try { await editPlaylistItem("MovePlaylistItem", itemID, targetID); } catch (error) { showError(error); }
+}
 async function locateItem(id) { try { const path = await invoke("ChooseMediaFile"); if (!path) return; await invoke("LocatePlaylistItem", id, path); await refreshAvailability(); showToast("Matching file located"); } catch (error) { showError(error); } }
 
 function shuffled(items) {
@@ -1266,9 +1580,13 @@ async function enterRoom(request) {
   setConnection({ state: "connected" });
   render();
   await invoke("SetSponsorBlockEnabled", preferences.sponsorBlock !== false);
+  await invoke("SetAutoOfferEnabled", preferences.autoOffer !== false);
+  await invoke("SetChatOverlayEnabled", preferences.chatOverlay !== false);
+  await invoke("SetStreamCacheLimit", streamCacheLimit());
   // Indexing can hash thousands of files. The room is already usable, so keep
   // discovery in the background and refresh availability as results arrive.
   void indexSavedDirectories();
+  addPendingLaunchPaths();
 }
 
 function switchConnectMode(mode) {
@@ -1296,22 +1614,52 @@ async function copyInvite(owner = false) {
   } catch (error) { showError(error); }
 }
 
+// New items are appended by the backend to the room's latest queue, so a
+// friend's edit made while files are being inspected is not overwritten.
+async function appendToPlaylist(additions, play = false) {
+  const previous = snapshot ? playlistInputs() : null;
+  const count = await invoke("AppendPlaylist", additions, play);
+  rememberPlaylist(previous);
+  return count;
+}
+
 async function addMediaPaths(paths, playImmediately = false) {
   if (!snapshot || !canControl() || !paths?.length) return;
   try {
     const expanded = hasBackend ? await invoke("ExpandMediaPaths", paths) : paths;
-    if (!expanded.length) return;
-    if (playImmediately && expanded.length === 1) {
-      const next = [...playlistInputs(), { id: "", label: basename(expanded[0]), source: expanded[0], url: "", media: null }];
-      await updatePlaylist(next);
-      await invoke("SelectPlaylist", next.length - 1);
-      showToast(`Opening ${basename(expanded[0])}`);
+    if (!expanded.length) {
+      showToast("No media files found there", "error");
       return;
     }
+    const play = playImmediately && expanded.length === 1;
     const additions = expanded.map((source) => ({ id: "", label: basename(source), source, url: "", media: null }));
-    await updatePlaylist([...playlistInputs(), ...additions]);
-    showToast(`${additions.length} item${additions.length === 1 ? "" : "s"} added to queue`);
+    const count = await appendToPlaylist(additions, play);
+    showToast(play ? `Opening ${basename(expanded[0])}` : `${count} item${count === 1 ? "" : "s"} added to queue`);
   } catch (error) { showError(error); }
+}
+
+// Files opened with Faro from a file manager wait until there is a room.
+let pendingLaunchPaths = [];
+async function collectLaunchPaths() {
+  if (!hasBackend) return;
+  try { pendingLaunchPaths.push(...((await invoke("TakeLaunchPaths")) || [])); } catch (_) { return; }
+  addPendingLaunchPaths();
+}
+
+function addPendingLaunchPaths() {
+  if (!pendingLaunchPaths.length) return;
+  if (!snapshot) {
+    const what = pendingLaunchPaths.length === 1 ? basename(pendingLaunchPaths[0]) : `${pendingLaunchPaths.length} files`;
+    showToast(`Join or host a room to add ${what} to the queue`);
+    return;
+  }
+  const paths = pendingLaunchPaths;
+  pendingLaunchPaths = [];
+  if (!canControl()) {
+    showToast("Only moderators can add to this room's queue", "error");
+    return;
+  }
+  void addMediaPaths(paths);
 }
 
 async function chooseFiles(button) {
@@ -1328,7 +1676,10 @@ function positionPopover(popover, anchor) {
   const width = popover.offsetWidth;
   const left = rect.left + width > innerWidth - 8 ? rect.right - width : rect.left;
   popover.style.left = `${Math.max(8, Math.min(innerWidth - width - 8, left))}px`;
-  popover.style.top = `${Math.max(8, Math.min(innerHeight - popover.offsetHeight - 8, rect.bottom + 4))}px`;
+  const height = popover.offsetHeight;
+  const below = rect.bottom + 4;
+  const top = below + height > innerHeight - 8 && rect.top - height - 4 >= 8 ? rect.top - height - 4 : below;
+  popover.style.top = `${Math.max(8, Math.min(innerHeight - height - 8, top))}px`;
 }
 
 function togglePopover(popover, anchor) {
@@ -1343,20 +1694,46 @@ function closePopovers() {
   document.querySelectorAll(".popover, .popover-menu").forEach((node) => node.classList.add("hidden"));
 }
 
-function menuButton(label, action, { checked = false, disabled = false, danger = false } = {}) {
+function menuButton(label, action, { checked = false, disabled = false, danger = false, hint = "" } = {}) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = `popover-btn ${danger ? "danger-item" : ""}`;
   button.disabled = disabled;
-  button.setAttribute("role", "menuitem");
+  button.setAttribute("role", checked ? "menuitemradio" : "menuitem");
+  if (checked) button.setAttribute("aria-checked", "true");
   const mark = document.createElement("span");
   mark.className = "menu-check";
   mark.textContent = checked ? "✓" : "";
   const text = document.createElement("span");
+  text.className = "menu-label";
   text.textContent = label;
   button.append(mark, text);
+  if (hint) {
+    const keys = document.createElement("kbd");
+    keys.className = "menu-hint";
+    keys.textContent = document.body.dataset.platform === "mac" ? hint.replace(/^Ctrl\+/, "⌘") : hint;
+    button.append(keys);
+  }
   button.onclick = action;
   return button;
+}
+
+function menuSeparator() {
+  const line = document.createElement("hr");
+  line.className = "popover-sep";
+  return line;
+}
+
+// Drops separators at the edges and doubled ones left by omitted items.
+function tidyMenu(items) {
+  const result = [];
+  for (const item of items.filter(Boolean)) {
+    const separator = item.classList.contains("popover-sep");
+    if (separator && (!result.length || result.at(-1).classList.contains("popover-sep"))) continue;
+    result.push(item);
+  }
+  while (result.length && result.at(-1).classList.contains("popover-sep")) result.pop();
+  return result;
 }
 
 function enhanceSelect(select) {
@@ -1365,6 +1742,7 @@ function enhanceSelect(select) {
   select.classList.add("native-select-source");
   const wrapper = document.createElement("div");
   wrapper.className = `custom-select ${select.classList.contains("select-compact") || select.classList.contains("participant-role-select") ? "compact" : ""}`;
+  if (select.dataset.selectClass) wrapper.classList.add(select.dataset.selectClass);
   select.parentNode.insertBefore(wrapper, select);
   wrapper.append(select);
   const trigger = document.createElement("button");
@@ -1376,6 +1754,7 @@ function enhanceSelect(select) {
   const menu = document.createElement("div");
   menu.className = "popover-menu custom-select-menu hidden";
   if (select.classList.contains("participant-role-select")) menu.classList.add("participant-custom-menu");
+  if (select.dataset.selectClass) menu.classList.add(`${select.dataset.selectClass}-menu`);
   menu.setAttribute("role", "menu");
   (select.closest("dialog") || document.body).append(menu);
 
@@ -1408,22 +1787,42 @@ function enhanceAllSelects() {
 
 function askConfirmation(title, message, acceptLabel = "Continue") {
   const dialog = $("confirm-dialog");
+  // Only one question at a time; a newer one answers the older with "no".
+  if (dialog.open) dialog.close("cancel");
   $("confirm-title").textContent = title;
   $("confirm-message").textContent = message;
   $("confirm-accept").textContent = acceptLabel;
+  // Escape closes the dialog without a value, which would otherwise keep the
+  // previous answer and count as "accept".
+  dialog.returnValue = "";
   dialog.showModal();
+  $("confirm-cancel").focus();
   return new Promise((resolve) => dialog.addEventListener("close", () => resolve(dialog.returnValue === "accept"), { once: true }));
+}
+
+// Leaving a room this Faro hosts stops its server and disconnects everyone.
+async function confirmLeaveRoom() {
+  if (!hosted.running) return true;
+  return askConfirmation("End the room?", "You are hosting this room. Leaving stops it and disconnects everyone watching.", "End room");
+}
+
+async function leaveRoomWithConfirmation() {
+  if (await confirmLeaveRoom()) await leaveRoom();
 }
 
 async function leaveRoom() {
   if (preferences.pauseOnLeave && canControl() && snapshot && !snapshot.playback.paused) {
     try { await invoke("SetPaused", true); } catch (error) { showError(error); }
   }
-  await invoke("LeaveRoom");
+  try { await invoke("LeaveRoom"); }
+  catch (error) { showError(error); }
   hosted = { running: false };
   snapshot = null; timeline = []; playlistHistory = [];
+  playlistRenderKey = ""; participantsRenderKey = ""; availabilityKey = "";
+  renderChat();
   streamingAvailable = false;
   streamState = { state: "idle", offerId: "", route: "" };
+  syncStatus = { state: "idle", driftSeconds: 0 };
   timelineSegments = []; timelineSegmentKey = ""; timelineSegmentsRetryKey = "";
   isScrubbing = false;
   seekCommandPending = false;
@@ -1446,23 +1845,50 @@ document.body.dataset.platform = wails?.System?.IsMac() ? "mac" : wails?.System?
 $("window-minimise").onclick = () => wails?.Window?.Minimise();
 $("window-maximise").onclick = () => wails?.Window?.ToggleMaximise();
 $("window-close").onclick = () => wails?.Window?.Close();
-$("window-titlebar").ondblclick = (event) => {
-  if (!event.target.closest("button")) $("window-maximise").click();
-};
-document.querySelector(".app-command-bar")?.addEventListener("dblclick", (event) => {
-  if (!event.target.closest("button, input, select")) $("window-maximise").click();
-});
+$("window-titlebar").ondblclick = titlebarDoubleClick;
+document.querySelector(".app-command-bar")?.addEventListener("dblclick", titlebarDoubleClick);
+document.querySelector(".sidebar-brand")?.addEventListener("dblclick", titlebarDoubleClick);
+window.addEventListener("blur", () => document.body.classList.add("window-inactive"));
+window.addEventListener("focus", () => document.body.classList.remove("window-inactive"));
 
 // Connection forms wiring
 $("join-tab").onclick = () => switchConnectMode("join");
 $("host-tab").onclick = () => switchConnectMode("host");
+// A connection attempt can take a while (a relayed peer, an unreachable
+// server), so the form offers Cancel until it finishes.
+let connectAttempt = null;
+async function withCancellableConnect(prefix, task) {
+  const attempt = { cancelled: false };
+  connectAttempt = attempt;
+  const cancel = $(`${prefix}-cancel`);
+  cancel.classList.remove("hidden");
+  try {
+    await task(attempt);
+    // Cancel pressed just as the room opened: leave it again.
+    if (attempt.cancelled && snapshot) await leaveRoom();
+  } catch (error) {
+    if (!attempt.cancelled) $(`${prefix}-error`).textContent = errorText(error);
+  } finally {
+    if (connectAttempt === attempt) connectAttempt = null;
+    cancel.classList.add("hidden");
+  }
+}
+for (const prefix of ["join", "host"]) {
+  $(`${prefix}-cancel`).onclick = () => {
+    if (!connectAttempt) return;
+    connectAttempt.cancelled = true;
+    $(`${prefix}-error`).textContent = "";
+    invoke("CancelConnect").catch(() => {});
+  };
+}
+
 $("join-form").onsubmit = async (event) => {
   event.preventDefault(); $("join-error").textContent = "";
   const button = event.submitter || $("join-form").querySelector("[type=submit]");
-  await withButtonLoading(button, async () => {
-    try { rememberConnectPreferences("join"); await enterRoom(connectionRequest("join", $("join-invite").value.trim())); }
-    catch (error) { $("join-error").textContent = error?.message || String(error); }
-  }, "Connecting");
+  await withButtonLoading(button, () => withCancellableConnect("join", async () => {
+    rememberConnectPreferences("join");
+    await enterRoom(connectionRequest("join", $("join-invite").value.trim()));
+  }), "Connecting");
 };
 $("host-mode").onchange = () => {
   const advanced = $("host-mode").value === "advanced";
@@ -1475,7 +1901,7 @@ $("host-mode").onchange();
 $("host-form").onsubmit = async (event) => {
   event.preventDefault(); $("host-error").textContent = "";
   const button = event.submitter || $("host-form").querySelector("[type=submit]");
-  await withButtonLoading(button, async () => {
+  await withButtonLoading(button, () => withCancellableConnect("host", async () => {
     let startedServer = false;
     try {
       rememberConnectPreferences("host");
@@ -1489,13 +1915,13 @@ $("host-form").onsubmit = async (event) => {
       startedServer = true;
       await enterRoom(connectionRequest("host", hosted.localInvite));
     } catch (error) {
-      $("host-error").textContent = error?.message || String(error);
       if (startedServer) {
         try { await invoke("StopServer"); } catch (_) {}
         hosted = { running: false };
       }
+      throw error;
     }
-  }, "Starting");
+  }), "Starting");
 };
 
 // Room controls wiring
@@ -1509,15 +1935,16 @@ if ($("connection-btn")) {
 if ($("stats-open-session")) {
   $("stats-open-session").onclick = () => {
     closePopovers();
-    renderConnectionInfo();
     document.querySelectorAll("[data-settings]").forEach((node) => node.classList.toggle("active", node.dataset.settings === "session"));
     document.querySelectorAll("[data-page]").forEach((page) => page.classList.toggle("hidden", page.dataset.page !== "session"));
-    $("settings-dialog").showModal();
+    openPreferences();
   };
 }
 $("leave-room").onclick = (event) => { event.stopPropagation(); togglePopover($("session-menu"), $("leave-room")); };
-$("disconnect").onclick = () => { closePopovers(); leaveRoom().catch(showError); };
-$("settings-leave").onclick = () => withButtonLoading($("settings-leave"), leaveRoom, "Leaving").catch(showError);
+$("disconnect").onclick = () => { closePopovers(); leaveRoomWithConfirmation().catch(showError); };
+$("settings-leave").onclick = async () => {
+  if (await confirmLeaveRoom()) withButtonLoading($("settings-leave"), leaveRoom, "Leaving").catch(showError);
+};
 $("reconnect").onclick = async () => { if (!lastConnectionRequest) return; await withButtonLoading($("reconnect"), async () => { try { await enterRoom(lastConnectionRequest); showToast("Connection restored"); } catch (error) { showError(error); } }, "Reconnecting"); };
 $("room-mode").onchange = (event) => invoke("SetRoomMode", event.target.value).catch(showError);
 $("pause").onclick = () => invoke("SetPaused", !snapshot.playback.paused).catch(showError);
@@ -1560,9 +1987,12 @@ $("forward-ten").onclick = () => {
   const target = projectedPlaybackPosition() + Number(preferences.skipSeconds || 10);
   invoke("Seek", duration ? Math.min(duration, target) : target).catch(showError);
 };
-$("rate-decrease").onclick = () => stepPlaybackRate(-1);
-$("rate-increase").onclick = () => stepPlaybackRate(1);
-$("playback-rate").onclick = () => invoke("SetRate", 1).catch(showError);
+$("rate-decrease").onclick = () => nudgePlaybackRate(-1);
+$("rate-increase").onclick = () => nudgePlaybackRate(1);
+$("playback-rate").onchange = (event) => {
+  const rate = Number(event.target.value);
+  if (rate > 0 && rate !== Number(event.target.dataset.value)) invoke("SetRate", rate).catch(showError);
+};
 $("previous-media").onclick = () => playPlaylist(snapshot.playlist.selected - 1);
 $("next-media").onclick = () => playPlaylist(snapshot.playlist.selected + 1);
 
@@ -1570,7 +2000,7 @@ $("copy-invite").onclick = () => hosted.running && hosted.shareInvite ? copyText
 $("settings-copy-invite").onclick = () => $("copy-invite").click();
 $("owner-invite").onclick = () => copyInvite(true);
 $("settings-owner-invite").onclick = () => copyInvite(true);
-$("stop-server").onclick = () => { closePopovers(); leaveRoom().catch(showError); };
+$("stop-server").onclick = () => { closePopovers(); leaveRoomWithConfirmation().catch(showError); };
 
 // Playlist wiring
 $("add-file").onclick = () => chooseFiles($("add-file"));
@@ -1598,7 +2028,7 @@ $("add-playlist").onclick = async () => {
   try {
     const info = await prepareYouTubeSource(source);
     const label = info?.title || playlistSourceLabel(source);
-    await updatePlaylist([...playlistInputs(), { id: "", label, source, url: "", media: null }]);
+    await appendToPlaylist([{ id: "", label, source, url: "", media: null, durationSeconds: Number(info?.duration) || 0 }]);
     input.value = "";
     streamDrawer.classList.add("hidden");
   } catch (error) { showError(error); }
@@ -1627,13 +2057,14 @@ $("undo-playlist").onclick = async () => {
   closePopovers();
   const previous = playlistHistory.pop();
   if (!previous) return;
-  try { await updatePlaylist(previous, false); }
+  try { await updatePlaylist(previous, { remember: false, basedOnScreen: true }); }
   catch (error) { playlistHistory.push(previous); showError(error); }
 };
-$("shuffle-playlist").onclick = () => withButtonLoading($("shuffle-playlist"), async () => {
+$("shuffle-playlist").onclick = () => {
+  closePopovers();
   const items = playlistInputs(), selected = snapshot.playlist.selected, start = selected >= 0 ? selected + 1 : 0, tail = items.splice(start);
-  await updatePlaylist([...items, ...shuffled(tail)]);
-}, "Shuffling").catch(showError);
+  updatePlaylist([...items, ...shuffled(tail)], { basedOnScreen: true }).catch(showError);
+};
 $("playlist-more").onclick = (event) => { event.stopPropagation(); togglePopover($("playlist-menu"), $("playlist-more")); };
 $("add-stream-focus").onclick = () => {
   closePopovers();
@@ -1641,7 +2072,7 @@ $("add-stream-focus").onclick = () => {
   $("playlist-source").focus();
 };
 $("save-playlist").onclick = () => { closePopovers(); copyText(snapshot.playlist.items.map((item) => item.url || item.label).join("\n"), "Playlist copied as text"); };
-$("shuffle-all").onclick = () => { closePopovers(); updatePlaylist(shuffled(playlistInputs())).catch(showError); };
+$("shuffle-all").onclick = () => { closePopovers(); updatePlaylist(shuffled(playlistInputs()), { basedOnScreen: true }).catch(showError); };
 $("load-playlist-file").onclick = () => loadPlaylistFromFile();
 $("save-playlist-file").onclick = async () => { closePopovers(); try { const path = await invoke("SavePlaylistFile"); if (path) showToast("Playlist saved"); } catch (error) { showError(error); } };
 $("spin-wheel").onclick = () => { closePopovers(); openWheelWindow(); };
@@ -1698,16 +2129,38 @@ $("add-media-directory").onclick = () => withButtonLoading($("add-media-director
 }, "Indexing");
 
 function addChat(chat) {
-  timeline.push({ kind: "chat", value: chat, sentAtUnixMs: chat.sentAtUnixMs });
-  if (timeline.length > 500) timeline = timeline.slice(-500);
-  renderChat();
+  appendTimeline({ kind: "chat", value: chat, sentAtUnixMs: chat.sentAtUnixMs });
 }
 
 function addActivity(activity) {
-  timeline.push({ kind: "activity", value: activity, sentAtUnixMs: activity.sentAtUnixMs });
-  if (timeline.length > 500) timeline = timeline.slice(-500);
-  renderChat();
+  appendTimeline({ kind: "activity", value: activity, sentAtUnixMs: activity.sentAtUnixMs });
 }
+
+// New entries are appended instead of rebuilding the feed, and the feed only
+// follows new messages while the reader is already at the bottom.
+function appendTimeline(entry) {
+  timeline.push(entry);
+  if (timeline.length > 500) timeline = timeline.slice(-500);
+  const chatStream = $("chat");
+  if (!chatStream || (chatFilter !== "all" && entry.kind !== chatFilter)) return;
+  const following = chatStream.scrollHeight - chatStream.scrollTop - chatStream.clientHeight < 24;
+  chatStream.querySelector(".chat-empty")?.remove();
+  chatStream.append(entry.kind === "activity" ? renderActivity(entry) : renderChatMessage(entry));
+  while (chatStream.childElementCount > 500) chatStream.firstElementChild.remove();
+  if (following) chatStream.scrollTop = chatStream.scrollHeight;
+  else if (entry.kind === "chat") $("chat-new-messages")?.classList.remove("hidden");
+}
+
+// Shown when a message arrives while the reader is scrolled up in the feed.
+$("chat").addEventListener("scroll", () => {
+  const chatStream = $("chat");
+  if (chatStream.scrollHeight - chatStream.scrollTop - chatStream.clientHeight < 24) $("chat-new-messages")?.classList.add("hidden");
+});
+$("chat-new-messages")?.addEventListener("click", () => {
+  const chatStream = $("chat");
+  chatStream.scrollTop = chatStream.scrollHeight;
+  $("chat-new-messages").classList.add("hidden");
+});
 
 function activityDescription(activity) {
   const name = activity.participantName || "Someone";
@@ -1722,7 +2175,7 @@ function activityDescription(activity) {
       }
       return `${name} seeked to ${formatTime(activity.positionSeconds)}`;
     }
-    case "playback.rate": return `${name} changed speed to ${Number(activity.rate || 1).toFixed(2).replace(/\.00$/, "")}×`;
+    case "playback.rate": return `${name} changed speed to ${rateLabel(Number(activity.rate || 1))}`;
     case "playlist.updated": return `${name} updated the queue · ${activity.itemCount} item${activity.itemCount === 1 ? "" : "s"}`;
     case "playlist.played": return `${name} played ${activity.itemLabel || "a queue item"}`;
     case "wheel.started": return `${name} spun the wheel`;
@@ -1742,10 +2195,13 @@ function activityIcon(action) {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/></svg>';
 }
 
+const timelineRows = new WeakMap();
+
 function renderActivity(entry) {
   const activity = entry.value;
   const row = document.createElement("div");
   row.className = "activity-msg-row";
+  timelineRows.set(row, entry);
   const icon = document.createElement("span");
   icon.className = "activity-msg-icon";
   icon.innerHTML = activityIcon(activity.action);
@@ -1763,6 +2219,7 @@ function renderChatMessage(entry) {
   const message = entry.value;
   const row = document.createElement("div");
   row.className = "chat-msg-row";
+  timelineRows.set(row, entry);
   const avatar = document.createElement("div");
   avatar.className = "chat-msg-avatar";
   avatar.textContent = (message.participantName || "?").slice(0, 1).toUpperCase();
@@ -1796,22 +2253,52 @@ function renderChat() {
   }
   chatStream.replaceChildren(...visible.map((entry) => entry.kind === "activity" ? renderActivity(entry) : renderChatMessage(entry)));
   chatStream.scrollTop = chatStream.scrollHeight;
+  $("chat-new-messages")?.classList.add("hidden");
 }
 
 // Menus and settings dialog
 document.addEventListener("click", (event) => {
-  if (!event.target.closest(".popover, .popover-menu") && !event.target.closest("#playlist-more") && !event.target.closest("#room-chip") && !event.target.closest("#leave-room") && !event.target.closest("#connection-btn")) {
+  // A click on an element that opens a menu must not close the menu it just
+  // opened (the quality menu can open before its click finishes bubbling).
+  if (!event.target.closest(".popover, .popover-menu, [aria-haspopup]")) {
     closePopovers();
   }
 });
+function openPopover() {
+  return document.querySelector(".popover:not(.hidden), .popover-menu:not(.hidden), #context-menu:not(.hidden)");
+}
+
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    closePopovers();
+    // Escape closes one layer at a time, as native menus do: an open menu
+    // closes and the dialog under it stays.
+    if (openPopover()) {
+      event.preventDefault();
+      event.stopPropagation();
+      closePopovers();
+    }
+    return;
   }
-});
+  // Arrow keys, Home and End move through the open menu, as native menus do.
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const menu = [...document.querySelectorAll(".popover-menu:not(.hidden), #context-menu:not(.hidden)")].pop();
+  if (!menu) return;
+  const items = [...menu.querySelectorAll(".popover-btn")].filter((item) => !item.disabled && item.offsetParent !== null);
+  if (!items.length) return;
+  event.preventDefault();
+  const position = items.indexOf(document.activeElement);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+    : event.key === "ArrowDown" ? (position + 1) % items.length : (position <= 0 ? items.length - 1 : position - 1);
+  items[next].focus();
+}, true);
 $("room-chip").onclick = (event) => { event.stopPropagation(); togglePopover($("room-menu"), $("room-chip")); };
 $("copy-room-name").onclick = () => { closePopovers(); copyText(snapshot.room.id, "Room name copied"); };
-$("open-settings").onclick = () => { renderConnectionInfo(); $("settings-dialog").showModal(); };
+function openPreferences() {
+  renderConnectionInfo();
+  void refreshTrayStatus();
+  if (!$("settings-dialog").open) $("settings-dialog").showModal();
+}
+$("open-settings").onclick = openPreferences;
 $("settings-dialog").addEventListener("click", (event) => { if (event.target === $("settings-dialog")) $("settings-dialog").close(); });
 document.querySelectorAll("[data-settings]").forEach((button) => {
   button.onclick = () => {
@@ -1871,14 +2358,27 @@ $("sponsorblock-enabled").onchange = (event) => {
   if (snapshot) invoke("SetSponsorBlockEnabled", event.target.checked).catch(showError);
 };
 $("wheel-sound-enabled").onchange = (event) => savePreferences({ wheelSound: event.target.checked });
+$("stream-cache-limit").onchange = (event) => {
+  savePreferences({ streamCacheLimit: Number(event.target.value) || 0 });
+  invoke("SetStreamCacheLimit", streamCacheLimit()).catch(showError);
+};
+$("chat-overlay-enabled").onchange = (event) => {
+  savePreferences({ chatOverlay: event.target.checked });
+  invoke("SetChatOverlayEnabled", event.target.checked).catch(showError);
+};
+$("auto-offer-enabled").onchange = (event) => {
+  savePreferences({ autoOffer: event.target.checked });
+  if (snapshot) invoke("SetAutoOfferEnabled", event.target.checked).catch(showError);
+};
 const systemThemeQuery = matchMedia("(prefers-color-scheme: dark)");
 const systemThemeChanged = () => {
   if (preferences.theme === "system") applyPreferences();
 };
+// The media query reports real system theme changes. Re-applying the theme on
+// every focus or visibility change restyled the whole page exactly when the
+// compositor was redrawing the window, which showed up as flashing.
 if (systemThemeQuery.addEventListener) systemThemeQuery.addEventListener("change", systemThemeChanged);
 else systemThemeQuery.addListener?.(systemThemeChanged);
-window.addEventListener("focus", systemThemeChanged);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) systemThemeChanged(); });
 
 function showContextMenu(event, items) {
   const menu = $("context-menu");
@@ -1932,18 +2432,26 @@ document.addEventListener("contextmenu", (event) => {
     const item = snapshot.playlist.items[index];
     if (!item) return;
     const selectedHere = index === snapshot.playlist.selected;
+    // The queue can change while the menu is open, so actions find their item
+    // by ID when chosen instead of trusting the row index captured now.
+    const at = (task) => () => {
+      closePopovers();
+      const current = snapshot?.playlist?.items?.findIndex((entry) => entry.id === item.id) ?? -1;
+      if (current < 0) { showToast("That queue item was removed", "error"); return; }
+      task(current);
+    };
     const controls = [selectedHere
       ? menuButton("Resume", () => { closePopovers(); invoke("SetPaused", false).catch(showError); }, { disabled: !canControl() || !snapshot.playback.paused || !isPlaylistItemPlayable(item) })
-      : menuButton("Play now", () => { closePopovers(); playPlaylist(index); }, { disabled: !canControl() || !isPlaylistItemPlayable(item) })];
+      : menuButton("Play now", at((current) => playPlaylist(current)), { disabled: !canControl() || !isPlaylistItemPlayable(item) })];
     if (!item.url && item.media && !availability[item.id]) controls.push(menuButton("Locate matching file…", () => { closePopovers(); locateItem(item.id); }));
     const ownOffer = (snapshot.streamOffers || []).find((offer) => offer.providerId === snapshot.selfId);
     if (ownOffer && item.media && ownOffer.media?.fingerprint === item.media.fingerprint) controls.push(menuButton("Stop sharing file", () => { closePopovers(); invoke("StopOfferingStream").then(() => showToast("File sharing stopped")).catch(showError); }));
     else if (!ownOffer && !item.url && availability[item.id] && streamingAvailable && friendsMissing(item.media)) controls.push(menuButton("Share file", () => { closePopovers(); invoke("OfferPlaylistStream", item.id).then(() => showToast("File sharing started")).catch(showError); }));
     controls.push(
-      menuButton("Move up", () => { closePopovers(); reorderPlaylist(index, index - 1); }, { disabled: !canControl() || index === 0 }),
-      menuButton("Move down", () => { closePopovers(); reorderPlaylist(index, index + 1); }, { disabled: !canControl() || index === snapshot.playlist.items.length - 1 }),
+      menuButton("Move up", at((current) => current > 0 && movePlaylistItem(item.id, snapshot.playlist.items[current - 1].id)), { disabled: !canControl() || index === 0 }),
+      menuButton("Move down", at((current) => current < snapshot.playlist.items.length - 1 && movePlaylistItem(item.id, snapshot.playlist.items[current + 1].id)), { disabled: !canControl() || index === snapshot.playlist.items.length - 1 }),
       menuButton("Copy title", () => { closePopovers(); copyText(item.label, "Title copied"); }),
-      menuButton("Remove from queue", () => { closePopovers(); removePlaylist(index); }, { disabled: !canControl(), danger: true })
+      menuButton("Remove from queue", at(() => removePlaylistItem(item.id)), { disabled: !canControl(), danger: true })
     );
     if (item.url) controls.splice(controls.length - 1, 0, menuButton("Copy video URL", () => { closePopovers(); copyText(item.url, "URL copied"); }));
     showContextMenu(event, controls);
@@ -1965,24 +2473,159 @@ document.addEventListener("contextmenu", (event) => {
     return;
   }
 
-  if (event.target.closest("#now-playing-drop") && snapshot) {
+  // Every other area gets a menu for what it shows. Items mirror the visible
+  // controls, so their enabled state follows the same permissions.
+  const act = (task) => () => { closePopovers(); task(); };
+  const open = (items) => {
+    const menu = tidyMenu(items);
+    if (!menu.length) return;
     event.preventDefault();
-    const title = $("media-title").textContent;
-    const source = selectedSourceURL();
-    const items = [menuButton("Copy media title", () => { closePopovers(); copyText(title, "Title copied"); }, { disabled: title === "No media loaded" })];
-    if (/^https?:\/\//i.test(source)) items.push(menuButton("Copy video URL", () => { closePopovers(); copyText(source, "URL copied"); }));
-    showContextMenu(event, items);
+    showContextMenu(event, menu);
+  };
+  const selectedText = String(getSelection()?.toString() || "").trim();
+  const copySelection = selectedText ? [menuButton("Copy", act(() => copyText(selectedText, "Copied")), { hint: "Ctrl+C" }), menuSeparator()] : [];
+  const windowItems = () => document.body.dataset.platform === "mac" ? [] : [
+    menuSeparator(),
+    menuButton("Minimize", act(() => wails?.Window?.Minimise())),
+    menuButton($("window-maximise").dataset.maximised === "true" ? "Restore" : "Maximize", act(() => wails?.Window?.ToggleMaximise())),
+    menuButton("Close window", act(() => wails?.Window?.Close()))
+  ];
+  const chatFilterItems = () => [
+    ["all", "Show everything"], ["chat", "Chat only"], ["activity", "Activity only"]
+  ].map(([value, label]) => menuButton(label, act(() => document.querySelector(`[data-chat-filter="${value}"]`)?.click()), { checked: chatFilter === value }));
+  const clearChatItem = () => menuButton("Clear feed", act(() => $("clear-chat").click()), { disabled: !timeline.length });
+
+  if (event.target.closest("#wheel-dialog")) {
+    open([
+      ...copySelection,
+      menuButton("Spin again", act(() => $("wheel-spin-again").click()), { disabled: $("wheel-spin-again").disabled }),
+      menuButton("Close", act(dismissWheelWindow), { hint: "Esc" })
+    ]);
     return;
   }
 
-  const selectedText = String(getSelection()?.toString() || "").trim();
+  if (event.target.closest("dialog[open]")) {
+    open([...copySelection, menuButton("Close", act(() => event.target.closest("dialog").close()), { hint: "Esc" })]);
+    return;
+  }
+
+  const timelineRow = event.target.closest(".chat-msg-row, .activity-msg-row");
+  if (timelineRow && snapshot) {
+    const entry = timelineRows.get(timelineRow);
+    const isChat = entry?.kind === "chat";
+    const text = isChat ? entry.value.message : entry ? activityDescription(entry.value) : timelineRow.textContent;
+    open([
+      ...copySelection,
+      menuButton(isChat ? "Copy message" : "Copy text", act(() => copyText(text, "Copied"))),
+      isChat ? menuButton("Copy author name", act(() => copyText(entry.value.participantName, "Name copied"))) : null,
+      menuSeparator(), ...chatFilterItems(), menuSeparator(), clearChatItem()
+    ]);
+    return;
+  }
+
+  if (event.target.closest("#inspector-chat-panel") && snapshot) {
+    open([...copySelection, ...chatFilterItems(), menuSeparator(), clearChatItem()]);
+    return;
+  }
+
+  if (event.target.closest("#playlist-panel") && snapshot) {
+    const allowed = canControl(), count = snapshot.playlist.items.length;
+    open([
+      ...copySelection,
+      menuButton("Add media files…", act(() => chooseFiles()), { disabled: !allowed, hint: "Ctrl+O" }),
+      menuButton("Add folder…", act(() => $("add-folder").click()), { disabled: !allowed }),
+      menuButton("Add URL…", act(() => { streamDrawer.classList.remove("hidden"); $("playlist-source").focus(); }), { disabled: !allowed }),
+      menuSeparator(),
+      menuButton("Spin the wheel", act(openWheelWindow), { disabled: !allowed || count < 2 }),
+      menuButton("Shuffle upcoming", act(() => $("shuffle-playlist").click()), { disabled: !allowed || count < 2 }),
+      menuButton("Shuffle entire queue", act(() => $("shuffle-all").click()), { disabled: !allowed || count < 2 }),
+      menuSeparator(),
+      menuButton("Load playlist file…", act(loadPlaylistFromFile), { disabled: !allowed }),
+      menuButton("Save queue to file…", act(() => $("save-playlist-file").click()), { disabled: !count }),
+      menuButton("Copy queue as text", act(() => $("save-playlist").click()), { disabled: !count }),
+      menuSeparator(),
+      menuButton("Undo last queue change", act(() => $("undo-playlist").click()), { disabled: !allowed || !playlistHistory.length }),
+      menuButton("Clear queue…", act(() => $("clear-playlist").click()), { disabled: !allowed || !count, danger: true })
+    ]);
+    return;
+  }
+
+  if (event.target.closest("#inspector-participants-panel") && snapshot) {
+    const owner = self()?.role === "owner";
+    const setMode = (mode) => act(() => invoke("SetRoomMode", mode).catch(showError));
+    open([
+      ...copySelection,
+      menuButton("Copy invite link", act(() => $("copy-invite").click())),
+      owner ? menuButton("Copy owner recovery invite", act(() => copyInvite(true))) : null,
+      owner ? menuSeparator() : null,
+      owner ? menuButton("Everyone controls playback", setMode("collaborative"), { checked: snapshot.room.mode === "collaborative" }) : null,
+      owner ? menuButton("Moderators control playback", setMode("moderated"), { checked: snapshot.room.mode === "moderated" }) : null
+    ]);
+    return;
+  }
+
+  if (event.target.closest("#now-playing-drop") && snapshot) {
+    const allowed = canControl(), media = referenceMedia(), paused = snapshot.playback.paused;
+    const rate = Number(snapshot.playback.rate || 1), skip = Number(preferences.skipSeconds || 10);
+    const title = $("media-title").textContent, source = selectedSourceURL();
+    const speedAllowed = allowed && rateRange.supported;
+    open([
+      ...copySelection,
+      menuButton(paused ? "Play" : "Pause", act(() => $("pause").click()), { disabled: !allowed, hint: "Space" }),
+      menuButton(`Back ${skip} seconds`, act(() => $("back-ten").click()), { disabled: !allowed || !media, hint: "←" }),
+      menuButton(`Forward ${skip} seconds`, act(() => $("forward-ten").click()), { disabled: !allowed || !media, hint: "→" }),
+      menuSeparator(),
+      menuButton("Slower", act(() => stepPlaybackRate(-1)), { disabled: !speedAllowed || rate <= rateRange.min, hint: "<" }),
+      menuButton("Faster", act(() => stepPlaybackRate(1)), { disabled: !speedAllowed || rate >= rateRange.max, hint: ">" }),
+      menuButton("Normal speed", act(() => invoke("SetRate", 1).catch(showError)), { disabled: !speedAllowed || rate === 1 }),
+      menuSeparator(),
+      menuButton("Copy timestamp", act(() => copyText(formatTime(projectedPlaybackPosition()), "Timestamp copied")), { disabled: !media }),
+      menuButton("Copy media title", act(() => copyText(title, "Title copied")), { disabled: !media }),
+      /^https?:\/\//i.test(source) ? menuButton("Copy video URL", act(() => copyText(source, "URL copied"))) : null
+    ]);
+    return;
+  }
+
+  if (event.target.closest(".app-command-bar, .window-titlebar") && snapshot) {
+    open([
+      ...copySelection,
+      menuButton("Copy invite link", act(() => $("copy-invite").click())),
+      menuButton("Copy room name", act(() => $("copy-room-name").click())),
+      menuSeparator(),
+      menuButton("Server & session info…", act(() => $("stats-open-session").click())),
+      menuButton("Preferences…", act(openPreferences), { hint: "Ctrl+," }),
+      menuSeparator(),
+      menuButton("Leave room", act(() => leaveRoomWithConfirmation().catch(showError)), { danger: true }),
+      ...windowItems()
+    ]);
+    return;
+  }
+
+  if (event.target.closest("#connect-view, .window-titlebar") && !snapshot) {
+    const joining = !$("join-form").classList.contains("hidden");
+    open([
+      ...copySelection,
+      menuButton("Join a room", act(() => switchConnectMode("join")), { checked: joining }),
+      menuButton("Host a room", act(() => switchConnectMode("host")), { checked: !joining }),
+      menuSeparator(),
+      menuButton("Paste invite link", act(() => {
+        switchConnectMode("join");
+        const input = $("join-invite");
+        input.focus();
+        pasteIntoControl(input, 0, input.value.length, input.value);
+      })),
+      menuButton("Switch theme", act(cycleTheme)),
+      ...windowItems()
+    ]);
+    return;
+  }
+
   if (!snapshot && !selectedText) return;
-  event.preventDefault();
-  const items = [];
-  if (selectedText) items.push(menuButton("Copy", () => { copyText(selectedText, "Copied"); closePopovers(); }));
-  if (snapshot) items.push(menuButton("Copy invite", () => { $("copy-invite").click(); closePopovers(); }));
-  if (snapshot) items.push(menuButton("Preferences…", () => { closePopovers(); renderConnectionInfo(); $("settings-dialog").showModal(); }));
-  showContextMenu(event, items);
+  open([
+    ...copySelection,
+    snapshot ? menuButton("Copy invite link", act(() => $("copy-invite").click())) : null,
+    snapshot ? menuButton("Preferences…", act(openPreferences), { hint: "Ctrl+," }) : null
+  ]);
 });
 
 // External file drops from Wails and browser drop
@@ -2011,7 +2654,7 @@ document.addEventListener("drop", async (event) => {
   if (/^https?:\/\//i.test(value.trim()) && snapshot && canControl()) {
     try {
       const source = value.trim(), info = await prepareYouTubeSource(source);
-      await updatePlaylist([...playlistInputs(), { id: "", label: info?.title || "", source, url: "", media: null }]);
+      await appendToPlaylist([{ id: "", label: info?.title || playlistSourceLabel(source), source, url: "", media: null, durationSeconds: Number(info?.duration) || 0 }]);
     } catch (error) { showError(error); }
   }
 });
@@ -2022,10 +2665,18 @@ function receiveFileDrop(paths, target) {
   addMediaPaths(paths || [], target?.id === "now-playing-drop");
 }
 
+// Availability and streaming support change with the playlist or the
+// connection, not with every room event.
+let connectionEpoch = 0;
+let availabilityKey = "";
+let streamingCheckEpoch = -1;
 function receive(event) {
   if (event.connection) {
     setConnection(event.connection);
-    if (event.connection.state === "connected") refreshStreamingSupport();
+    if (event.connection.state === "connected") {
+      connectionEpoch++;
+      refreshStreamingSupport();
+    }
     if (event.connection.state === "disconnected") {
       streamingAvailable = false;
       streamState = { state: "idle", offerId: "", route: "" };
@@ -2034,13 +2685,38 @@ function receive(event) {
   if (event.snapshot) {
     snapshot = normalizeSnapshot(event.snapshot);
     render();
-    refreshAvailability();
-    if (!streamingAvailable) refreshStreamingSupport();
+    const nextAvailabilityKey = `${connectionEpoch}|${snapshot.playlist.revision}|${snapshot.playlist.items.length}`;
+    if (nextAvailabilityKey !== availabilityKey) {
+      availabilityKey = nextAvailabilityKey;
+      refreshAvailability();
+    }
+    if (!streamingAvailable && streamingCheckEpoch !== connectionEpoch) {
+      streamingCheckEpoch = connectionEpoch;
+      refreshStreamingSupport();
+    }
     if (event.snapshot.playlistWheel) showWheel(event.snapshot.playlistWheel, event.serverNowUnixMs);
   }
   if (event.stream) {
-    streamState = { state: event.stream.state || "idle", offerId: event.stream.offerId || "", route: event.stream.route || "" };
-    if (snapshot) render();
+    const next = event.stream;
+    if (next.totalBytes) {
+      // Progress ticks only refresh the badge, and a tick that arrives after
+      // the stream ended is ignored.
+      if (streamState.state === "active" && streamState.offerId === next.offerId) {
+        Object.assign(streamState, {
+          cachedBytes: next.cachedBytes || 0, totalBytes: next.totalBytes, bytesPerSecond: next.bytesPerSecond || 0,
+          cachedRanges: next.cachedRanges || [],
+        });
+        if (snapshot) renderMediaKind(referenceMedia());
+        renderStreamCache();
+      }
+    } else {
+      streamState = { state: next.state || "idle", offerId: next.offerId || "", route: next.route || "" };
+      if (snapshot) render();
+    }
+  }
+  if (event.sync) {
+    syncStatus = { state: event.sync.state || "idle", driftSeconds: Number(event.sync.driftSeconds) || 0 };
+    if (snapshot) renderSyncBadge();
   }
   if (event.wheel) showWheel(event.wheel, event.serverNowUnixMs);
   if (event.chat) addChat(event.chat);
@@ -2057,25 +2733,51 @@ function receive(event) {
 // Global keyboard shortcuts
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    closePopovers();
-    if ($("settings-dialog").open) $("settings-dialog").close();
-    dismissWheelWindow();
+    // Only the topmost dialog closes; the confirmation sits above the others.
+    event.preventDefault();
+    if ($("confirm-dialog").open) $("confirm-dialog").close("cancel");
+    else if ($("wheel-dialog").open) dismissWheelWindow();
+    else if ($("settings-dialog").open) $("settings-dialog").close();
+    return;
   }
+  // Playback shortcuts belong to the room view, not to an open dialog or menu,
+  // and Space or Enter on a focused button activates that button.
   if (!snapshot || event.target.matches("input, select, textarea") || event.target.isContentEditable) return;
-  if (event.code === "Space" && canControl()) { event.preventDefault(); $("pause").click(); }
+  if (document.querySelector("dialog[open]") || openPopover()) return;
+  if (event.code === "Space" && event.target.closest("button, a, [role=button], [role=menuitem], [tabindex]:not(body)")) return;
+  if (event.code === "Space" && canControl()) { event.preventDefault(); if (!event.repeat) $("pause").click(); }
   if (event.key === "ArrowLeft" && canControl()) { event.preventDefault(); $("back-ten").click(); }
   if (event.key === "ArrowRight" && canControl()) { event.preventDefault(); $("forward-ten").click(); }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o" && canControl()) { event.preventDefault(); chooseFiles(); }
-  if ((event.ctrlKey || event.metaKey) && event.key === ",") { event.preventDefault(); $("settings-dialog").showModal(); }
+  if ((event.ctrlKey || event.metaKey) && event.key === ",") { event.preventDefault(); openPreferences(); }
+  if (!event.ctrlKey && !event.metaKey && !event.altKey && (event.key === ">" || event.key === "<")) { event.preventDefault(); stepPlaybackRate(event.key === ">" ? 1 : -1); }
 });
 
 if (wails?.Events) {
   wails.Events.On("faro:event", (event) => receive(event.data));
   wails.Events.On("faro:file-drop", (event) => receiveFileDrop(event.data?.paths, event.data?.target));
+  wails.Events.On("faro:window-state", (event) => setWindowState(event.data));
+  wails.Events.On("faro:window-chrome", (event) => {
+    if (!event.data) return;
+    windowChrome = { ...windowChrome, ...event.data };
+    applyWindowChrome();
+  });
+  wails.Events.On("faro:open-files", () => { void collectLaunchPaths(); });
+  wails.Events.On("faro:confirm-quit", async (event) => {
+    const hosting = Boolean(event.data?.hosting);
+    const quit = await askConfirmation("Quit Faro?", hosting
+      ? "You are hosting this room. Quitting ends it for everyone watching."
+      : "Quitting takes you out of the room.", "Quit");
+    if (!quit) return;
+    if (preferences.pauseOnLeave && canControl() && snapshot && !snapshot.playback.paused) {
+      try { await invoke("SetPaused", true); } catch (_) {}
+    }
+    invoke("Quit").catch(showError);
+  });
 }
 
 setInterval(() => {
-  if (!snapshot || snapshot.playback.paused || connectionState !== "connected" || isScrubbing) return;
+  if (document.hidden || !snapshot || snapshot.playback.paused || connectionState !== "connected" || isScrubbing) return;
   const projected = projectedPlaybackPosition();
   const duration = playbackDuration();
   if (duration) $("position").value = String(projected);
@@ -2083,14 +2785,51 @@ setInterval(() => {
   $("current-time").textContent = formatTime(projected);
 }, 250);
 
-await configurePlayerOptions();
+// Startup. On Linux the window stays hidden until WindowReady, so everything
+// the first frame shows is settled before it is revealed.
+applyPreferences();
+await Promise.all([
+  configurePlayerOptions(),
+  loadWindowChrome(),
+  hasBackend ? invoke("Version").then((value) => { appVersion = value; }).catch(() => {}) : null,
+  hasBackend ? wails?.Window?.IsMaximised?.().then((maximised) => setWindowState({ maximised })).catch(() => {}) : null
+]);
+$("version").textContent = appVersion;
+applyWindowChrome();
 hydrateConnectForms();
 enhanceAllSelects();
 applyPreferences();
 renderMediaDirectories();
-if (hasBackend) invoke("Version").then((value) => {
-  appVersion = value;
-  $("version").textContent = value;
-  renderConnectionInfo();
-}).catch(() => {});
-if (hasBackend) void checkForUpdates();
+renderConnectionInfo();
+if (hasBackend) invoke("WindowReady").catch(() => {});
+void collectLaunchPaths();
+// Only WebKitGTK offers a choice of rendering path.
+if (hasBackend && document.body.dataset.platform === "linux") {
+  invoke("HardwareAcceleration").then((enabled) => {
+    $("hardware-acceleration").checked = Boolean(enabled);
+    $("hardware-acceleration-row").classList.remove("hidden");
+  }).catch(() => {});
+}
+async function refreshTrayStatus() {
+  if (!hasBackend) return;
+  try {
+    const status = await invoke("TrayStatus");
+    $("close-to-tray").checked = Boolean(status.closeToTray);
+    $("close-to-tray-hint").textContent = status.available
+      ? "Closing the window keeps rooms, hosting and shared files running. Quit from the tray icon."
+      : "No system tray found, so closing the window quits Faro. On GNOME, enable the AppIndicator extension.";
+    $("close-to-tray-row").classList.remove("hidden");
+  } catch {}
+}
+void refreshTrayStatus();
+$("close-to-tray").onchange = (event) => {
+  invoke("SetCloseToTray", event.target.checked)
+    .catch((error) => { event.target.checked = !event.target.checked; showError(error); });
+};
+$("hardware-acceleration").onchange = (event) => {
+  invoke("SetHardwareAcceleration", event.target.checked)
+    .then(() => showToast("Restart Faro to apply the rendering change"))
+    .catch((error) => { event.target.checked = !event.target.checked; showError(error); });
+};
+if (hasBackend && preferences.checkUpdates !== false) void checkForUpdates();
+$("check-updates").onchange = (event) => savePreferences({ checkUpdates: event.target.checked });

@@ -48,6 +48,9 @@ type ResolvedStream struct {
 	VideoURL    string
 	AudioURL    string
 	CombinedURL string
+	// Title replaces the extracted URL (".../videoplayback?...") that
+	// players would otherwise show as the media title.
+	Title string
 }
 
 type ResolvedStreamPlayer interface {
@@ -63,4 +66,16 @@ type Player interface {
 	Open(context.Context, string) error
 	Events() <-chan Event
 	Close() error
+}
+
+// ChatLine is one chat message drawn over the video.
+type ChatLine struct {
+	Author string
+	Text   string
+}
+
+// ChatOverlayPlayer can draw recent chat messages over the video. An empty
+// list removes the overlay.
+type ChatOverlayPlayer interface {
+	ShowChat(context.Context, []ChatLine) error
 }

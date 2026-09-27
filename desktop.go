@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/Pouya-Amiri/Faro/internal/app"
 	"github.com/Pouya-Amiri/Faro/internal/buildinfo"
@@ -17,12 +18,22 @@ import (
 )
 
 type Desktop struct {
-	app     *application.App
-	window  application.Window
-	service *app.Service
+	app        *application.App
+	window     application.Window
+	service    *app.Service
+	revealOnce sync.Once
+
+	backgroundMu sync.Mutex
+	background   application.RGBA
+
+	tray        *trayController
+	launchMu    sync.Mutex
+	launchPaths []string
 }
 
-func NewDesktop(wailsApp *application.App) *Desktop { return &Desktop{app: wailsApp} }
+func NewDesktop(wailsApp *application.App, background application.RGBA) *Desktop {
+	return &Desktop{app: wailsApp, background: background}
+}
 
 func (d *Desktop) setWindow(window application.Window) { d.window = window }
 
@@ -59,6 +70,8 @@ func (d *Desktop) Connect(request app.ConnectionRequest) error {
 	return d.service.Connect(request)
 }
 
+func (d *Desktop) CancelConnect() { d.service.CancelConnect() }
+
 func (d *Desktop) LeaveRoom() { d.service.LeaveRoom() }
 
 func (d *Desktop) Snapshot() (protocol.Snapshot, error) { return d.service.Snapshot() }
@@ -76,6 +89,8 @@ func (d *Desktop) SetPaused(paused bool) error { return d.service.SetPaused(paus
 func (d *Desktop) Seek(seconds float64) error { return d.service.Seek(seconds) }
 
 func (d *Desktop) SetRate(rate float64) error { return d.service.SetRate(rate) }
+
+func (d *Desktop) PlaybackRateRange() app.RateRange { return d.service.PlaybackRateRange() }
 
 func (d *Desktop) StopOfferingStream() error { return d.service.StopOfferingStream() }
 
@@ -101,11 +116,25 @@ func (d *Desktop) TimelineSegments() []app.TimelineSegment {
 	return d.service.TimelineSegments()
 }
 
-func (d *Desktop) SetPlaylist(items []app.PlaylistInput) error {
-	return d.service.SetPlaylist(items)
+func (d *Desktop) SetPlaylist(items []app.PlaylistInput, baseRevision *uint64) error {
+	return d.service.SetPlaylist(items, baseRevision)
 }
 
-func (d *Desktop) SelectPlaylist(index int) error { return d.service.SelectPlaylist(index) }
+func (d *Desktop) RemovePlaylistItem(itemID string) error {
+	return d.service.RemovePlaylistItem(itemID)
+}
+
+func (d *Desktop) MovePlaylistItem(itemID, targetID string) error {
+	return d.service.MovePlaylistItem(itemID, targetID)
+}
+
+func (d *Desktop) AppendPlaylist(items []app.PlaylistInput, play bool) (int, error) {
+	return d.service.AppendPlaylist(items, play)
+}
+
+func (d *Desktop) SelectPlaylist(index int, itemID string) error {
+	return d.service.SelectPlaylist(index, itemID)
+}
 
 func (d *Desktop) SpinPlaylistWheel() error { return d.service.SpinPlaylistWheel() }
 
@@ -233,3 +262,9 @@ func mediaFileFilters() []application.FileFilter {
 		{DisplayName: "All files", Pattern: "*"},
 	}
 }
+
+func (d *Desktop) SetAutoOfferEnabled(enabled bool) { d.service.SetAutoOfferEnabled(enabled) }
+
+func (d *Desktop) SetChatOverlayEnabled(enabled bool) { d.service.SetChatOverlayEnabled(enabled) }
+
+func (d *Desktop) SetStreamCacheLimit(limitBytes int64) { d.service.SetStreamCacheLimit(limitBytes) }

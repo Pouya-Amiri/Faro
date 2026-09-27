@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -45,5 +46,19 @@ func TestCodecRejectsLargeFrame(t *testing.T) {
 	_, err := NewCodec(stream).Read()
 	if !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+	}
+}
+
+func TestCodecLimitsEachDirectionSeparately(t *testing.T) {
+	large := Envelope{Version: Version, Type: TypeStateSnapshot, Payload: json.RawMessage(`"` + strings.Repeat("x", MaxFrameSize) + `"`)}
+	stream := &bufferStream{}
+	if err := NewCodec(stream).Write(large); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("default codec wrote a %d-byte frame: %v", MaxFrameSize, err)
+	}
+	if err := NewCodecWithLimits(stream, MaxFrameSize, MaxStateFrameSize).Write(large); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewCodecWithLimits(stream, MaxStateFrameSize, MaxFrameSize).Read(); err != nil {
+		t.Fatalf("state-sized read failed: %v", err)
 	}
 }

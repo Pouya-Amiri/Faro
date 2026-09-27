@@ -3,6 +3,7 @@ package mpv
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,7 +80,13 @@ func Start(ctx context.Context, cfg Config, initialSource string) (*MPV, error) 
 	if err != nil {
 		return nil, err
 	}
-	id := fmt.Sprintf("%d", time.Now().UnixNano())
+	// The random part keeps another local process from predicting the name
+	// and creating the pipe before mpv does.
+	nonce := make([]byte, 8)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	id := fmt.Sprintf("%d-%x", time.Now().UnixNano(), nonce)
 	ipcPath, cleanup, err := ipcAddress(id)
 	if err != nil {
 		return nil, err
@@ -209,7 +216,16 @@ func (m *MPV) SetRate(ctx context.Context, rate float64) error {
 func (m *MPV) Open(ctx context.Context, source string) error {
 	m.openMu.Lock()
 	defer m.openMu.Unlock()
+	m.setMediaTitle(ctx, "")
 	return m.openSource(ctx, source)
+}
+
+// setMediaTitle sets or (with "") clears force-media-title, which mpv shows
+// in its window title and OSD and reports as media-title. Resolved YouTube
+// streams would otherwise be titled by their extracted URL. A property works
+// on every mpv version, unlike per-file loadfile options.
+func (m *MPV) setMediaTitle(ctx context.Context, title string) {
+	_ = m.command(ctx, []any{"set_property", "force-media-title", title}, nil)
 }
 
 func (m *MPV) OpenResolved(ctx context.Context, stream player.ResolvedStream) error {
@@ -223,6 +239,7 @@ func (m *MPV) OpenResolved(ctx context.Context, stream player.ResolvedStream) er
 	if primary == "" {
 		return errors.New("resolved stream has no video URL")
 	}
+	m.setMediaTitle(ctx, strings.TrimSpace(stream.Title))
 	if err := m.openSource(ctx, primary); err != nil {
 		if stream.CombinedURL != "" && primary != stream.CombinedURL {
 			return m.openSource(ctx, stream.CombinedURL)
@@ -479,6 +496,7 @@ func (m *MPV) emit(event player.Event) {
 func (m *MPV) Close() error {
 	var result error
 	m.once.Do(func() {
+		m.requestQuit()
 		close(m.done)
 		m.completeLoad(errors.New("player closed while loading media"))
 		result = m.stream.Close()
@@ -486,6 +504,24 @@ func (m *MPV) Close() error {
 		m.cleanup()
 	})
 	return result
+}
+
+// requestQuit asks the player to quit over IPC before its process is
+// signalled. For IINA the process Faro started is only the iina-cli wrapper,
+// so a signal alone would leave IINA's window open; the quit command reaches
+// IINA's own mpv core. The reply is not awaited.
+func (m *MPV) requestQuit() {
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		m.writeMu.Lock()
+		defer m.writeMu.Unlock()
+		_, _ = m.stream.Write([]byte(`{"command":["quit"]}` + "\n"))
+	}()
+	select {
+	case <-sent:
+	case <-time.After(300 * time.Millisecond):
+	}
 }
 
 func (m *MPV) Done() <-chan struct{} { return m.done }

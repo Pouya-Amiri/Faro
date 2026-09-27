@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	faroclient "github.com/Pouya-Amiri/Faro/internal/client"
@@ -49,9 +52,17 @@ func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.
 	s.mu.Unlock()
 	if source == "" {
 		s.stopSelectedPlayback(client, "")
-		s.sink(Event{Kind: "error", Error: &protocol.Error{
-			Code: "media_missing", Message: fmt.Sprintf("Locate a local copy of %q before playing it", item.Label),
-		}})
+		// Someone who has the file shares it (or is about to), and the stream
+		// starts on its own; only a file nobody can provide is an error.
+		fingerprint := ""
+		if item.Media != nil {
+			fingerprint = item.Media.Fingerprint
+		}
+		if !(s.StreamingAvailable() && awaitingSharedCopy(client.Snapshot(), fingerprint)) {
+			s.sink(Event{Kind: "error", Error: &protocol.Error{
+				Code: "media_missing", Message: fmt.Sprintf("Locate a local copy of %q before playing it", item.Label),
+			}})
+		}
 		return
 	}
 	currentClient, mediaPlayer, err := s.ensurePlayer(playerStartAutomatic)
@@ -124,30 +135,207 @@ func (s *Service) stopSelectedPlayback(client *faroclient.Client, expectedID str
 	}
 }
 
-func (s *Service) SetPlaylist(inputs []PlaylistInput) error {
+// SetPlaylist replaces the room's queue. With baseRevision set it applies
+// only if the queue is still at that revision, so a whole-queue edit computed
+// from what this participant saw (a shuffle, an undo) never discards a change
+// someone else made meanwhile; it fails with a conflict instead.
+func (s *Service) SetPlaylist(inputs []PlaylistInput, baseRevision *uint64) error {
 	client, err := s.connected()
 	if err != nil {
 		return err
 	}
-	items := make([]protocol.PlaylistItem, 0, len(inputs))
-	for _, input := range inputs {
-		item := protocol.PlaylistItem{ID: input.ID, Label: strings.TrimSpace(input.Label), URL: input.URL, Media: input.Media}
-		if input.Source != "" || input.URL != "" {
-			result, inspectErr := mediaid.Inspect(firstNonEmpty(input.Source, input.URL), item.Label, 0)
-			if inspectErr != nil {
-				return inspectErr
+	items, skipped, err := s.resolvePlaylistInputs(inputs)
+	if err != nil {
+		return err
+	}
+	if err := s.publishPlaylist(client, items, baseRevision); err != nil {
+		return err
+	}
+	s.reportSkippedMedia(skipped)
+	return nil
+}
+
+// AppendPlaylist adds items to the end of the room's queue and reports how
+// many were added. The new items are inspected first and appended to the
+// latest queue, so changes other participants made in the meantime are kept.
+// With play set, the first new item is selected.
+func (s *Service) AppendPlaylist(inputs []PlaylistInput, play bool) (int, error) {
+	client, err := s.connected()
+	if err != nil {
+		return 0, err
+	}
+	additions, skipped, err := s.resolvePlaylistInputs(inputs)
+	if err != nil {
+		return 0, err
+	}
+	if len(additions) == 0 {
+		return 0, errors.New("nothing to add")
+	}
+	// IDs chosen here let the new item be selected wherever it ends up.
+	for index := range additions {
+		if additions[index].ID == "" {
+			if additions[index].ID, err = newPlaylistItemID(); err != nil {
+				return 0, err
 			}
+		}
+	}
+	err = s.editPlaylist(client, func(items []protocol.PlaylistItem) ([]protocol.PlaylistItem, error) {
+		return append(items, additions...), nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	s.reportSkippedMedia(skipped)
+	if play {
+		if err := client.SelectPlaylist(protocol.PlaylistSelect{ItemID: additions[0].ID, Index: len(client.Snapshot().Playlist.Items) - len(additions)}); err != nil {
+			return len(additions), err
+		}
+	}
+	return len(additions), nil
+}
+
+// RemovePlaylistItem removes an item from the queue wherever it is now. An
+// item someone else already removed is not an error.
+func (s *Service) RemovePlaylistItem(itemID string) error {
+	client, err := s.connected()
+	if err != nil {
+		return err
+	}
+	return s.editPlaylist(client, func(items []protocol.PlaylistItem) ([]protocol.PlaylistItem, error) {
+		return slices.DeleteFunc(items, func(item protocol.PlaylistItem) bool { return item.ID == itemID }), nil
+	})
+}
+
+// MovePlaylistItem moves an item to the place another item holds now, as
+// dragging a row onto another does.
+func (s *Service) MovePlaylistItem(itemID, targetID string) error {
+	client, err := s.connected()
+	if err != nil {
+		return err
+	}
+	return s.editPlaylist(client, func(items []protocol.PlaylistItem) ([]protocol.PlaylistItem, error) {
+		from := slices.IndexFunc(items, func(item protocol.PlaylistItem) bool { return item.ID == itemID })
+		to := slices.IndexFunc(items, func(item protocol.PlaylistItem) bool { return item.ID == targetID })
+		if from < 0 || to < 0 {
+			return nil, errors.New("that queue item was removed")
+		}
+		item := items[from]
+		items = slices.Delete(items, from, from+1)
+		return slices.Insert(items, to, item), nil
+	})
+}
+
+// playlistEditAttempts bounds how often an edit is rebased onto a queue that
+// keeps changing under it.
+const playlistEditAttempts = 5
+
+// editPlaylist applies change to the latest queue and publishes it on the
+// condition that the queue has not changed meanwhile. When it has, the edit
+// is redone on the newer queue, so an edit is never lost to another one.
+func (s *Service) editPlaylist(client *faroclient.Client, change func([]protocol.PlaylistItem) ([]protocol.PlaylistItem, error)) error {
+	for attempt := 1; ; attempt++ {
+		playlist := client.Snapshot().Playlist
+		items := make([]protocol.PlaylistItem, 0, len(playlist.Items)+1)
+		for _, item := range playlist.Items {
+			item.Media = cloneStreamMedia(item.Media)
+			items = append(items, item)
+		}
+		items, err := change(items)
+		if err != nil {
+			return err
+		}
+		revision := playlist.Revision
+		err = s.publishPlaylist(client, items, &revision)
+		var commandErr *faroclient.CommandError
+		if err == nil || !errors.As(err, &commandErr) || commandErr.Code != protocol.ErrorPlaylistConflict || attempt == playlistEditAttempts {
+			return err
+		}
+		waitForPlaylistRevision(client, revision)
+	}
+}
+
+// waitForPlaylistRevision waits briefly until the newer queue that caused a
+// conflict has arrived.
+func waitForPlaylistRevision(client *faroclient.Client, stale uint64) {
+	deadline := time.Now().Add(2 * time.Second)
+	for client.Snapshot().Playlist.Revision == stale && time.Now().Before(deadline) {
+		select {
+		case <-client.Done():
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func newPlaylistItemID() (string, error) {
+	var data [16]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(data[:]), nil
+}
+
+// skippedMedia is a queue entry that could not be added, such as a file that
+// was moved or cannot be read.
+type skippedMedia struct {
+	source string
+	err    error
+}
+
+// resolvePlaylistInputs turns the page's queue entries into room items,
+// identifying new local files and URLs. A local file that cannot be read is
+// skipped instead of failing the whole batch; it is an error only when
+// nothing new could be added at all.
+func (s *Service) resolvePlaylistInputs(inputs []PlaylistInput) ([]protocol.PlaylistItem, []skippedMedia, error) {
+	items := make([]protocol.PlaylistItem, 0, len(inputs))
+	probes := make(map[int]string)
+	var skipped []skippedMedia
+	added := 0
+	for _, input := range inputs {
+		item := protocol.PlaylistItem{ID: input.ID, Label: strings.TrimSpace(input.Label), URL: input.URL, Media: cloneStreamMedia(input.Media)}
+		localPath := ""
+		if input.Source != "" || input.URL != "" {
+			source := firstNonEmpty(input.Source, input.URL)
+			result, inspectErr := mediaid.Inspect(source, item.Label, max(input.DurationSeconds, 0))
+			if inspectErr != nil {
+				skipped = append(skipped, skippedMedia{source: source, err: inspectErr})
+				continue
+			}
+			added++
 			item.URL, item.Media = result.URL, &result.Media
 			if result.Path != "" {
 				s.rememberSource(result.Media.Fingerprint, result.Path)
+				localPath = result.Path
 			}
 		}
 		if item.Label == "" && item.Media != nil {
 			item.Label = item.Media.Title
 		}
+		// Fill in durations the queue does not know yet: new local files, and
+		// items already in the queue for which this participant has a copy.
+		if item.Media != nil && item.Media.DurationSeconds <= 0 {
+			if input.DurationSeconds > 0 {
+				item.Media.DurationSeconds = input.DurationSeconds
+			} else if localPath == "" && item.URL == "" {
+				s.mu.RLock()
+				localPath = s.sources[item.Media.Fingerprint]
+				s.mu.RUnlock()
+			}
+			if item.Media.DurationSeconds <= 0 && localPath != "" {
+				probes[len(items)] = localPath
+			}
+		}
 		items = append(items, item)
 	}
-	if err := client.SetPlaylist(protocol.PlaylistSet{Items: items}); err != nil {
+	if len(skipped) != 0 && added == 0 {
+		return nil, nil, skipped[0].err
+	}
+	probePlaylistDurations(items, probes)
+	return items, skipped, nil
+}
+
+func (s *Service) publishPlaylist(client *faroclient.Client, items []protocol.PlaylistItem, baseRevision *uint64) error {
+	if err := client.SetPlaylist(protocol.PlaylistSet{Items: items, BaseRevision: baseRevision}); err != nil {
 		return err
 	}
 	s.mediaLoadMu.Lock()
@@ -175,12 +363,69 @@ func (s *Service) SetPlaylist(inputs []PlaylistInput) error {
 	return nil
 }
 
-func (s *Service) SelectPlaylist(index int) error {
+func skipReason(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "the file no longer exists"
+	case errors.Is(err, fs.ErrPermission):
+		return "Faro is not allowed to read it"
+	}
+	return err.Error()
+}
+
+// reportSkippedMedia tells the page which entries of an otherwise successful
+// batch were left out.
+func (s *Service) reportSkippedMedia(skipped []skippedMedia) {
+	if len(skipped) == 0 {
+		return
+	}
+	name := filepath.Base(skipped[0].source)
+	message := fmt.Sprintf("%s could not be added: %s", name, skipReason(skipped[0].err))
+	if len(skipped) > 1 {
+		message = fmt.Sprintf("%d files could not be added because they are missing or unreadable, including %s", len(skipped), name)
+	}
+	s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "playlist_skipped", Message: message}})
+}
+
+// probePlaylistDurations reads durations for the given item indexes in
+// parallel. Container headers are read directly and are fast; the ffprobe
+// fallback for other formats is not, so a large folder drop is spread out.
+func probePlaylistDurations(items []protocol.PlaylistItem, paths map[int]string) {
+	if len(paths) == 0 {
+		return
+	}
+	type job struct {
+		index int
+		path  string
+	}
+	jobs := make(chan job)
+	var wait sync.WaitGroup
+	for range min(8, len(paths)) {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for next := range jobs {
+				if duration := mediaid.ProbeDuration(next.path); duration > 0 {
+					items[next.index].Media.DurationSeconds = duration
+				}
+			}
+		}()
+	}
+	for index, path := range paths {
+		jobs <- job{index: index, path: path}
+	}
+	close(jobs)
+	wait.Wait()
+}
+
+// SelectPlaylist selects the queue item with itemID wherever it is now; index
+// is used on its own only when itemID is empty or the server predates IDs.
+func (s *Service) SelectPlaylist(index int, itemID string) error {
 	client, err := s.connected()
 	if err != nil {
 		return err
 	}
-	return client.SelectPlaylist(index)
+	return client.SelectPlaylist(protocol.PlaylistSelect{Index: index, ItemID: itemID})
 }
 
 func (s *Service) SpinPlaylistWheel() error {
@@ -189,60 +434,6 @@ func (s *Service) SpinPlaylistWheel() error {
 		return err
 	}
 	return client.SpinPlaylistWheel()
-}
-
-func (s *Service) OpenMedia(source string) error {
-	s.mediaLoadMu.Lock()
-	defer s.mediaLoadMu.Unlock()
-	client, mediaPlayer, err := s.ensurePlayer(playerStartExplicit)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := s.mediaOperationContext(s.root)
-	defer cancel()
-	identity, err := mediaid.Inspect(source, "", 0)
-	if err != nil {
-		return err
-	}
-	s.beginMediaTransition()
-	finished := false
-	defer func() {
-		if !finished {
-			s.endMediaTransition()
-		}
-	}()
-	info, err := s.openPlayerSource(ctx, mediaPlayer, source)
-	if err != nil {
-		return err
-	}
-	state := s.waitForPlayerMedia(ctx, mediaPlayer, info.Duration)
-	if err := mediaPlayer.Seek(ctx, 0); err != nil {
-		return err
-	}
-	if state.Title != "" {
-		identity.Media.Title = state.Title
-	}
-	if info.Title != "" {
-		identity.Media.Title = info.Title
-	}
-	identity.Media.DurationSeconds = firstPositive(info.Duration, state.DurationSeconds)
-	if identity.Path != "" {
-		s.rememberSource(identity.Media.Fingerprint, identity.Path)
-	}
-	if err := client.SetMedia(protocol.MediaSet{Media: &identity.Media}); err != nil {
-		return err
-	}
-	_, err = s.finishMediaTransition(ctx, mediaPlayer, state.Paused, func(paused bool) error {
-		return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: 0, Paused: paused, Rate: normalizedRate(state.Rate), Seek: true})
-	})
-	finished = true
-	if err == nil {
-		s.mu.Lock()
-		s.selectedItem, s.selectedItemIdentity = "", ""
-		s.manualSource = source
-		s.mu.Unlock()
-	}
-	return err
 }
 
 func (s *Service) reopenMediaAtRoomClock(source string, paused bool) error {
@@ -465,7 +656,7 @@ func (s *Service) openPlayerSource(ctx context.Context, mediaPlayer player.Playe
 	}
 	if resolvedPlayer, ok := mediaPlayer.(player.ResolvedStreamPlayer); ok {
 		err = resolvedPlayer.OpenResolved(ctx, player.ResolvedStream{
-			VideoURL: stream.VideoURL, AudioURL: stream.AudioURL, CombinedURL: stream.CombinedURL,
+			VideoURL: stream.VideoURL, AudioURL: stream.AudioURL, CombinedURL: stream.CombinedURL, Title: stream.Info.Title,
 		})
 	} else if stream.CombinedURL != "" {
 		err = mediaPlayer.Open(ctx, stream.CombinedURL)
@@ -484,7 +675,7 @@ func (s *Service) openPlayerSource(ctx context.Context, mediaPlayer player.Playe
 			return youtube.Info{}, fmt.Errorf("high-quality YouTube stream failed to open (%v); web_safari fallback failed: %w", err, fallbackErr)
 		}
 		if resolvedPlayer, ok := mediaPlayer.(player.ResolvedStreamPlayer); ok {
-			fallbackErr = resolvedPlayer.OpenResolved(ctx, player.ResolvedStream{CombinedURL: fallback.CombinedURL})
+			fallbackErr = resolvedPlayer.OpenResolved(ctx, player.ResolvedStream{CombinedURL: fallback.CombinedURL, Title: fallback.Info.Title})
 		} else {
 			fallbackErr = mediaPlayer.Open(ctx, fallback.CombinedURL)
 		}
@@ -564,7 +755,7 @@ func (s *Service) ChangeYouTubeQuality(source string, height int) error {
 	_, err = s.finishMediaTransition(ctx, mediaPlayer, state.Paused, func(paused bool) error {
 		return client.SetPlayback(protocol.PlaybackSet{
 			PositionSeconds: state.PositionSeconds, Paused: paused,
-			Rate: normalizedRate(state.Rate), Seek: true,
+			Rate: publishedRate(client, state.Rate), Seek: true,
 		})
 	})
 	finished = true
@@ -747,7 +938,7 @@ func (s *Service) IndexMediaDirectory(directory string) (int, error) {
 	count := 0
 	err := filepath.WalkDir(directory, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			return skipUnreadable(directory, path, entry, walkErr)
 		}
 		if entry.IsDir() || !isMediaExtension(filepath.Ext(entry.Name())) {
 			return nil
@@ -797,6 +988,19 @@ func isMediaExtension(extension string) bool {
 	}
 }
 
+// skipUnreadable lets a directory walk continue past a subfolder or file it
+// cannot read, such as "System Volume Information" or a folder without
+// permission. Only an unreadable starting folder fails the walk.
+func skipUnreadable(root, path string, entry fs.DirEntry, walkErr error) error {
+	if path == root {
+		return walkErr
+	}
+	if entry != nil && entry.IsDir() {
+		return fs.SkipDir
+	}
+	return nil
+}
+
 func MediaFilesInDirectory(directory string, maximum int) ([]string, error) {
 	directory = strings.TrimSpace(directory)
 	if directory == "" {
@@ -808,13 +1012,13 @@ func MediaFilesInDirectory(directory string, maximum int) ([]string, error) {
 	files := make([]string, 0)
 	err := filepath.WalkDir(directory, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			return skipUnreadable(directory, path, entry, walkErr)
 		}
 		if entry.IsDir() || !isMediaExtension(filepath.Ext(entry.Name())) {
 			return nil
 		}
 		if len(files) >= maximum {
-			return errors.New("folder exceeds the 500-item playlist limit")
+			return fmt.Errorf("folder has more media files than the %d queue slots available", maximum)
 		}
 		files = append(files, path)
 		return nil
@@ -844,7 +1048,7 @@ func ExpandMediaPaths(paths []string, maximum int) ([]string, error) {
 		}
 		remaining := maximum - len(files)
 		if remaining <= 0 {
-			return nil, errors.New("dropped media exceeds the 500-item playlist limit")
+			return nil, fmt.Errorf("dropped media exceeds the %d-item queue limit", maximum)
 		}
 		directoryFiles, err := MediaFilesInDirectory(path, remaining)
 		if err != nil {
@@ -853,7 +1057,7 @@ func ExpandMediaPaths(paths []string, maximum int) ([]string, error) {
 		files = append(files, directoryFiles...)
 	}
 	if len(files) > maximum {
-		return nil, errors.New("dropped media exceeds the 500-item playlist limit")
+		return nil, fmt.Errorf("dropped media exceeds the %d-item queue limit", maximum)
 	}
 	return files, nil
 }

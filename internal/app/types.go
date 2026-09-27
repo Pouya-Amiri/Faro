@@ -40,6 +40,7 @@ type Event struct {
 	Connection      *ConnectionStatus         `json:"connection,omitempty"`
 	Wheel           *protocol.PlaylistWheel   `json:"wheel,omitempty"`
 	Stream          *StreamStatus             `json:"stream,omitempty"`
+	Sync            *SyncStatus               `json:"sync,omitempty"`
 	ServerNowUnixMs int64                     `json:"serverNowUnixMs,omitempty"`
 }
 
@@ -50,6 +51,21 @@ type StreamStatus struct {
 	State   string `json:"state"`
 	OfferID string `json:"offerId,omitempty"`
 	Route   string `json:"route,omitempty"`
+	// Cache progress of an active stream, reported about once a second.
+	CachedBytes    int64   `json:"cachedBytes,omitempty"`
+	TotalBytes     int64   `json:"totalBytes,omitempty"`
+	BytesPerSecond float64 `json:"bytesPerSecond,omitempty"`
+	// CachedRanges are the cached parts as [start, end) fractions of the file.
+	CachedRanges [][2]float64 `json:"cachedRanges,omitempty"`
+}
+
+// SyncStatus is how closely this participant's own player follows the room.
+// Other participants' positions are not shared, so it cannot speak for them.
+type SyncStatus struct {
+	// State is "synced", "catching-up", "buffering" or "idle" (no player, or
+	// media still loading).
+	State        string  `json:"state"`
+	DriftSeconds float64 `json:"driftSeconds,omitempty"`
 }
 
 type ConnectionStatus struct {
@@ -64,6 +80,9 @@ type PlaylistInput struct {
 	Source string          `json:"source,omitempty"`
 	URL    string          `json:"url,omitempty"`
 	Media  *protocol.Media `json:"media,omitempty"`
+	// DurationSeconds is a duration the page already knows, such as the one
+	// yt-dlp reported for a YouTube link.
+	DurationSeconds float64 `json:"durationSeconds,omitempty"`
 }
 
 type ServerRequest struct {
@@ -107,61 +126,71 @@ type Service struct {
 	availabilitySent   []string
 	syncApplyMu        sync.Mutex
 
-	mu                     sync.RWMutex
-	sessionCtx             context.Context
-	cancel                 context.CancelFunc
-	client                 *faroclient.Client
-	player                 player.Player
-	playerCancel           context.CancelFunc
-	playerContext          context.Context
-	playerDismissed        bool
-	playerCloseGeneration  uint64
-	wheelID                string
-	wheelCloseGeneration   uint64
-	sync                   *syncer.Controller
-	invite                 invite.Invite
-	ownerToken             string
-	lastPlayer             player.State
-	expectedPause          *bool
-	expectedSeek           *float64
-	expectedRate           *float64
-	expectedUntil          time.Time
-	suppressUntil          time.Time
-	localPlaybackPending   bool
-	openingMedia           bool
-	transitionPaused       *bool
-	selectedItem           string
-	selectedItemIdentity   string
-	lastRemoteRevision     uint64
-	currentSource          string
-	manualSource           string
-	currentPlayerSource    string
-	youtubeQualities       map[string]int
-	sponsorBlock           bool
-	sponsorSegments        []youtube.Segment
-	lastSponsorEnd         float64
-	request                ConnectionRequest
-	startPlayer            func(context.Context, ConnectionRequest) (player.Player, error)
-	youtube                youtubeResolver
-	sources                map[string]string
-	localServer            *faroserver.Server
-	serverStarting         bool
-	serverCancel           context.CancelFunc
-	serverStatus           LocalServerStatus
-	streamFactory          streamtransport.Factory
-	streamPublisher        *mediastream.HostedPublisher
-	streamOfferID          string
-	streamOfferItemID      string
-	streamOfferMedia       *protocol.Media
-	streamCapabilities     map[string]string
-	pendingStreams         map[string]*pendingStream
-	pendingRequestOffers   map[string]string
-	streamGateway          *mediastream.Gateway
-	streamActivationCancel context.CancelFunc
-	streamActivation       *pendingStream
-	streamRequestID        string
-	streamReceiveItemID    string
-	streamIdentity         *protocol.Media
+	mu                      sync.RWMutex
+	sessionCtx              context.Context
+	connectCancel           context.CancelFunc
+	cancel                  context.CancelFunc
+	client                  *faroclient.Client
+	player                  player.Player
+	playerCancel            context.CancelFunc
+	playerContext           context.Context
+	playerDismissed         bool
+	playerCloseGeneration   uint64
+	wheelID                 string
+	wheelCloseGeneration    uint64
+	sync                    *syncer.Controller
+	invite                  invite.Invite
+	ownerToken              string
+	lastPlayer              player.State
+	expectedPause           *bool
+	expectedSeek            *float64
+	expectedRate            *float64
+	expectedUntil           time.Time
+	suppressUntil           time.Time
+	localPlaybackPending    bool
+	openingMedia            bool
+	transitionPaused        *bool
+	selectedItem            string
+	selectedItemIdentity    string
+	lastRemoteRevision      uint64
+	currentSource           string
+	manualSource            string
+	currentPlayerSource     string
+	youtubeQualities        map[string]int
+	sponsorBlock            bool
+	sponsorSegments         []youtube.Segment
+	lastSponsorEnd          float64
+	request                 ConnectionRequest
+	startPlayer             func(context.Context, ConnectionRequest) (player.Player, error)
+	youtube                 youtubeResolver
+	sources                 map[string]string
+	localServer             *faroserver.Server
+	serverStarting          bool
+	serverCancel            context.CancelFunc
+	serverStatus            LocalServerStatus
+	streamFactory           streamtransport.Factory
+	streamPublisher         *mediastream.HostedPublisher
+	streamOfferID           string
+	streamOfferItemID       string
+	streamOfferMedia        *protocol.Media
+	streamOfferAuto         bool
+	autoOffer               bool
+	autoOfferTimer          *time.Timer
+	autoOfferKey            string
+	autoOfferSuppressedItem string
+	streamCapabilities      map[string]string
+	pendingStreams          map[string]*pendingStream
+	pendingRequestOffers    map[string]string
+	streamGateway           *mediastream.Gateway
+	streamActivationCancel  context.CancelFunc
+	streamActivation        *pendingStream
+	streamRequestID         string
+	streamReceiveItemID     string
+	streamIdentity          *protocol.Media
+	chat                    chatOverlay
+	streamCache             mediastream.CacheOptions
+	syncState               string
+	syncDrift               float64
 }
 
 func New(root context.Context, sink EventSink) *Service {
@@ -173,7 +202,7 @@ func New(root context.Context, sink EventSink) *Service {
 	}
 	return &Service{
 		root: root, sink: sink, sources: make(map[string]string), startPlayer: startPlayer,
-		youtube: youtube.NewResolver(), youtubeQualities: make(map[string]int), sponsorBlock: true,
+		youtube: youtube.NewResolver(), youtubeQualities: make(map[string]int), sponsorBlock: true, autoOffer: true,
 		streamFactory: tailcattransport.Factory{}, streamCapabilities: make(map[string]string),
 		pendingStreams: make(map[string]*pendingStream), pendingRequestOffers: make(map[string]string),
 	}

@@ -96,9 +96,12 @@ Local paths are never sent to the room server. File availability is represented
 by content-derived fingerprints, and shared file transfers are limited to the
 file explicitly offered by a participant.
 
-For networks where peer-to-peer connectivity is unavailable, choose
-**Advanced hosting** to use a reachable Faro server and explicit network
-settings.
+Easy hosting works on restrictive networks too: when a direct connection
+cannot be made, room traffic (playback, chat and the queue) is relayed through
+Tailcat's encrypted relay, which cannot read it. Sharing a file needs a direct
+peer-to-peer path, so on such networks each friend needs their own copy.
+**Advanced hosting** uses a reachable Faro server and explicit network settings
+instead.
 
 ## Build from source
 

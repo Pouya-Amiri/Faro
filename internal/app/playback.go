@@ -12,6 +12,7 @@ import (
 	"github.com/Pouya-Amiri/Faro/internal/player/mpv"
 	"github.com/Pouya-Amiri/Faro/internal/player/vlc"
 	"github.com/Pouya-Amiri/Faro/internal/protocol"
+	"github.com/Pouya-Amiri/Faro/internal/syncer"
 	"github.com/Pouya-Amiri/Faro/internal/youtube"
 )
 
@@ -203,7 +204,7 @@ func (s *Service) skipSponsorBlock(ctx context.Context, client playbackClient, m
 		return false
 	}
 	if err := client.SetPlayback(protocol.PlaybackSet{
-		PositionSeconds: target, Paused: state.Paused, Rate: normalizedRate(state.Rate), Seek: true, SponsorBlock: true,
+		PositionSeconds: target, Paused: state.Paused, Rate: publishedRate(client, state.Rate), Seek: true, SponsorBlock: true,
 	}); err != nil {
 		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "sponsorblock", Message: err.Error()}})
 	}
@@ -288,6 +289,12 @@ func expectedPosition(state player.State, now time.Time) float64 {
 		return state.PositionSeconds
 	}
 	return state.PositionSeconds + now.Sub(state.ObservedAt).Seconds()*state.Rate
+}
+
+// publishedRate converts the player's instantaneous rate, which may include a
+// drift correction, into the rate to publish for the room.
+func publishedRate(client playbackClient, observed float64) float64 {
+	return syncer.NominalRate(normalizedRate(client.Snapshot().Playback.Rate), observed)
 }
 
 func normalizedRate(value float64) float64 {

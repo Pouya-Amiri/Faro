@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
+	"time"
 
 	"github.com/Pouya-Amiri/Faro/frontend"
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -21,7 +23,17 @@ const (
 func main() {
 	preferWayland()
 
+	var tray *trayController
+	var desktop *Desktop
 	wailsApp := application.New(application.Options{
+		SingleInstance: singleInstance(func(data application.SecondInstanceData) {
+			if desktop != nil && len(data.Args) > 1 {
+				desktop.queueLaunchPaths(launchPaths(data.Args[1:], data.WorkingDir))
+			}
+			if tray != nil {
+				tray.showWindow()
+			}
+		}),
 		Name:        "Faro",
 		Description: "Secure synchronized media playback",
 		Assets: application.AssetOptions{
@@ -35,31 +47,40 @@ func main() {
 		},
 	})
 
-	desktop := NewDesktop(wailsApp)
+	background := loadWindowBackground()
+	desktop = NewDesktop(wailsApp, background)
+	desktop.launchPaths = launchPaths(os.Args[1:], workingDirectory())
 	wailsApp.RegisterService(application.NewService(desktop))
 
 	mainWindow := wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
-		Name:             "main",
-		Title:            "Faro",
-		URL:              "/",
-		Width:            1360,
-		Height:           860,
-		MinWidth:         windowMinWidth,
-		MinHeight:        windowMinHeight,
-		Frameless:        runtime.GOOS != "darwin",
+		Name:      "main",
+		Title:     "Faro",
+		URL:       "/",
+		Width:     1360,
+		Height:    860,
+		MinWidth:  windowMinWidth,
+		MinHeight: windowMinHeight,
+		// Faro draws its own title bar. On Linux GTK keeps its client-side
+		// decorations (corners, shadow, resize borders) and only its title bar
+		// is replaced; see surface_linux.go.
+		Frameless:        runtime.GOOS != "darwin" && !nativeClientDecorations,
+		Hidden:           revealWhenReady,
 		EnableFileDrop:   true,
-		BackgroundColour: application.NewRGB(24, 24, 26),
+		BackgroundColour: background,
+		// No InvisibleTitleBarHeight: Wails starts a native window drag for any
+		// click in that band, which swallowed clicks on the top bar's buttons.
+		// The page's --wails-draggable regions already move the window.
 		Mac: application.MacWindow{
-			TitleBar:                application.MacTitleBarHiddenInset,
-			InvisibleTitleBarHeight: 38,
+			TitleBar: application.MacTitleBarHiddenInset,
 		},
 		Linux: application.LinuxWindow{
-			// The frameless surface itself is shaped once the GTK toplevel
-			// exists; see surface_linux.go.
-			WebviewGpuPolicy: application.WebviewGpuPolicyNever,
+			WebviewGpuPolicy: webviewGpuPolicy(),
 		},
 	})
 	desktop.setWindow(mainWindow)
+	desktop.watchWindowChrome()
+	tray = setupTray(wailsApp, mainWindow, desktop)
+	desktop.tray = tray
 
 	mainWindow.OnWindowEvent(events.Common.WindowFilesDropped, func(event *application.WindowEvent) {
 		wailsApp.Event.Emit("faro:file-drop", map[string]any{
@@ -67,25 +88,56 @@ func main() {
 			"target": event.Context().DropTargetDetails(),
 		})
 	})
-	// Faro is frameless, so Faro owns the window shape: rounded while floating,
-	// square while maximised, fullscreen or tiled. This is a no-op away from
-	// Linux, where the toolkit or window manager already draws the corners.
-	syncSurface := func(*application.WindowEvent) { syncWindowSurface(mainWindow) }
+	// The page reports window state so its own controls can show the restore
+	// icon and square corners while maximised or fullscreen.
+	emitWindowState := func(*application.WindowEvent) {
+		wailsApp.Event.Emit("faro:window-state", map[string]bool{
+			"maximised":  mainWindow.IsMaximised(),
+			"fullscreen": mainWindow.IsFullscreen(),
+		})
+	}
 	for _, eventType := range []events.WindowEventType{
-		events.Common.WindowRuntimeReady,
 		events.Common.WindowMaximise,
 		events.Common.WindowUnMaximise,
 		events.Common.WindowFullscreen,
 		events.Common.WindowUnFullscreen,
+		events.Common.WindowRestore,
 	} {
-		mainWindow.OnWindowEvent(eventType, syncSurface)
+		mainWindow.OnWindowEvent(eventType, emitWindowState)
 	}
-	watchWindowSurface(mainWindow)
+	if revealWhenReady {
+		// The page calls Desktop.WindowReady after its first render. These
+		// fallbacks guarantee the window still appears if it never does.
+		mainWindow.OnWindowEvent(events.Common.WindowRuntimeReady, func(*application.WindowEvent) {
+			time.AfterFunc(2*time.Second, desktop.revealWindow)
+		})
+		wailsApp.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
+			time.AfterFunc(6*time.Second, desktop.revealWindow)
+		})
+	}
 
 	if err := wailsApp.Run(); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "faro:", err)
 		os.Exit(1)
 	}
+}
+
+// webviewGpuPolicy chooses WebKitGTK's rendering path. CPU rendering is the
+// default: after the paint-cost fixes it holds 60 fps, while the GPU path is
+// known to render blank windows with some drivers. The Preferences switch
+// opts in (it helps most on high-refresh displays), and
+// FARO_HARDWARE_ACCELERATION=on|off overrides both for one launch.
+func webviewGpuPolicy() application.WebviewGpuPolicy {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("FARO_HARDWARE_ACCELERATION"))) {
+	case "1", "on", "true", "yes":
+		return application.WebviewGpuPolicyAlways
+	case "0", "off", "false", "no":
+		return application.WebviewGpuPolicyNever
+	}
+	if loadWindowSettings().HardwareAcceleration {
+		return application.WebviewGpuPolicyAlways
+	}
+	return application.WebviewGpuPolicyNever
 }
 
 // preferWayland makes the modern backend the first choice while retaining an

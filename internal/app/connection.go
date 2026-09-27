@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -32,6 +34,9 @@ func (s *Service) Connect(request ConnectionRequest) error {
 	}
 	s.Disconnect()
 	ctx, cancel := context.WithCancel(s.root)
+	s.mu.Lock()
+	s.connectCancel = cancel
+	s.mu.Unlock()
 	client, err := faroclient.Connect(ctx, faroclient.Config{
 		DialContext: tailcattransport.RoomDialer(parsed.Tailcat),
 		Address:     parsed.Address, Fingerprint: parsed.Fingerprint,
@@ -39,6 +44,16 @@ func (s *Service) Connect(request ConnectionRequest) error {
 		Name: request.Name, Room: parsed.Room, ClientVersion: request.ClientVersion,
 		Capabilities: []protocol.Capability{protocol.CapabilityMediaStreamV1, protocol.CapabilityMediaAvailabilityV1},
 	})
+	s.mu.Lock()
+	s.connectCancel = nil
+	s.mu.Unlock()
+	if ctx.Err() != nil {
+		if client != nil {
+			_ = client.Close()
+		}
+		cancel()
+		return ErrConnectCancelled
+	}
 	if err != nil {
 		cancel()
 		return err
@@ -78,6 +93,27 @@ func (s *Service) Connect(request ConnectionRequest) error {
 	return nil
 }
 
+// ErrConnectCancelled is returned by Connect after CancelConnect.
+var ErrConnectCancelled = errors.New("connection cancelled")
+
+// CancelConnect stops a connection attempt in progress, including starting
+// the local server it would connect to. A connected room is not affected.
+func (s *Service) CancelConnect() {
+	s.mu.Lock()
+	cancelConnect := s.connectCancel
+	var cancelServer context.CancelFunc
+	if s.serverStarting {
+		cancelServer = s.serverCancel
+	}
+	s.mu.Unlock()
+	if cancelConnect != nil {
+		cancelConnect()
+	}
+	if cancelServer != nil {
+		cancelServer()
+	}
+}
+
 func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) {
 	playlistUpdates := make(chan struct{}, 1)
 	go func() {
@@ -95,6 +131,11 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 	for {
 		select {
 		case event := <-client.Events():
+			if event.Type == protocol.TypePong {
+				// Clock samples change no room state; re-rendering the whole UI
+				// every ping interval only causes flicker.
+				continue
+			}
 			if event.StreamRequest != nil {
 				go s.handleStreamRequest(ctx, client, *event.StreamRequest)
 			}
@@ -123,8 +164,14 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 			if event.Type == protocol.TypePlaylistUpdated || event.Type == protocol.TypeStateSnapshot || event.Type == protocol.TypeStreamOffersUpdated {
 				go s.reconcilePlaylistStreams(ctx, client)
 			}
+			switch event.Type {
+			case protocol.TypePlaylistUpdated, protocol.TypeStateSnapshot, protocol.TypeStreamOffersUpdated,
+				protocol.TypeMediaUpdated, protocol.TypeParticipantsUpdated:
+				s.scheduleAutoOffer(ctx, client)
+			}
 			if event.Chat != nil {
 				s.sink(Event{Kind: "chat", Chat: event.Chat})
+				s.showChatInPlayer(event.Chat)
 			}
 			if event.Activity != nil {
 				s.sink(Event{Kind: "activity", Activity: event.Activity})
@@ -136,7 +183,9 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 				s.applyWheelPlaybackIntent(*event.Wheel)
 				s.sink(Event{Kind: "wheel", Wheel: event.Wheel, ServerNowUnixMs: client.ServerNow().UnixMilli()})
 			}
-			s.emitSnapshot()
+			if changesRoomState(event.Type) {
+				s.emitSnapshot()
+			}
 		case <-client.Done():
 			if ctx.Err() == nil {
 				s.reconnect(ctx, client)
@@ -193,12 +242,17 @@ func (s *Service) syncLoop(ctx context.Context) {
 			}
 			snapshot := client.Snapshot()
 			if !s.shouldApplyRemote(snapshot) {
+				s.reportSync(SyncStatus{State: "idle"})
 				continue
 			}
 			s.mu.RLock()
 			force := snapshot.Playback.Seek && snapshot.Playback.SetBy != snapshot.SelfID && snapshot.Playback.Revision != s.lastRemoteRevision
+			controller := s.sync
 			s.mu.RUnlock()
 			err := s.applyRemote(ctx, snapshot.Playback, force)
+			if controller != nil {
+				s.reportSync(syncStatusOf(controller.Status()))
+			}
 			if err != nil && err.Error() != lastError {
 				lastError = err.Error()
 				s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "player_sync", Message: lastError}})
@@ -241,7 +295,7 @@ func (s *Service) reconnect(ctx context.Context, failed *faroclient.Client) {
 		}
 		request, parsed, ownerToken := s.request, s.invite, s.ownerToken
 		s.mu.RUnlock()
-		delay := time.Duration(min(attempt, 15)) * time.Second
+		delay := reconnectDelay(attempt)
 		s.emitConnection("reconnecting", attempt, fmt.Sprintf("retrying in %s", delay))
 		timer := time.NewTimer(delay)
 		select {
@@ -258,6 +312,11 @@ func (s *Service) reconnect(ctx context.Context, failed *faroclient.Client) {
 			Capabilities: []protocol.Capability{protocol.CapabilityMediaStreamV1, protocol.CapabilityMediaAvailabilityV1},
 		})
 		if err != nil {
+			if message, permanent := permanentConnectFailure(err); permanent {
+				s.emitConnection("disconnected", attempt, message)
+				s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "connection_rejected", Message: message}})
+				return
+			}
 			s.emitConnection("reconnecting", attempt, err.Error())
 			continue
 		}
@@ -503,6 +562,7 @@ func (s *Service) Disconnect() {
 	streams := s.detachStreamingLocked()
 	s.sessionCtx, s.cancel, s.playerCancel, s.client, s.player, s.sync = nil, nil, nil, nil, nil, nil
 	s.playerDismissed = false
+	s.syncState, s.syncDrift = "", 0
 	s.mu.Unlock()
 	s.playerLifecycleMu.Unlock()
 	if cancel != nil {
@@ -520,6 +580,14 @@ func (s *Service) Disconnect() {
 	streams.close()
 }
 
+// InRoom reports whether this participant is in a room, including while it
+// reconnects to one.
+func (s *Service) InRoom() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sessionCtx != nil
+}
+
 func (s *Service) Shutdown() {
 	s.LeaveRoom()
 }
@@ -527,4 +595,77 @@ func (s *Service) Shutdown() {
 func (s *Service) LeaveRoom() {
 	s.Disconnect()
 	s.StopServer()
+	// Invites describe the room just left; copying one afterwards would hand
+	// out a stale (or, with the owner token, sensitive) link.
+	s.mu.Lock()
+	s.invite, s.ownerToken = invite.Invite{}, ""
+	s.mu.Unlock()
 }
+
+// reconnectDelay grows by a second per attempt up to 15 s, with jitter so a
+// room whose server restarted is not hit by every client at once.
+func reconnectDelay(attempt int) time.Duration {
+	base := time.Duration(min(attempt, 15)) * time.Second
+	return time.Duration(float64(base) * (0.8 + 0.4*rand.Float64()))
+}
+
+// permanentConnectFailure explains a reconnect failure that retrying cannot
+// fix, such as a host restarting Easy hosting (new join token and address).
+func permanentConnectFailure(err error) (string, bool) {
+	if errors.Is(err, faroclient.ErrFingerprintMismatch) {
+		return "The server's identity changed since this invite was made. Ask for a new invite to rejoin.", true
+	}
+	var rejected *faroclient.RejectedError
+	if !errors.As(err, &rejected) || !rejected.Permanent() {
+		return "", false
+	}
+	switch rejected.Code {
+	case "unauthorized":
+		return "This invite no longer works; the host may have restarted hosting. Ask for a new invite to rejoin.", true
+	case "invalid_owner_token":
+		return "This room now has a different owner, so the owner invite no longer works. Rejoin with a regular invite.", true
+	}
+	return "This version of Faro cannot rejoin the room: " + rejected.Message, true
+}
+
+// changesRoomState reports whether a server message can change the room
+// snapshot. Chat, activity, errors and directed stream messages carry their
+// own events; sending the whole snapshot for them only re-renders the UI.
+func changesRoomState(messageType protocol.MessageType) bool {
+	switch messageType {
+	case protocol.TypeChatMessage, protocol.TypeActivityMessage, protocol.TypeError,
+		protocol.TypeStreamRequested, protocol.TypeStreamGranted, protocol.TypeStreamRevoked:
+		return false
+	}
+	return true
+}
+
+func syncStatusOf(status syncer.Status) SyncStatus {
+	switch {
+	case status.MeasuredAt.IsZero():
+		return SyncStatus{State: "idle"}
+	case status.Buffering:
+		return SyncStatus{State: "buffering"}
+	case status.InSync():
+		return SyncStatus{State: "synced", DriftSeconds: status.DriftSeconds}
+	}
+	return SyncStatus{State: "catching-up", DriftSeconds: status.DriftSeconds}
+}
+
+// reportSync tells the page when the sync state changes, or when the drift
+// its tooltip shows has moved by a visible amount. Drift jitter below that is
+// not worth a message every second.
+func (s *Service) reportSync(status SyncStatus) {
+	s.mu.Lock()
+	changed := s.syncState != status.State || math.Abs(s.syncDrift-status.DriftSeconds) >= syncDriftStep
+	if changed {
+		s.syncState, s.syncDrift = status.State, status.DriftSeconds
+	}
+	s.mu.Unlock()
+	if changed {
+		s.sink(Event{Kind: "sync", Sync: &status})
+	}
+}
+
+// syncDriftStep is the smallest drift change worth showing in the tooltip.
+const syncDriftStep = 0.05

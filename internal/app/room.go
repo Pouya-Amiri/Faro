@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"math"
 	"time"
 
 	faroclient "github.com/Pouya-Amiri/Faro/internal/client"
@@ -117,7 +118,7 @@ func (s *Service) SetPaused(paused bool) error {
 	if err != nil {
 		return err
 	}
-	return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: state.PositionSeconds, Paused: paused, Rate: normalizedRate(state.Rate)})
+	return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: state.PositionSeconds, Paused: paused, Rate: publishedRate(client, state.Rate)})
 }
 
 // sourceForPlayback resolves only the room's current queue selection. Explicit
@@ -145,9 +146,23 @@ func (s *Service) sourceForPlayback(client *faroclient.Client) string {
 }
 
 func (s *Service) Seek(seconds float64) error {
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return errors.New("seek position must be a number")
+	}
+	seconds = max(seconds, 0)
 	client, mediaPlayer, err := s.connectedPlayer()
 	if err != nil {
-		return err
+		// Like pause and speed, the position is room state: with no local
+		// player it is still published, and players follow it when opened.
+		client, err = s.connected()
+		if err != nil {
+			return err
+		}
+		snapshot := localClockSnapshot(client)
+		return client.SetPlayback(protocol.PlaybackSet{
+			PositionSeconds: seconds, Paused: snapshot.Playback.Paused,
+			Rate: normalizedRate(snapshot.Playback.Rate), Seek: true,
+		})
 	}
 	ctx, cancel := context.WithTimeout(s.root, 3*time.Second)
 	defer cancel()
@@ -161,16 +176,24 @@ func (s *Service) Seek(seconds float64) error {
 	if err != nil {
 		return err
 	}
-	return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: seconds, Paused: state.Paused, Rate: normalizedRate(state.Rate), Seek: true})
+	return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: seconds, Paused: state.Paused, Rate: publishedRate(client, state.Rate), Seek: true})
 }
 
 func (s *Service) SetRate(rate float64) error {
-	if rate < 0.25 || rate > 4 {
+	if rate < MinPlaybackRate || rate > MaxPlaybackRate {
 		return errors.New("playback rate must be between 0.25 and 4")
 	}
+	rate = math.Round(rate*100) / 100
 	client, mediaPlayer, err := s.connectedPlayer()
 	if err != nil {
-		return err
+		// Speed is room state: with no local player it is still published, and
+		// every player (including this one, once opened) follows it.
+		client, err = s.connected()
+		if err != nil {
+			return err
+		}
+		snapshot := localClockSnapshot(client)
+		return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: snapshot.Playback.PositionSeconds, Paused: snapshot.Playback.Paused, Rate: rate})
 	}
 	ctx, cancel := context.WithTimeout(s.root, 3*time.Second)
 	defer cancel()
@@ -217,4 +240,29 @@ func (s *Service) ParticipantInvite() (string, error) {
 	}
 	value.OwnerToken = ""
 	return invite.Format(value)
+}
+
+// Playback rates every participant's player can follow: the room protocol
+// accepts 0.25 to 4 times normal speed.
+const (
+	MinPlaybackRate = 0.25
+	MaxPlaybackRate = 4.0
+)
+
+// RateRange describes the playback speeds the page may offer.
+type RateRange struct {
+	Min       float64 `json:"min"`
+	Max       float64 `json:"max"`
+	Supported bool    `json:"supported"`
+}
+
+// PlaybackRateRange reports the speeds this participant can set. A player
+// without rate control (for example a VLC build whose remote interface lacks
+// the rate command) cannot change speed at all.
+func (s *Service) PlaybackRateRange() RateRange {
+	s.mu.RLock()
+	mediaPlayer := s.player
+	s.mu.RUnlock()
+	supported := mediaPlayer == nil || mediaPlayer.Capabilities().PlaybackRate
+	return RateRange{Min: MinPlaybackRate, Max: MaxPlaybackRate, Supported: supported}
 }

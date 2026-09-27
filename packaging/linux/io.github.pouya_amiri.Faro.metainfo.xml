@@ -22,6 +22,11 @@
     <id>io.github.pouya_amiri.Faro.desktop</id>
   </provides>
   <releases>
+    <release version="1.1.0" date="2026-09-26">
+      <description>
+        <p>Adds faster cached streaming, chat over video in mpv, playback and queue improvements, a system tray option, and more reliable connections across platforms.</p>
+      </description>
+    </release>
     <release version="1.0.5" date="2026-09-23">
       <description>
         <p>Fixes playlist and wheel-spin playback, hardens streaming with a cached media gateway, and adds new themes and queue context menus.</p>

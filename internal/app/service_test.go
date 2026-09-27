@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -122,7 +125,7 @@ func TestAppStreamsOfferedFileThroughFakeTransport(t *testing.T) {
 	if err := os.WriteFile(path, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.offerStream(path, 1); err != nil {
+	if err := host.offerStreamForItem(path, 1, ""); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -215,10 +218,10 @@ func TestStreamInterruptedReconnectRestoresSyncWithoutPublishingDeadGateway(t *t
 	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 1000)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	wait := func(message string, check func() bool) {
@@ -332,7 +335,7 @@ func TestOfferStreamRejectsConnectionWithoutSessionContext(t *testing.T) {
 	service.mu.Lock()
 	service.sessionCtx = nil
 	service.mu.Unlock()
-	if err := service.offerStream(path, 1); err == nil || !strings.Contains(err.Error(), "connection changed") {
+	if err := service.offerStreamForItem(path, 1, ""); err == nil || !strings.Contains(err.Error(), "connection changed") {
 		t.Fatalf("offerStream with detached session context returned %v", err)
 	}
 }
@@ -379,10 +382,10 @@ func TestSelectedPlaylistItemReloadsWhenIdentityChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	const stableID = "same-item"
-	if err := service.SetPlaylist([]PlaylistInput{{ID: stableID, Label: "Movie", Source: first}}); err != nil {
+	if err := service.SetPlaylist([]PlaylistInput{{ID: stableID, Label: "Movie", Source: first}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.SelectPlaylist(0); err != nil {
+	if err := service.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForSource := func(want string) {
@@ -400,7 +403,7 @@ func TestSelectedPlaylistItemReloadsWhenIdentityChanges(t *testing.T) {
 		}
 	}
 	waitForSource(first)
-	if err := service.SetPlaylist([]PlaylistInput{{ID: stableID, Label: "Replacement", Source: second}}); err != nil {
+	if err := service.SetPlaylist([]PlaylistInput{{ID: stableID, Label: "Replacement", Source: second}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitForSource(second)
@@ -434,10 +437,10 @@ func TestPlayAfterRemovingClosedPlayerSourceOpensSelectedItem(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := service.SetPlaylist([]PlaylistInput{{Label: "Removed", Source: removed}, {Label: "Winner", Source: winner}}); err != nil {
+	if err := service.SetPlaylist([]PlaylistInput{{Label: "Removed", Source: removed}, {Label: "Winner", Source: winner}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.SelectPlaylist(0); err != nil {
+	if err := service.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -461,10 +464,10 @@ func TestPlayAfterRemovingClosedPlayerSourceOpensSelectedItem(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	service.releasePlayer(first, "")
-	if err := service.SetPlaylist([]PlaylistInput{{Label: "Winner", Source: winner}}); err != nil {
+	if err := service.SetPlaylist([]PlaylistInput{{Label: "Winner", Source: winner}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.SelectPlaylist(0); err != nil {
+	if err := service.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.SetPaused(false); err != nil {
@@ -500,7 +503,7 @@ func TestLocalWheelSpinPreservesDismissalUntilWinner(t *testing.T) {
 	if err := service.SetPlaylist([]PlaylistInput{
 		{Label: "One", Source: "https://example.com/one.mp4"},
 		{Label: "Two", Source: "https://example.com/two.mp4"},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	service.mu.Lock()
@@ -557,10 +560,10 @@ func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
 	if err := os.WriteFile(path, []byte("removed file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetPlaylist([]PlaylistInput{{Label: "Removed", Source: path}}); err != nil {
+	if err := s.SetPlaylist([]PlaylistInput{{Label: "Removed", Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SelectPlaylist(0); err != nil {
+	if err := s.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
@@ -579,7 +582,7 @@ func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
 	if err := s.SetPaused(false); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetPlaylist(nil); err != nil {
+	if err := s.SetPlaylist(nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(3 * time.Second)
@@ -612,10 +615,10 @@ func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
 	if starts != 1 {
 		t.Fatalf("started %d players after removal, want 1", starts)
 	}
-	if err := s.SetPlaylist([]PlaylistInput{{Label: "Returned", Source: path}}); err != nil {
+	if err := s.SetPlaylist([]PlaylistInput{{Label: "Returned", Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SelectPlaylist(0); err != nil {
+	if err := s.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(3 * time.Second)
@@ -641,7 +644,7 @@ func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
 	if reopenedItem == "" {
 		t.Fatal("explicit Play did not retain queue ownership")
 	}
-	if err := s.SetPlaylist(nil); err != nil {
+	if err := s.SetPlaylist(nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	s.mu.RLock()
@@ -678,13 +681,13 @@ func TestExplicitPlayRequestsAvailableStreamForDismissedViewer(t *testing.T) {
 	if err := os.WriteFile(path, []byte(strings.Repeat("shared-media-", 1000)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Label: "Shared", Source: path}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Shared", Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	viewer.mu.Lock()
 	viewer.playerDismissed = true
 	viewer.mu.Unlock()
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, _ := host.Snapshot()
@@ -755,10 +758,10 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 	if err := host.SetPlaylist([]PlaylistInput{
 		{Label: "Movie", Source: path},
 		{Label: "Next", URL: nextURL},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForState := func(message string, check func() bool) {
@@ -787,7 +790,7 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 	if err := host.SetPlaylist([]PlaylistInput{{
 		ID: snapshot.Playlist.Items[1].ID, Label: snapshot.Playlist.Items[1].Label,
 		URL: snapshot.Playlist.Items[1].URL, Media: snapshot.Playlist.Items[1].Media,
-	}}); err != nil {
+	}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitForState("removed queue file kept streaming", func() bool {
@@ -812,10 +815,10 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 			URL: snapshot.Playlist.Items[1].URL, Media: snapshot.Playlist.Items[1].Media},
 		{ID: snapshot.Playlist.Items[0].ID, Label: snapshot.Playlist.Items[0].Label,
 			URL: snapshot.Playlist.Items[0].URL, Media: snapshot.Playlist.Items[0].Media},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SelectPlaylist(1); err != nil {
+	if err := host.SelectPlaylist(1, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := host.OfferPlaylistStream(snapshot.Playlist.Items[0].ID); err != nil {
@@ -834,7 +837,7 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 		defer viewer.mu.RUnlock()
 		return viewer.streamGateway == nil && viewer.currentSource == "" && viewer.selectedItem == ""
 	})
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForState("viewer kept playing the removed stream instead of the next item", func() bool {
@@ -870,7 +873,7 @@ func TestRemovedPlaylistOfferIsWithdrawnAfterPlayerWasClosed(t *testing.T) {
 	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 1000)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, _ := host.Snapshot()
@@ -880,7 +883,7 @@ func TestRemovedPlaylistOfferIsWithdrawnAfterPlayerWasClosed(t *testing.T) {
 	host.mu.Lock()
 	host.playerDismissed = true
 	host.mu.Unlock()
-	if err := host.SetPlaylist(nil); err != nil {
+	if err := host.SetPlaylist(nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	host.mu.RLock()
@@ -893,7 +896,7 @@ func TestRemovedPlaylistOfferIsWithdrawnAfterPlayerWasClosed(t *testing.T) {
 	if err := os.WriteFile(other, []byte("another file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Label: "Other", Source: other}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Other", Source: other}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, _ = host.Snapshot()
@@ -1026,7 +1029,7 @@ func TestPlayerStartsLazilyAndClosingItKeepsSessionConnected(t *testing.T) {
 	if err := os.WriteFile(mediaPath, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.OpenMedia(mediaPath); err != nil {
+	if err := openThroughQueue(t, service, mediaPath); err != nil {
 		t.Fatal(err)
 	}
 	if starts != 1 {
@@ -1074,10 +1077,10 @@ func TestIndexingSavedDirectoryStartsPlayerForSelectedRemoteItem(t *testing.T) {
 	if err := os.WriteFile(mediaPath, []byte("matching media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: mediaPath}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: mediaPath}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1143,7 +1146,7 @@ func TestPlaylistAvailabilitySharedAndClosedSelectionWaitsForExplicitPlay(t *tes
 	if err := os.WriteFile(path, []byte("a matching file"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetPlaylist([]PlaylistInput{{Source: path}}); err != nil {
+	if err := host.SetPlaylist([]PlaylistInput{{Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	wait := func(check func() bool) {
@@ -1174,7 +1177,7 @@ func TestPlaylistAvailabilitySharedAndClosedSelectionWaitsForExplicitPlay(t *tes
 		}
 		return false
 	})
-	if err := host.SelectPlaylist(0); err != nil {
+	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
 	wait(func() bool { host.mu.RLock(); defer host.mu.RUnlock(); return host.selectedItem == id })
@@ -1259,5 +1262,345 @@ func TestReconnectInvalidatesFailedConnectionBeforeBackoff(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("reconnect did not stop after its session was cancelled")
+	}
+}
+
+func TestPausingDuringDriftCorrectionPublishesRoomRate(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	service := New(context.Background(), nil)
+	status, err := service.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "rate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Shutdown)
+	fake := newLifecyclePlayer()
+	service.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return fake, nil }
+	if err := service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Ada", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(mediaPath, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := openThroughQueue(t, service, mediaPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetPaused(false); err != nil {
+		t.Fatal(err)
+	}
+	// The sync controller is catching up: the player runs 3% fast.
+	fake.mu.Lock()
+	fake.state.Rate = 1.03
+	fake.mu.Unlock()
+	for _, action := range []func() error{
+		func() error { return service.SetPaused(true) },
+		func() error { return service.Seek(12) },
+	} {
+		if err := action(); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := service.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Playback.Rate != 1 {
+			t.Fatalf("drift correction leaked into the room rate: %v", snapshot.Playback.Rate)
+		}
+	}
+}
+
+// minimalMP4 builds the smallest file the duration probe accepts: ftyp and a
+// moov box whose mvhd declares the duration.
+func minimalMP4(timescale, duration uint32) []byte {
+	box := func(kind string, payload []byte) []byte {
+		size := uint32(8 + len(payload))
+		return append([]byte{byte(size >> 24), byte(size >> 16), byte(size >> 8), byte(size), kind[0], kind[1], kind[2], kind[3]}, payload...)
+	}
+	be := func(value uint32) []byte {
+		return []byte{byte(value >> 24), byte(value >> 16), byte(value >> 8), byte(value)}
+	}
+	mvhd := append(append(append([]byte{0, 0, 0, 0}, make([]byte, 8)...), be(timescale)...), be(duration)...)
+	mvhd = append(mvhd, make([]byte, 80)...)
+	return append(box("ftyp", []byte("isom\x00\x00\x02\x00")), box("moov", box("mvhd", mvhd))...)
+}
+
+func TestSetPlaylistFillsInDurations(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	service := New(context.Background(), nil)
+	status, err := service.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "durations"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Shutdown)
+	if err := service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Ada", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(t.TempDir(), "episode.mp4")
+	if err := os.WriteFile(mediaPath, minimalMP4(1000, 1_425_000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetPlaylist([]PlaylistInput{
+		{Label: "Episode", Source: mediaPath},
+		{Label: "Talk", URL: "https://www.youtube.com/watch?v=abc", DurationSeconds: 3601},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := service.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Playlist.Items[0].Media.DurationSeconds; got != 1425 {
+		t.Fatalf("local file duration = %v, want 1425", got)
+	}
+	if got := snapshot.Playlist.Items[1].Media.DurationSeconds; got != 3601 {
+		t.Fatalf("link duration = %v, want 3601", got)
+	}
+}
+
+func TestSelectedFileIsSharedAutomaticallyWithParticipantsWithoutIt(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	network := streamtransport.NewFakeNetwork()
+	host, viewer := New(context.Background(), nil), New(context.Background(), nil)
+	host.streamFactory, viewer.streamFactory = network, network
+	status, err := host.StartServer(ServerRequest{Mode: "advanced",
+		ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "auto",
+		StreamingDERPMapURL: "https://derp.example.test/map.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	t.Cleanup(viewer.Shutdown)
+	host.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	viewer.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	for _, participant := range []struct {
+		service *Service
+		name    string
+	}{{host, "Host"}, {viewer, "Viewer"}} {
+		if err := participant.service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: participant.name, Player: "mpv"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 1000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Movie", Source: path}, {Label: "Next", URL: "https://example.test/next.mp4"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor := func(message string, check func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !check() {
+			if time.Now().After(deadline) {
+				t.Fatal(message)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	offering := func() bool {
+		host.mu.RLock()
+		defer host.mu.RUnlock()
+		return host.streamPublisher != nil
+	}
+	receiving := func() bool {
+		viewer.mu.RLock()
+		defer viewer.mu.RUnlock()
+		return viewer.streamGateway != nil
+	}
+
+	// Selecting the file (as clicking it or a wheel win does) shares it
+	// without anyone pressing "Share file", and the viewer streams it.
+	if err := host.SelectPlaylist(0, ""); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("the selected file was not shared automatically", offering)
+	waitFor("the viewer did not stream the automatically shared file", receiving)
+
+	// Moving to another item withdraws the automatic offer.
+	if err := host.SelectPlaylist(1, ""); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("the automatic offer outlived its selection", func() bool { return !offering() })
+
+	// An explicit stop is respected until the selection changes.
+	if err := host.SelectPlaylist(0, ""); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("the file was not shared again when reselected", offering)
+	if err := host.StopOfferingStream(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(4 * autoOfferStagger / 3)
+	if offering() {
+		t.Fatal("automatic sharing overrode an explicit stop")
+	}
+
+	// With the preference off nothing is shared.
+	host.SetAutoOfferEnabled(false)
+	if err := host.SelectPlaylist(1, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SelectPlaylist(0, ""); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(4 * autoOfferStagger / 3)
+	if offering() {
+		t.Fatal("a file was shared although automatic sharing is off")
+	}
+}
+
+func TestLeaveRoomForgetsInvites(t *testing.T) {
+	service := New(context.Background(), nil)
+	service.invite = invite.Invite{Address: "127.0.0.1:8999", Room: "movie-night", Fingerprint: strings.Repeat("a", 64)}
+	service.ownerToken = strings.Repeat("o", 43)
+	if _, err := service.ParticipantInvite(); err != nil {
+		t.Fatalf("invite unavailable before leaving: %v", err)
+	}
+	service.LeaveRoom()
+	if value, err := service.OwnerInvite(); err == nil {
+		t.Fatalf("owner invite still available after leaving: %q", value)
+	}
+	if value, err := service.ParticipantInvite(); err == nil {
+		t.Fatalf("invite still available after leaving: %q", value)
+	}
+}
+
+func TestReconnectStopsOnlyOnPermanentFailures(t *testing.T) {
+	for _, test := range []struct {
+		err       error
+		permanent bool
+	}{
+		{fmt.Errorf("connect: %w", faroclient.ErrFingerprintMismatch), true},
+		{&faroclient.RejectedError{Code: "unauthorized"}, true},
+		{&faroclient.RejectedError{Code: "invalid_owner_token"}, true},
+		{&faroclient.RejectedError{Code: "room_full"}, false},
+		{errors.New("connection refused"), false},
+	} {
+		if message, permanent := permanentConnectFailure(test.err); permanent != test.permanent || permanent && message == "" {
+			t.Fatalf("%v: permanent = %v (%q), want %v", test.err, permanent, message, test.permanent)
+		}
+	}
+	for attempt := 1; attempt <= 20; attempt++ {
+		base := time.Duration(min(attempt, 15)) * time.Second
+		if delay := reconnectDelay(attempt); delay < base*8/10 || delay > base*12/10 {
+			t.Fatalf("attempt %d waits %v, want within 20%% of %v", attempt, delay, base)
+		}
+	}
+}
+
+type countingFactory struct {
+	streamtransport.Factory
+	created, closed atomic.Int32
+}
+
+type countedViewer struct {
+	streamtransport.Viewer
+	factory *countingFactory
+	once    sync.Once
+}
+
+func (f *countingFactory) NewViewer() (streamtransport.Viewer, error) {
+	time.Sleep(20 * time.Millisecond) // widen the window between check and claim
+	viewer, err := f.Factory.NewViewer()
+	if err != nil {
+		return nil, err
+	}
+	f.created.Add(1)
+	return &countedViewer{Viewer: viewer, factory: f}, nil
+}
+
+func (v *countedViewer) Close() error {
+	v.once.Do(func() { v.factory.closed.Add(1) })
+	return v.Viewer.Close()
+}
+
+func TestConcurrentStreamRequestsClaimTheOfferOnce(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	network := streamtransport.NewFakeNetwork()
+	host := New(context.Background(), nil)
+	viewer := New(context.Background(), nil)
+	counting := &countingFactory{Factory: network}
+	host.streamFactory, viewer.streamFactory = network, counting
+	status, err := host.StartServer(ServerRequest{Mode: "advanced",
+		ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie",
+		StreamingDERPMapURL: "https://derp.example.test/map.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	t.Cleanup(viewer.Shutdown)
+	host.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	viewer.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	for _, service := range []*Service{host, viewer} {
+		if err := service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Person", Player: "mpv"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 20000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.offerStreamForItem(path, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	var offerID string
+	waitFor(t, "viewer did not receive the stream offer", func() bool {
+		snapshot, err := viewer.Snapshot()
+		if err == nil && len(snapshot.StreamOffers) > 0 {
+			offerID = snapshot.StreamOffers[0].ID
+		}
+		return offerID != ""
+	})
+	var wait sync.WaitGroup
+	var succeeded atomic.Int32
+	for range 8 {
+		wait.Go(func() {
+			if viewer.StreamFromOffer(offerID) == nil {
+				succeeded.Add(1)
+			}
+		})
+	}
+	wait.Wait()
+	if succeeded.Load() != 1 {
+		t.Fatalf("%d concurrent requests claimed the offer, want 1", succeeded.Load())
+	}
+	if created, closed := counting.created.Load(), counting.closed.Load(); closed != created-1 {
+		t.Fatalf("%d viewers prepared but only %d of the losing ones closed", created, closed)
+	}
+	// The winning request must still be tracked, so its grant starts the
+	// stream instead of being revoked as unwanted.
+	waitFor(t, "the claimed stream never started", func() bool {
+		viewer.mu.RLock()
+		defer viewer.mu.RUnlock()
+		return viewer.streamGateway != nil
+	})
+}
+
+// openThroughQueue plays a local file the way the page does: add it to the
+// queue, select it, and wait for the player to open it.
+func openThroughQueue(t *testing.T, service *Service, path string) error {
+	t.Helper()
+	if err := service.SetPlaylist([]PlaylistInput{{Label: filepath.Base(path), Source: path}}, nil); err != nil {
+		return err
+	}
+	if err := service.SelectPlaylist(0, ""); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		service.mu.RLock()
+		mediaPlayer, source := service.player, service.currentSource
+		service.mu.RUnlock()
+		if mediaPlayer != nil && source == path {
+			if state, err := mediaPlayer.State(context.Background()); err == nil && state.Source == path {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return errors.New("the selected queue item never opened in the player")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

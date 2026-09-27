@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/big"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +36,10 @@ const (
 	wheelStartDelay        = 700 * time.Millisecond
 	wheelDuration          = 4800 * time.Millisecond
 )
+
+// streamRequestTimeout is how long a stream request waits for the provider's
+// answer before it is revoked and may be made again.
+var streamRequestTimeout = time.Minute
 
 type commandError struct {
 	code    string
@@ -332,6 +337,10 @@ func (h *hub) setPlaylist(p *participant, request protocol.PlaylistSet) error {
 		h.mu.Unlock()
 		return invalid("forbidden", "this participant cannot change the playlist")
 	}
+	if request.BaseRevision != nil && *request.BaseRevision != r.playlist.Revision {
+		h.mu.Unlock()
+		return invalid(protocol.ErrorPlaylistConflict, "the queue changed while you were editing it; try again")
+	}
 	cancelled := cancelWheelLocked(r, "The queue changed before the spin finished")
 	selectedID := ""
 	var previousItem *protocol.PlaylistItem
@@ -384,12 +393,20 @@ func samePlaylistSource(a, b protocol.PlaylistItem) bool {
 	return a.Media != nil && b.Media != nil && a.Media.Fingerprint == b.Media.Fingerprint
 }
 
-func (h *hub) selectPlaylist(p *participant, index int) error {
+func (h *hub) selectPlaylist(p *participant, request protocol.PlaylistSelect) error {
+	index := request.Index
 	h.mu.Lock()
 	r := h.roomForLocked(p)
 	if r == nil || !r.canControl(p) {
 		h.mu.Unlock()
 		return invalid("forbidden", "this participant cannot select playlist items")
+	}
+	if request.ItemID != "" {
+		index = slices.IndexFunc(r.playlist.Items, func(item protocol.PlaylistItem) bool { return item.ID == request.ItemID })
+		if index < 0 {
+			h.mu.Unlock()
+			return invalid(protocol.ErrorPlaylistItemNotFound, "that queue item was removed")
+		}
 	}
 	if index < -1 || index >= len(r.playlist.Items) {
 		h.mu.Unlock()
@@ -586,7 +603,12 @@ func (h *hub) requestStream(p *participant, request protocol.MediaStreamRequest)
 		return protocol.MediaStreamRequestAccepted{}, err
 	}
 	now := time.Now()
-	expiresAt := now.Add(time.Duration(h.streaming.GrantTTLSeconds) * time.Second)
+	// expiresAt bounds the grant the provider may issue; answerBy bounds how
+	// long the request waits for that answer, so an unresponsive provider
+	// does not block the viewer from asking again for hours.
+	grantTTL := time.Duration(h.streaming.GrantTTLSeconds) * time.Second
+	expiresAt := now.Add(grantTTL)
+	answerBy := now.Add(min(streamRequestTimeout, grantTTL))
 	h.mu.Lock()
 	r := h.roomForLocked(p)
 	if r == nil {
@@ -632,14 +654,14 @@ func (h *hub) requestStream(p *participant, request protocol.MediaStreamRequest)
 		h.mu.Unlock()
 		return protocol.MediaStreamRequestAccepted{}, invalid("stream_offer_full", "stream offer has reached its viewer limit")
 	}
-	r.streamRequests[requestID] = &streamRequest{id: requestID, offerID: offer.ID, provider: provider, viewer: p, expiresAt: expiresAt}
+	r.streamRequests[requestID] = &streamRequest{id: requestID, offerID: offer.ID, provider: provider, viewer: p, expiresAt: answerBy}
 	roomID := r.state.ID
 	h.mu.Unlock()
 	provider.session.sendMessage(protocol.TypeStreamRequested, "", "", protocol.MediaStreamRequested{
 		RequestID: requestID, OfferID: offer.ID, ViewerID: p.state.ID, ViewerName: p.state.Name,
 		ClientPublicKey: request.ClientPublicKey, ExpiresAtUnixMs: expiresAt.UnixMilli(),
 	})
-	time.AfterFunc(time.Until(expiresAt), func() { h.expireStreamRequest(roomID, requestID) })
+	time.AfterFunc(time.Until(answerBy), func() { h.expireStreamRequest(roomID, requestID) })
 	return protocol.MediaStreamRequestAccepted{RequestID: requestID, OfferID: offer.ID, ExpiresAtUnixMs: expiresAt.UnixMilli()}, nil
 }
 

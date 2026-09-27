@@ -11,18 +11,33 @@ import (
 	"unicode/utf8"
 )
 
+// MaxFrameSize bounds frames a client sends: commands, chat and the queue.
 const MaxFrameSize = 256 * 1024
+
+// MaxStateFrameSize bounds frames the server sends. Room state it has
+// already accepted (a full queue, many participants, each with up to 500
+// available files) can far exceed MaxFrameSize, and failing to deliver it
+// would disconnect everyone in the room.
+const MaxStateFrameSize = 8 * 1024 * 1024
 
 var ErrFrameTooLarge = errors.New("protocol frame is too large")
 
 type Codec struct {
-	reader *bufio.Reader
-	writer io.Writer
-	mu     sync.Mutex
+	reader     *bufio.Reader
+	writer     io.Writer
+	readLimit  int
+	writeLimit int
+	mu         sync.Mutex
 }
 
+// NewCodec limits frames in both directions to MaxFrameSize.
 func NewCodec(stream io.ReadWriter) *Codec {
-	return &Codec{reader: bufio.NewReaderSize(stream, 32*1024), writer: stream}
+	return NewCodecWithLimits(stream, MaxFrameSize, MaxFrameSize)
+}
+
+// NewCodecWithLimits sets separate limits for frames read and written.
+func NewCodecWithLimits(stream io.ReadWriter, readLimit, writeLimit int) *Codec {
+	return &Codec{reader: bufio.NewReaderSize(stream, 32*1024), writer: stream, readLimit: readLimit, writeLimit: writeLimit}
 }
 
 func (c *Codec) Read() (Envelope, error) {
@@ -58,7 +73,7 @@ func (c *Codec) Write(envelope Envelope) error {
 	if err != nil {
 		return fmt.Errorf("encode protocol frame: %w", err)
 	}
-	if len(data) > MaxFrameSize {
+	if len(data) > c.writeLimit {
 		return ErrFrameTooLarge
 	}
 	c.mu.Lock()
@@ -73,7 +88,7 @@ func (c *Codec) readFrame() ([]byte, error) {
 	var frame []byte
 	for {
 		part, err := c.reader.ReadSlice('\n')
-		if len(frame)+len(part) > MaxFrameSize+1 {
+		if len(frame)+len(part) > c.readLimit+1 {
 			return nil, ErrFrameTooLarge
 		}
 		frame = append(frame, part...)

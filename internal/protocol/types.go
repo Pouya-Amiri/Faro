@@ -332,11 +332,25 @@ type MediaSet struct {
 
 type PlaylistSet struct {
 	Items []PlaylistItem `json:"items"`
+	// BaseRevision, when set, is the playlist revision the new items were
+	// computed from. The server rejects the update with ErrorPlaylistConflict
+	// if the playlist has changed since, so concurrent edits are never lost.
+	// Servers that predate it ignore the field and apply the update.
+	BaseRevision *uint64 `json:"baseRevision,omitempty"`
 }
 
 type PlaylistSelect struct {
 	Index int `json:"index"`
+	// ItemID, when set, selects that item wherever it is now; Index is then
+	// only a fallback for servers that predate it.
+	ItemID string `json:"itemId,omitempty"`
 }
+
+// Error codes for playlist commands based on a queue that has since changed.
+const (
+	ErrorPlaylistConflict     = "playlist_conflict"
+	ErrorPlaylistItemNotFound = "playlist_item_not_found"
+)
 
 type PlaylistWheelSpin struct{}
 

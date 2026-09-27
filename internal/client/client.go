@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,9 +17,17 @@ import (
 
 const (
 	connectTimeout = 10 * time.Second
-	pingInterval   = 5 * time.Second
+	writeTimeout   = 10 * time.Second
 	commandTimeout = 5 * time.Second
 )
+
+// pingInterval paces pings; tests shorten it. The server answers every ping,
+// so livenessPings intervals without any frame mean the connection is dead
+// (a Wi-Fi switch, NAT rebinding or a sleeping laptop) even though no error
+// was reported.
+var pingInterval = 5 * time.Second
+
+const livenessPings = 4
 
 type commandReply struct {
 	envelope protocol.Envelope
@@ -32,7 +41,14 @@ type CommandError struct {
 	Message string
 }
 
-func (e *CommandError) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message) }
+// Error is the server's explanation alone: it is shown to people as is, and
+// callers that need the code match it with errors.As.
+func (e *CommandError) Error() string {
+	if e.Message == "" {
+		return e.Code
+	}
+	return e.Message
+}
 
 type Event struct {
 	Type          protocol.MessageType
@@ -99,7 +115,7 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, errors.New("TLS dialer returned a non-TLS connection")
 	}
 	client := &Client{
-		cfg: cfg, conn: connection, codec: protocol.NewCodec(connection),
+		cfg: cfg, conn: connection, codec: protocol.NewCodecWithLimits(connection, protocol.MaxStateFrameSize, protocol.MaxFrameSize),
 		events: make(chan Event, 128), done: make(chan struct{}),
 		pending: make(map[string]chan commandReply),
 	}
@@ -108,22 +124,62 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 	} else {
 		_ = connection.SetDeadline(time.Now().Add(connectTimeout))
 	}
+	// Cancelling ctx interrupts the handshake at once rather than after the
+	// connect timeout.
+	interrupt := context.AfterFunc(ctx, func() { _ = connection.SetDeadline(time.Now()) })
 	helloID := client.nextID()
 	if err := client.write(protocol.TypeHello, helloID, protocol.Hello{
 		ClientVersion: cfg.ClientVersion, Name: cfg.Name, Room: cfg.Room,
 		JoinToken: cfg.JoinToken, OwnerToken: cfg.OwnerToken, Capabilities: append([]protocol.Capability(nil), cfg.Capabilities...),
 	}); err != nil {
+		interrupt()
 		connection.Close()
-		return nil, err
+		return nil, handshakeError(ctx, err)
 	}
 	if err := client.readHandshake(helloID); err != nil {
+		interrupt()
 		connection.Close()
-		return nil, err
+		return nil, handshakeError(ctx, err)
+	}
+	if !interrupt() {
+		connection.Close()
+		return nil, ctx.Err()
 	}
 	_ = connection.SetDeadline(time.Time{})
 	go client.readLoop()
 	go client.pingLoop()
 	return client, nil
+}
+
+func handshakeError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+// RejectedError is the server refusing a connection during the handshake.
+type RejectedError struct {
+	Code    string
+	Message string
+}
+
+func (e *RejectedError) Error() string {
+	if e.Message == "" {
+		return fmt.Sprintf("the server refused the connection (%s)", e.Code)
+	}
+	return "the server refused the connection: " + e.Message
+}
+
+// Permanent reports whether sending the same hello again cannot succeed. A
+// full room or server can free up; a revoked join token, a replaced owner or
+// an incompatible client cannot.
+func (e *RejectedError) Permanent() bool {
+	switch e.Code {
+	case "unauthorized", "invalid_owner_token", "invalid_hello":
+		return true
+	}
+	return false
 }
 
 func (c *Client) readHandshake(helloID string) error {
@@ -139,7 +195,7 @@ func (c *Client) readHandshake(helloID string) error {
 			if decodeErr != nil {
 				return decodeErr
 			}
-			return fmt.Errorf("server rejected connection (%s): %s", failure.Code, failure.Message)
+			return &RejectedError{Code: failure.Code, Message: failure.Message}
 		case protocol.TypeWelcome:
 			if envelope.ReplyTo != helloID {
 				return errors.New("welcome did not answer hello")
@@ -164,8 +220,12 @@ func (c *Client) readHandshake(helloID string) error {
 func (c *Client) readLoop() {
 	defer c.Close()
 	for {
+		_ = c.conn.SetReadDeadline(time.Now().Add(livenessPings * pingInterval))
 		envelope, err := c.codec.Read()
 		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				err = errors.New("the server stopped responding")
+			}
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 				c.emit(Event{Type: protocol.TypeError, Error: &protocol.Error{Code: "connection_lost", Message: err.Error(), Fatal: true}})
 			}
@@ -357,8 +417,8 @@ func (c *Client) SetMedia(value protocol.MediaSet) error {
 func (c *Client) SetPlaylist(value protocol.PlaylistSet) error {
 	return c.command(protocol.TypePlaylistSet, value)
 }
-func (c *Client) SelectPlaylist(index int) error {
-	return c.command(protocol.TypePlaylistSelect, protocol.PlaylistSelect{Index: index})
+func (c *Client) SelectPlaylist(value protocol.PlaylistSelect) error {
+	return c.command(protocol.TypePlaylistSelect, value)
 }
 func (c *Client) SpinPlaylistWheel() error {
 	return c.command(protocol.TypePlaylistWheelSpin, protocol.PlaylistWheelSpin{})
@@ -453,6 +513,7 @@ func (c *Client) write(messageType protocol.MessageType, id string, payload any)
 	if err != nil {
 		return err
 	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	return c.codec.Write(envelope)
 }
 
@@ -472,7 +533,18 @@ func (c *Client) pingLoop() {
 
 func (c *Client) nextID() string { return fmt.Sprintf("c-%d", c.seq.Add(1)) }
 
+// emit delivers an event to the app. State updates may be dropped when the
+// app falls behind, since the snapshot already holds the newest state; stream
+// handshakes, chat and errors exist only as events, so those wait for room
+// (until the connection closes) instead of being lost.
 func (c *Client) emit(event Event) {
+	if event.StreamRequest != nil || event.StreamGrant != nil || event.StreamRevoked != nil || event.Chat != nil || event.Error != nil {
+		select {
+		case c.events <- event:
+		case <-c.done:
+		}
+		return
+	}
 	select {
 	case c.events <- event:
 	case <-c.done:

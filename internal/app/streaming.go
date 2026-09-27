@@ -32,16 +32,19 @@ func (s *Service) StreamingAvailable() bool {
 	return client.Welcome().Streaming != nil
 }
 
-// offerStream publishes the resolved local copy for a shared-playlist item.
+// offerStreamForItem publishes the resolved local copy for a shared-playlist item.
 // Product entry points must resolve the path through OfferPlaylistStream so an
 // arbitrary file can never be offered outside the queue.
-func (s *Service) offerStream(path string, maxViewers int) error {
-	return s.offerStreamForItem(path, maxViewers, "")
-}
-
 func (s *Service) offerStreamForItem(path string, maxViewers int, itemID string) error {
 	s.streamOfferMu.Lock()
 	defer s.streamOfferMu.Unlock()
+	return s.offerStreamLocked(path, maxViewers, itemID, false)
+}
+
+// offerStreamLocked publishes the offer. The caller holds streamOfferMu, so an
+// automatic and an explicit share can never interleave; auto marks the offer
+// as automatic in the same step that records it.
+func (s *Service) offerStreamLocked(path string, maxViewers int, itemID string, auto bool) error {
 	client, err := s.connected()
 	if err != nil {
 		return err
@@ -115,6 +118,7 @@ func (s *Service) offerStreamForItem(path string, maxViewers int, itemID string)
 	s.mu.Lock()
 	if s.streamPublisher == publisher {
 		s.streamOfferItemID = itemID
+		s.streamOfferAuto = auto
 	}
 	s.mu.Unlock()
 	return nil
@@ -127,6 +131,11 @@ func (s *Service) StopOfferingStream() error {
 	if err != nil {
 		return err
 	}
+	// Stopping explicitly means "not this one": automatic sharing leaves the
+	// item alone until the selection moves on.
+	s.mu.Lock()
+	s.autoOfferSuppressedItem = s.streamOfferItemID
+	s.mu.Unlock()
 	return s.stopOfferingStream(client)
 }
 
@@ -154,6 +163,7 @@ func (s *Service) stopOfferingStream(client *faroclient.Client) error {
 		clear(s.streamCapabilities)
 		if withdrawErr == nil {
 			s.streamOfferID, s.streamOfferMedia, s.streamOfferItemID = "", nil, ""
+			s.streamOfferAuto = false
 		}
 	}
 	s.mu.Unlock()
@@ -233,6 +243,14 @@ func (s *Service) StreamFromOffer(offerID string) error {
 	}
 	pending := &pendingStream{viewer: viewer, media: offer.Media, playlistItemID: playlistItemID}
 	s.mu.Lock()
+	// Reconciliation runs concurrently: another call may have claimed this
+	// offer while the viewer was being prepared. Overwriting its entry would
+	// leak that viewer and orphan its request.
+	if s.pendingStreams[offerID] != nil {
+		s.mu.Unlock()
+		viewer.Close()
+		return errors.New("this media stream is already being requested")
+	}
 	s.pendingStreams[offerID] = pending
 	s.mu.Unlock()
 	accepted, err := client.RequestStream(protocol.MediaStreamRequest{OfferID: offerID, ClientPublicKey: viewer.PublicKey()})
@@ -443,7 +461,10 @@ func (s *Service) activateStream(ctx context.Context, client *faroclient.Client,
 		}
 		s.mu.Unlock()
 	}()
-	gateway, err := pending.viewer.StartGateway(ctx, grant, pending.media)
+	s.mu.RLock()
+	cache := s.streamCache
+	s.mu.RUnlock()
+	gateway, err := pending.viewer.StartGateway(ctx, grant, pending.media, cache)
 	if err != nil {
 		s.failStreamActivation(client, grant, pending, nil, "stream_connect", err)
 		return
@@ -512,10 +533,59 @@ func (s *Service) activateStream(ctx context.Context, client *faroclient.Client,
 		previous.Close()
 	}
 	s.sink(Event{Kind: "stream", Stream: &StreamStatus{State: "active", OfferID: grant.OfferID, Route: "direct"}})
+	go s.reportStreamProgress(gateway, grant.OfferID)
 	if _, err := s.finishMediaTransition(openCtx, mediaPlayer, localClockSnapshot(client).Playback.Paused, nil); err != nil {
 		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "stream_sync", Message: err.Error()}})
 	}
 	finished = true
+}
+
+// streamCacheRanges bounds the cached ranges sent to the seek bar each second.
+const streamCacheRanges = 48
+
+// SetStreamCacheLimit chooses how later streams are cached on this device: a
+// positive limit caps the disk cache, 0 caches whole files and a negative
+// value keeps streams in memory only. A running stream keeps its cache.
+func (s *Service) SetStreamCacheLimit(limitBytes int64) {
+	s.mu.Lock()
+	s.streamCache = mediastream.CacheOptions{DiskLimit: max(limitBytes, 0), MemoryOnly: limitBytes < 0}
+	s.mu.Unlock()
+}
+
+// reportStreamProgress emits the active gateway's cache progress about once a
+// second, until the stream ends or the whole file is cached.
+func (s *Service) reportStreamProgress(gateway *mediastream.Gateway, offerID string) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	last, lastAt := gateway.Progress().ReceivedBytes, time.Now()
+	for {
+		select {
+		case <-s.root.Done():
+			return
+		case <-ticker.C:
+		}
+		s.mu.Lock()
+		current := s.streamGateway == gateway
+		s.mu.Unlock()
+		if !current {
+			return
+		}
+		progress, now := gateway.Progress(), time.Now()
+		rate := float64(progress.ReceivedBytes-last) / now.Sub(lastAt).Seconds()
+		last, lastAt = progress.ReceivedBytes, now
+		complete := progress.TotalBytes > 0 && progress.CachedBytes >= progress.TotalBytes
+		if complete {
+			rate = 0
+		}
+		s.sink(Event{Kind: "stream", Stream: &StreamStatus{
+			State: "active", OfferID: offerID, Route: "direct",
+			CachedBytes: progress.CachedBytes, TotalBytes: progress.TotalBytes, BytesPerSecond: rate,
+			CachedRanges: gateway.CachedRanges(streamCacheRanges),
+		}})
+		if complete {
+			return
+		}
+	}
 }
 
 func (s *Service) failStreamActivation(client *faroclient.Client, grant protocol.MediaStreamGranted, pending *pendingStream, gateway *mediastream.Gateway, code string, cause error) {
@@ -611,6 +681,11 @@ func (s *Service) detachStreamingLocked() streamingResources {
 	s.streamPublisher, s.streamGateway = nil, nil
 	s.streamOfferID, s.streamOfferItemID, s.streamRequestID, s.streamReceiveItemID = "", "", "", ""
 	s.streamOfferMedia, s.streamIdentity = nil, nil
+	s.streamOfferAuto = false
+	if s.autoOfferTimer != nil {
+		s.autoOfferTimer.Stop()
+		s.autoOfferTimer, s.autoOfferKey = nil, ""
+	}
 	s.streamCapabilities = make(map[string]string)
 	s.pendingStreams = make(map[string]*pendingStream)
 	s.pendingRequestOffers = make(map[string]string)

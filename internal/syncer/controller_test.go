@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -122,5 +123,71 @@ func TestPublishDoesNotTurnDriftCorrectionIntoRoomRate(t *testing.T) {
 	}
 	if sender.values[0].Rate != 1 {
 		t.Fatalf("drift correction became room rate: %v", sender.values[0].Rate)
+	}
+}
+
+func TestNominalRateKeepsDriftCorrectionOutOfTheRoom(t *testing.T) {
+	cases := []struct{ room, observed, want float64 }{
+		{1, 1.03, 1},      // maximum upward correction
+		{1, 0.97, 1},      // maximum downward correction
+		{1, 0.99, 1},      // partial correction
+		{1.5, 1.545, 1.5}, // correction scales with the room rate
+		{1, 1.25, 1.25},   // a deliberate change is kept
+		{1, 1.1037, 1.1},  // and rounded to hundredths
+		{0, 1.03, 1.03},   // no room rate known yet
+		{1, 0, 1},         // missing player rate
+	}
+	for _, test := range cases {
+		if got := NominalRate(test.room, test.observed); got != test.want {
+			t.Errorf("NominalRate(%v, %v) = %v, want %v", test.room, test.observed, got, test.want)
+		}
+	}
+}
+
+func TestPublishAfterControllerRecreationUsesRoomRate(t *testing.T) {
+	now := time.Now()
+	// A reconnect creates a fresh controller while the player is still running
+	// at the previous controller's correction rate.
+	p := &fakePlayer{state: player.State{PositionSeconds: 10, Rate: 1.03, ObservedAt: now}}
+	sender := &fakeSender{}
+	c := New(p, sender, func() time.Time { return now })
+	if err := c.ApplyRemote(context.Background(), protocol.Playback{PositionSeconds: 10, Paused: true, Rate: 1, UpdatedAtUnixMs: now.UnixMilli()}, false); err != nil {
+		t.Fatal(err)
+	}
+	p.state.Rate = 1.03
+	if err := c.PublishLocal(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if got := sender.values[len(sender.values)-1].Rate; got != 1 {
+		t.Fatalf("published %v instead of the room rate", got)
+	}
+}
+
+func TestStatusReportsMeasuredDrift(t *testing.T) {
+	now := time.Unix(100, 0)
+	for _, test := range []struct {
+		buffering bool
+		position  float64
+		inSync    bool
+	}{
+		{position: 9.8, inSync: true},
+		{position: 7, inSync: false},
+		{position: 10, buffering: true, inSync: false},
+	} {
+		mediaPlayer := &fakePlayer{state: player.State{PositionSeconds: test.position, Rate: 1, Buffering: test.buffering, ObservedAt: time.Now()}}
+		controller := New(mediaPlayer, &fakeSender{}, func() time.Time { return now })
+		if controller.Status().InSync() {
+			t.Fatal("a controller that never checked reports in sync")
+		}
+		if err := controller.ApplyRemote(context.Background(), protocol.Playback{PositionSeconds: 10, Rate: 1, UpdatedAtUnixMs: now.UnixMilli()}, false); err != nil {
+			t.Fatal(err)
+		}
+		status := controller.Status()
+		if status.InSync() != test.inSync || status.Buffering != test.buffering {
+			t.Fatalf("position %.1f: status %+v, want in sync = %v", test.position, status, test.inSync)
+		}
+		if !test.buffering && math.Abs(status.DriftSeconds-(10-test.position)) > 0.05 {
+			t.Fatalf("position %.1f: drift %.2f, want %.2f", test.position, status.DriftSeconds, 10-test.position)
+		}
 	}
 }

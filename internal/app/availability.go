@@ -44,7 +44,25 @@ func (s *Service) OfferPlaylistStream(itemID string) error {
 		if path == "" {
 			return errors.New("locate your copy before sharing it")
 		}
-		if err := s.offerStreamForItem(path, 0, item.ID); err != nil {
+		s.streamOfferMu.Lock()
+		defer s.streamOfferMu.Unlock()
+		s.mu.Lock()
+		s.autoOfferSuppressedItem = ""
+		adopt := s.streamOfferAuto && s.streamOfferItemID == item.ID && s.streamPublisher != nil
+		if adopt {
+			// Already shared automatically: keep that offer, now as an explicit
+			// one that automatic sharing will not withdraw.
+			s.streamOfferAuto = false
+		}
+		replaceAuto := !adopt && s.streamOfferAuto && s.streamOfferID != ""
+		s.mu.Unlock()
+		if adopt {
+			return nil
+		}
+		if replaceAuto {
+			_ = s.stopOfferingStream(client)
+		}
+		if err := s.offerStreamLocked(path, 0, item.ID, false); err != nil {
 			return err
 		}
 		return nil
