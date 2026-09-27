@@ -500,7 +500,13 @@ func (s *Service) activateStream(ctx context.Context, client *faroclient.Client,
 		s.failStreamActivation(client, grant, pending, gateway, "stream_open", err)
 		return
 	}
-	s.waitForPlayerMedia(openCtx, mediaPlayer, pending.media.DurationSeconds)
+	state := s.waitForPlayerMedia(openCtx, mediaPlayer, pending.media.DurationSeconds)
+	// An offer made before the sharer's player probed the file carries no
+	// duration; the viewer's player knows it once the stream opens, and the
+	// seek bar needs it.
+	if pending.media.DurationSeconds <= 0 && state.DurationSeconds > 0 {
+		pending.media.DurationSeconds = state.DurationSeconds
+	}
 	playback := localClockSnapshot(client).Playback
 	_ = mediaPlayer.Seek(openCtx, playback.PositionSeconds)
 	_ = mediaPlayer.SetRate(openCtx, normalizedRate(playback.Rate))

@@ -592,7 +592,7 @@ svg { display: block; flex: 0 0 auto; }
 .media-info-block { min-width: 0; display: flex; flex-direction: column-reverse; }
 .media-badges { display: flex; align-items: center; }
 .badge { color: var(--text-muted); }
-.badge-sync { display: inline-flex; align-items: center; gap: 5px; }
+.badge-sync { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; white-space: nowrap; }
 .badge-sync::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); }
 .badge-success { color: var(--success); }
 .badge-success::before { background: var(--success); }
@@ -1616,6 +1616,17 @@ body[data-controls-style="kde"] .window-control svg { width: 11px; height: 11px;
 .chat-compose-bar .btn { width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-grid; place-items: center; }
 /* The paper plane's mass sits up and right of its box; nudge it to look centred. */
 .chat-compose-bar .btn .icon { width: 16px; height: 16px; margin: 0; transform: translate(-1px, 1px); }
+
+/* The inspector is one grid column. Without an explicit track it grows to
+   its widest panel's content and pushes the chat composer past the window
+   edge when the window is narrow (snapped to half a screen). */
+.inspector-card { grid-template-columns: minmax(0, 1fr); }
+/* The side column is at its 280px minimum below about 1040px of window. */
+@media (max-width: 1040px) {
+  .chat-toolbar { gap: 6px; padding: 0 10px; }
+  .chat-filter { padding: 0 7px; }
+  .chat-toolbar #clear-chat { padding-inline: 6px; }
+}
 
 @media (max-width: 1160px) {
   .transport-meta-controls { gap: 10px; }

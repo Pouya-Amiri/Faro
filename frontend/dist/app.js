@@ -292,9 +292,21 @@ function referenceMedia() {
   return me?.media || snapshot?.participants?.find((person) => person.media)?.media || null;
 }
 
+// A copy may not know its duration yet (a stream still opening), while a
+// friend's copy or the queue entry for the same file does.
+function mediaDuration(media) {
+  if (!media) return 0;
+  const candidates = [media, ...(snapshot?.participants || []).map((person) => person.media), ...(snapshot?.playlist?.items || []).map((item) => item.media)];
+  for (const candidate of candidates) {
+    if (candidate !== media && candidate?.fingerprint !== media.fingerprint) continue;
+    const duration = Number(candidate?.durationSeconds || 0);
+    if (Number.isFinite(duration) && duration > 0) return duration;
+  }
+  return 0;
+}
+
 function playbackDuration() {
-  const duration = Number(referenceMedia()?.durationSeconds || 0);
-  return Number.isFinite(duration) && duration > 0 ? duration : 0;
+  return mediaDuration(referenceMedia());
 }
 
 function streamCacheLimit() {
@@ -709,8 +721,8 @@ function render() {
   renderSyncBadge(media, mismatches.length);
 
   const playback = snapshot.playback;
-  const duration = Number(media?.durationSeconds || 0);
-  const hasDuration = Number.isFinite(duration) && duration > 0;
+  const duration = mediaDuration(media);
+  const hasDuration = duration > 0;
   const position = $("position");
   position.max = hasDuration ? String(duration) : "1";
   position.disabled = !allowed || !hasDuration;

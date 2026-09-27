@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Pouya-Amiri/Faro/internal/invite"
+	"github.com/Pouya-Amiri/Faro/internal/player"
+	"github.com/Pouya-Amiri/Faro/internal/streamtransport"
 )
 
 func TestSeekWithoutPlayerPublishesRoomPosition(t *testing.T) {
@@ -97,5 +102,71 @@ func TestCancelConnectStopsAHungAttempt(t *testing.T) {
 	}
 	if guest.InRoom() {
 		t.Fatal("a cancelled attempt left the service in a room")
+	}
+}
+
+// durationlessPlayer never learns the media's duration, like a player whose
+// file has not been probed yet.
+type durationlessPlayer struct{ *lifecyclePlayer }
+
+func (p durationlessPlayer) State(ctx context.Context) (player.State, error) {
+	state, err := p.lifecyclePlayer.State(ctx)
+	state.DurationSeconds = 0
+	return state, err
+}
+
+func TestStreamViewerUsesItsPlayersDurationWhenTheOfferHasNone(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	network := streamtransport.NewFakeNetwork()
+	host, viewer := New(context.Background(), nil), New(context.Background(), nil)
+	host.streamFactory, viewer.streamFactory = network, network
+	status, err := host.StartServer(ServerRequest{Mode: "advanced",
+		ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie",
+		StreamingDERPMapURL: "https://derp.example.test/map.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	t.Cleanup(viewer.Shutdown)
+	host.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) {
+		return durationlessPlayer{newLifecyclePlayer()}, nil
+	}
+	viewer.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	for name, service := range map[string]*Service{"Host": host, "Viewer": viewer} {
+		if err := service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: name, Player: "mpv"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Not a real video, so no duration can be probed from the file either.
+	path := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(path, []byte(strings.Repeat("streamed-media-", 1000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.AppendPlaylist([]PlaylistInput{{Label: "Movie", Source: path}}, true); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := host.Snapshot()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err = host.OfferPlaylistStream(snapshot.Playlist.Items[0].ID); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for {
+		viewerSnapshot, _ := viewer.Snapshot()
+		for _, participant := range viewerSnapshot.Participants {
+			if participant.ID == viewerSnapshot.SelfID && participant.Media != nil && participant.Media.DurationSeconds == 120 {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the streaming viewer never published its player's duration: %#v", viewerSnapshot.Participants)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

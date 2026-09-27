@@ -89,12 +89,17 @@ func (s *Service) consumePlayer(ctx context.Context, mediaPlayer player.Player) 
 			openingMedia := s.openingMedia
 			s.mu.RUnlock()
 			if event.Kind == player.EventMedia && !openingMedia {
-				s.mu.RLock()
+				s.mu.Lock()
 				streamIdentity := cloneStreamMedia(s.streamIdentity)
 				if s.streamGateway == nil || event.State.Source != s.streamGateway.URL() {
 					streamIdentity = nil
+				} else if streamIdentity != nil && streamIdentity.DurationSeconds <= 0 && event.State.DurationSeconds > 0 {
+					// The stream opened without a known duration and the
+					// player has just found it.
+					streamIdentity.DurationSeconds = event.State.DurationSeconds
+					s.streamIdentity.DurationSeconds = event.State.DurationSeconds
 				}
-				s.mu.RUnlock()
+				s.mu.Unlock()
 				media := streamIdentity
 				var err error
 				if media == nil {
