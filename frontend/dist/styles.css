@@ -68,6 +68,11 @@
   --accent-pressed: color-mix(in srgb, var(--accent) 80%, black);
   --accent-text: #ffffff;
   --accent-soft: rgba(10, 132, 255, .16);
+  /* The chosen item of a list or tab set, and the lit option of a segmented
+     control. Paper themes need more ink here than accent-soft carries. */
+  --selected: var(--accent-soft);
+  --selected-edge: color-mix(in srgb, var(--accent), transparent 72%);
+  --segment-active: var(--fill-strong);
   --focus-ring: #0a84ff;
   --focus: color-mix(in srgb, var(--focus-ring) 38%, transparent);
   --success: #67ce8c;
@@ -264,6 +269,9 @@ html[data-theme="sage"] {
   --accent-hover: #A04417;  /* deeper terracotta */
   --accent-text: #FFFFFF;
   --accent-soft: #F0E5DC;   /* pale terracotta wash */
+  --selected: color-mix(in srgb, var(--accent) 17%, transparent);
+  --selected-edge: color-mix(in srgb, var(--accent), transparent 55%);
+  --segment-active: var(--panel-raised);
   --focus-ring: #BA5220;
   --focus: color-mix(in srgb, var(--focus-ring) 34%, transparent);
   --success: #46784A;
@@ -331,6 +339,9 @@ html[data-theme="light"] {
   --accent-hover: #405C8D;  /* deeper blue */
   --accent-text: #FFFFFF;
   --accent-soft: #E7ECF5;   /* pale blue */
+  --selected: color-mix(in srgb, var(--accent) 16%, transparent);
+  --selected-edge: color-mix(in srgb, var(--accent), transparent 55%);
+  --segment-active: var(--panel-raised);
   --focus-ring: #6685B5;
   --focus: color-mix(in srgb, var(--focus-ring) 34%, transparent);
   --success: #587D5B;
@@ -389,7 +400,7 @@ svg { display: block; flex: 0 0 auto; }
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--text); cursor: default; outline: none; white-space: nowrap;
 }
-.btn:focus-visible { box-shadow: 0 0 0 2px var(--focus); }
+.btn:focus-visible { box-shadow: inset 0 0 0 2px var(--focus-ring); }
 
 .form-group { display: flex; flex-direction: column; min-width: 0; }
 .form-row { display: grid; }
@@ -612,10 +623,7 @@ svg { display: block; flex: 0 0 auto; }
 #position:hover::-moz-range-thumb, #position:focus::-moz-range-thumb { opacity: 1; }
 
 /* Menus */
-.popover-menu {
-  position: fixed; z-index: 40; 
-  box-shadow: var(--shadow-menu);
-}
+.popover-menu { position: fixed; z-index: 40; }
 .popover-btn {
   width: 100%; display: flex; align-items: center; 
   border: 0; background: transparent; color: var(--text-dim); text-align: left; 
@@ -644,7 +652,7 @@ svg { display: block; flex: 0 0 auto; }
 .update-notice-preferences { margin-top: auto; padding: 7px; border-radius: 8px; }
 .pref-nav-legal { margin-top: 0; }
 .pref-nav-btn:hover { background: var(--hover); color: var(--text); }
-.pref-nav-btn.active { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent), transparent 72%); color: var(--text); }
+.pref-nav-btn.active { background: var(--selected); border-color: var(--selected-edge); color: var(--text); font-weight: 600; }
 .pref-nav-btn.active svg { color: var(--accent); }
 .preferences-content { overflow: auto; }
 .pref-page { display: flex; flex-direction: column; gap: 15px; }
@@ -665,23 +673,28 @@ svg { display: block; flex: 0 0 auto; }
 .legal-disclosure[open] summary { border-bottom: 1px solid var(--line); }
 .legal-disclosure pre { max-height: 280px; margin: 0; overflow: auto; padding: 12px; background: var(--bg); color: var(--text-dim); white-space: pre-wrap; overflow-wrap: anywhere; font: var(--fs-xs)/1.5 var(--font-mono); user-select: text; }
 .wheel-modal { width: min(520px, calc(100vw - 60px)); }
-.wheel-stage-wrapper { position: relative; width: 350px; height: 350px; margin: 18px auto 8px; }
+.wheel-stage {
+  padding: 14px 0 8px;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--accent) 10%, transparent), transparent) center / 430px 430px no-repeat;
+}
+.wheel-stage-wrapper { position: relative; width: 350px; height: 350px; margin: 0 auto; }
+/* The canvas draws the bezel, its shadow, the hub and the pointer itself:
+   canvas paths are antialiased, CSS shapes are not in WebKitGTK. */
 #wheel-canvas { position: relative; z-index: 1; width: 100%; height: 100%; }
-/* A static shadow under the wheel. A CSS filter on the canvas would re-blur the
-   whole wheel on every animation frame. */
-.wheel-stage-wrapper::before { content: ""; position: absolute; inset: 1.4%; border-radius: 50%; box-shadow: 0 5px 12px var(--shade-2); }
-.wheel-pointer-needle { position: absolute; z-index: 2; top: -3px; left: 50%; width: 0; height: 0; transform: translateX(-50%); border-left: 12px solid transparent; border-right: 12px solid transparent; border-top: 25px solid var(--text); }
-.wheel-center-hub { position: absolute; inset: 50% auto auto 50%; width: 44px; height: 44px; display: grid; place-items: center; transform: translate(-50%, -50%); border: 2px solid var(--line-strong); border-radius: 50%; background: var(--panel-raised); }
-.wheel-center-hub img { width: 25px; height: 25px; }
-.wheel-result-strip { min-height: 54px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 8px 15px; border-top: 1px solid var(--line); text-align: center; }
+.wheel-center-hub { position: absolute; z-index: 2; inset: 50% auto auto 50%; display: grid; place-items: center; transform: translate(-50%, -50%); pointer-events: none; }
+.wheel-center-hub img { width: 30px; height: 30px; }
+.wheel-result-strip { min-height: 58px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 8px 18px; border-top: 1px solid var(--line); text-align: center; }
 .wheel-result-strip span { color: var(--text-muted); font-size: var(--fs-xs); }
-.wheel-result-strip strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-md); font-weight: 600; }
+.wheel-result-strip strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xl); font-weight: 700; letter-spacing: -.01em; }
+.wheel-modal.has-winner .wheel-result-strip span { color: var(--accent); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.wheel-modal.has-winner .wheel-result-strip strong { animation: wheel-winner 420ms cubic-bezier(.2, .9, .3, 1.25); }
+@keyframes wheel-winner { from { opacity: .3; transform: scale(.9); } }
 
 /* Feedback */
 .toast-popup {
   position: fixed; z-index: 80; left: 50%; bottom: 18px; display: flex; align-items: center; gap: 8px;
-  transform: translate(-50%, 14px); border: 1px solid var(--line-strong); 
-  background: var(--panel-raised); color: var(--text); box-shadow: var(--shadow-menu); opacity: 0; pointer-events: none;
+  transform: translate(-50%, 14px);
+  color: var(--text); opacity: 0; pointer-events: none;
   transition: opacity 100ms ease, transform 100ms ease;
 }
 .toast-popup.show { transform: translate(-50%, 0); opacity: 1; }
@@ -693,7 +706,7 @@ body:has(#room-view:not(.hidden)) .toast-popup { bottom: calc(var(--playback-hei
 .toast-message-text { font-size: var(--fs-sm); }
 .drop-overlay { position: fixed; z-index: 70; inset: var(--titlebar-height) 0 0; display: none; place-items: center; background: color-mix(in srgb, var(--accent), transparent 84%); border: 2px solid var(--accent); pointer-events: none; }
 body.drag-active .drop-overlay { display: grid; }
-.drop-modal-box { min-width: 300px; display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 25px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel-raised); box-shadow: var(--shadow-menu); }
+.drop-modal-box { min-width: 300px; display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 25px; }
 .drop-box-icon { color: var(--accent); }
 .drop-modal-box small { color: var(--text-muted); }
 
@@ -762,7 +775,7 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
   border: .5px solid var(--line-strong);
   border-radius: 9px;
   background: var(--fill);
-  box-shadow: inset 0 .5px var(--edge-hi), 0 .5px 1px var(--shade-1);
+  box-shadow: inset 0 .5px var(--edge-hi);
   font-size: var(--fs-md);
   font-weight: 500;
   letter-spacing: 0;
@@ -775,10 +788,11 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
   border-color: rgba(255, 255, 255, .1);
   background: var(--accent);
   color: var(--accent-text);
-  box-shadow: inset 0 .5px rgba(255, 255, 255, .22), 0 1px 2px var(--shade-1);
+  box-shadow: inset 0 .5px rgba(255, 255, 255, .22);
   font-weight: 500;
 }
 .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+.btn-primary:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent-text) 75%, transparent); }
 .btn-primary:active:not(:disabled) { background: var(--accent-pressed); }
 .btn-danger { color: var(--danger); background: transparent; }
 .btn-ghost { background: transparent; border-color: transparent; box-shadow: none; }
@@ -806,7 +820,7 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
 .form-input:focus, .form-select:focus, .participant-role-select:focus {
   border-color: var(--accent);
   background-color: color-mix(in srgb, var(--field), var(--panel-raised) 24%);
-  box-shadow: 0 0 0 3px var(--focus);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 .form-input::placeholder { color: color-mix(in srgb, var(--text-muted), transparent 12%); }
 .form-input-sm { height: 36px; font-size: var(--fs-md); }
@@ -855,7 +869,7 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
 .sidebar-nav-section { padding: 8px 10px; }
 .sidebar-section-label { margin: 0 10px 8px; font-size: var(--fs-xs); font-weight: 600; letter-spacing: .04em; }
 .mode-btn { height: 40px; padding: 0 11px; gap: 10px; border: 0; border-radius: 9px; font-size: var(--fs-lg); }
-.mode-btn.active { background: var(--accent-soft); border: 0; color: var(--text); }
+.mode-btn.active { background: var(--selected); border: 0; box-shadow: inset 0 0 0 1px var(--selected-edge); color: var(--text); font-weight: 600; }
 .sidebar-footer { padding: 12px; }
 .connect-main-panel { background: var(--panel); }
 .connect-form { width: min(780px, calc(100% - 80px)); padding: 46px 0 52px; gap: 21px; }
@@ -892,7 +906,7 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
 .queue-item { min-height: 56px; padding: 0 11px; background: var(--panel); }
 .queue-item:nth-child(even) { background: var(--panel); }
 .queue-item:hover { background: var(--hover); }
-.queue-item.active { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+.queue-item.active { background: var(--selected); box-shadow: inset 3px 0 var(--accent); }
 .queue-drag-handle { display: grid; place-items: center; color: var(--text-muted); }
 .queue-drag-handle .icon { width: 16px; height: 16px; }
 .queue-index { font-size: var(--fs-sm); }
@@ -939,7 +953,7 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
 .chat-toolbar { gap: 8px; }
 .chat-segmented-filter { margin-left: auto; padding: 2px; border: 0; border-radius: 8px; background: var(--sunken); }
 .chat-filter { height: 26px; padding: 0 9px; border-radius: 6px; font-size: var(--fs-sm); font-weight: 500; }
-.chat-filter.active { background: var(--fill-strong); box-shadow: 0 1px 3px var(--shade-1); }
+.chat-filter.active { background: var(--segment-active); box-shadow: inset 0 0 0 .5px var(--line-strong); }
 .chat-feed-stream { padding: 5px 0; }
 .chat-msg-row { gap: 9px; padding: 9px 12px; }
 .chat-msg-avatar { width: 27px; height: 27px; flex-basis: 27px; font-size: var(--fs-xs); }
@@ -1006,12 +1020,12 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
 #position:hover::-moz-range-thumb, #position:focus-visible::-moz-range-thumb { transform: scale(1.14); box-shadow: 0 2px 9px var(--shade-3); }
 
 /* Menus and in-app dialogs */
-.popover-menu { min-width: 246px; padding: 6px; border: .5px solid var(--line-strong); border-radius: 11px; background: color-mix(in srgb, var(--panel-raised), transparent 4%); }
+.popover-menu { min-width: 246px; padding: 6px; }
 .popover-btn { min-height: 36px; gap: 10px; padding: 0 10px; border-radius: 7px; font-size: var(--fs-md); }
 .popover-btn:hover:not(:disabled) { background: var(--accent); color: var(--accent-text); }
 .popover-badge { font-size: var(--fs-xs); }
 .desktop-modal::backdrop { background: var(--scrim); }
-.modal-shell { border: .5px solid var(--line-strong); border-radius: 14px; background: color-mix(in srgb, var(--panel-raised), transparent 2%); box-shadow: var(--shadow-modal); }
+.modal-shell { border: .5px solid var(--line-strong); border-radius: 14px; background: color-mix(in srgb, var(--panel-raised), transparent 2%); }
 .modal-header { min-height: 58px; height: auto; padding: 10px 14px 10px 18px; background: var(--fill-quiet); }
 .modal-title-group h2 { font-size: var(--fs-2xl); }
 .modal-eyebrow, .modal-subtitle { font-size: var(--fs-sm); }
@@ -1025,7 +1039,7 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
 .compact-modal-shell { width: 100%; }
 .compact-modal .modal-footer { justify-content: flex-end; }
 
-.toast-popup { min-height: 40px; padding: 0 14px; border-radius: 10px; font-size: var(--fs-md); }
+.toast-popup { min-height: 40px; padding: 0 14px; font-size: var(--fs-md); }
 
 @media (max-width: 1160px) {
   .now-playing-panel { grid-template-columns: minmax(200px, 1fr) auto minmax(200px, 1fr); }
@@ -1102,11 +1116,12 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
 }
 .custom-select.compact .custom-select-trigger { height: 32px; min-width: 112px; font-size: var(--fs-sm); }
 .custom-select-trigger:hover:not(:disabled) { background: color-mix(in srgb, var(--field), var(--hover) 40%); }
-.custom-select-trigger:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
+.custom-select-trigger:focus-visible { outline: none; border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 .custom-select-trigger:disabled { opacity: .48; }
 .custom-select-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .custom-select-trigger svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; color: var(--text-muted); }
-.custom-select-menu { min-width: 190px; max-height: min(360px, calc(100vh - 20px)); overflow-y: auto; }
+.custom-select-menu { min-width: 190px; }
+.custom-select-options { max-height: min(348px, calc(100vh - 32px)); overflow-y: auto; }
 .custom-select-menu .popover-btn { padding-left: 8px; }
 .menu-check { width: 16px; flex: 0 0 16px !important; color: currentColor; text-align: center; font-weight: 700; }
 
@@ -1192,7 +1207,7 @@ input[type="number"] { appearance: textfield; }
   border: .5px solid var(--line-strong);
   border-radius: 9px;
   background: var(--fill);
-  box-shadow: inset 0 .5px var(--edge-hi), 0 .5px 1px var(--shade-1);
+  box-shadow: inset 0 .5px var(--edge-hi);
   overflow: hidden;
   transition: border-color 90ms ease, box-shadow 90ms ease;
 }
@@ -1530,7 +1545,7 @@ body[data-controls-style="kde"] .window-control svg { width: 11px; height: 11px;
   border-radius: 50%;
   background: var(--accent);
   color: var(--accent-text);
-  box-shadow: inset 0 .5px rgba(255, 255, 255, .22), 0 1px 3px var(--shade-1);
+  box-shadow: inset 0 .5px rgba(255, 255, 255, .22);
   transition: background 90ms ease;
 }
 .btn-play-pause:hover:not(:disabled) { background: var(--accent-hover); }
@@ -1648,11 +1663,7 @@ body[data-controls-style="kde"] .window-control svg { width: 11px; height: 11px;
   align-items: center;
   gap: 6px;
   padding: 0 12px 0 10px;
-  border: .5px solid color-mix(in srgb, var(--accent), transparent 40%);
-  border-radius: 999px;
-  background: var(--accent);
   color: var(--accent-text);
-  box-shadow: var(--shadow-menu);
   font-size: var(--fs-sm);
   font-weight: 500;
 }
@@ -1669,3 +1680,95 @@ body[data-controls-style="kde"] .window-control svg { width: 11px; height: 11px;
 }
 .popover-btn:hover:not(:disabled) .menu-hint,
 .popover-btn:focus-visible .menu-hint { color: inherit; opacity: .8; }
+
+/* ==========================================================================
+   Smooth corners. WebKitGTK paints border-radius, rounded clips and inline
+   SVG shapes without antialiasing, so every curve shows stair steps, while
+   gradients stay smooth. Rounded surfaces are therefore cut out by a mask
+   built from gradients: each sets --r to its corner radius (border-radius
+   still shapes its border and background inside the mask). A mask also clips
+   whatever the element paints outside itself, so masked controls draw their
+   focus rings inset, and dialogs cast their shadow from a separate layer.
+   ========================================================================== */
+.btn, .form-input, .form-select, .participant-role-select, .custom-select-trigger,
+.checkbox-row, .queue-action, .mode-btn, .pref-nav-btn, .popover-btn,
+.chat-segmented-filter, .chat-filter, .counter-badge, .tab-counter, .update-notice,
+.session-pill, .rate-control, .number-stepper, .legal-overview, .legal-disclosure,
+.session-info-list, .modal-shell { --r: 9px; }
+.btn, .form-input, .form-select, .participant-role-select, .custom-select-trigger,
+.checkbox-row, .queue-action, .mode-btn, .pref-nav-btn, .popover-btn,
+.chat-segmented-filter, .chat-filter, .counter-badge, .tab-counter, .update-notice,
+.session-pill, .rate-control, .number-stepper, .legal-overview, .legal-disclosure,
+.session-info-list, .modal-shell,
+.popover-menu::before, .toast-popup::before, .chat-new-messages::before, .drop-modal-box::before {
+  mask:
+    radial-gradient(var(--r) at var(--r) var(--r), #000 calc(100% - .8px), #0000) 0 0 / var(--r) var(--r) no-repeat,
+    radial-gradient(var(--r) at 0 var(--r), #000 calc(100% - .8px), #0000) 100% 0 / var(--r) var(--r) no-repeat,
+    radial-gradient(var(--r) at var(--r) 0, #000 calc(100% - .8px), #0000) 0 100% / var(--r) var(--r) no-repeat,
+    radial-gradient(var(--r) at 0 0, #000 calc(100% - .8px), #0000) 100% 100% / var(--r) var(--r) no-repeat,
+    linear-gradient(#000 0 0) center / calc(100% - 2 * var(--r)) 100% no-repeat,
+    linear-gradient(#000 0 0) center / 100% calc(100% - 2 * var(--r)) no-repeat;
+}
+.queue-action, .popover-btn, .legal-overview, .legal-disclosure { --r: 7px; }
+.chat-filter { --r: 6px; }
+.pref-nav-btn, .chat-segmented-filter, .update-notice-preferences { --r: 8px; }
+.update-notice-sidebar { --r: 10px; }
+.checkbox-row, .session-info-list { --r: 11px; }
+.connection-checkbox-row { --r: 9px; }
+.modal-shell { --r: 14px; }
+/* Square pieces inside a segmented control are clipped by their parent. */
+.number-stepper .form-input,
+.rate-control .custom-select.rate-select .custom-select-trigger { mask: none; }
+
+.btn-transport, .btn-play-pause, .avatar-badge, .chat-msg-avatar, .update-notice-icon,
+body[data-controls-style="gnome"] .window-control,
+body[data-controls-style="kde"] .window-control {
+  mask: radial-gradient(closest-side, #000 calc(100% - .8px), #0000);
+}
+
+/* A large blurred shadow drawn by a rounded box leaks a darker square into
+   the corners the box does not cover. The dialog casts it from a square
+   layer tucked a corner radius inside the shell instead. The dialog must
+   not clip it, so a shell that can outgrow a short window scrolls itself. */
+.desktop-modal { overflow: visible; }
+.wheel-modal .modal-shell { max-height: calc(100vh - 32px); overflow: hidden auto; }
+.desktop-modal::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 14px;
+  box-shadow: var(--shadow-modal);
+  pointer-events: none;
+}
+
+/* Floating surfaces keep their content unmasked and paint behind it on two
+   layers: the masked surface itself and, a corner radius inside it, the
+   shadow. A mask on the element would clip that shadow away. */
+.popover-menu, .toast-popup, .chat-new-messages, .drop-modal-box {
+  --r: 11px;
+  --surface: var(--panel-raised);
+  --surface-edge: var(--line-strong);
+  isolation: isolate;
+}
+.popover-menu { --surface: color-mix(in srgb, var(--panel-raised), transparent 4%); }
+.toast-popup { --r: 10px; }
+.chat-new-messages { --r: 14px; --surface: var(--accent); --surface-edge: color-mix(in srgb, var(--accent), transparent 40%); }
+.drop-modal-box { --r: 7px; position: relative; }
+.popover-menu::before, .toast-popup::before, .chat-new-messages::before, .drop-modal-box::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border: .5px solid var(--surface-edge);
+  border-radius: var(--r);
+  background: var(--surface);
+  pointer-events: none;
+}
+.popover-menu::after, .toast-popup::after, .chat-new-messages::after, .drop-modal-box::after {
+  content: "";
+  position: absolute;
+  z-index: -2;
+  inset: var(--r);
+  box-shadow: var(--shadow-menu);
+  pointer-events: none;
+}

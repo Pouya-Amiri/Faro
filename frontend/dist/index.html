@@ -25,7 +25,7 @@
         document.documentElement.style.colorScheme = isDark ? "dark" : "light";
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=39" />
+    <link rel="stylesheet" href="/styles.css?v=40" />
     <link rel="stylesheet" href="/desktop.css?v=18" />
   </head>
   <body>
@@ -595,11 +595,12 @@
                 <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 2.5L9.5 9.5M9.5 2.5L2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
               </button>
             </header>
-            <div class="wheel-stage-wrapper">
-              <div class="wheel-pointer-needle" aria-hidden="true"></div>
-              <canvas id="wheel-canvas" width="700" height="700" aria-label="Playlist selection wheel"></canvas>
-              <div class="wheel-center-hub" aria-hidden="true">
-                <img src="/logo.png" alt="" />
+            <div class="wheel-stage">
+              <div class="wheel-stage-wrapper">
+                <canvas id="wheel-canvas" width="700" height="700" aria-label="Playlist selection wheel"></canvas>
+                <div class="wheel-center-hub" aria-hidden="true">
+                  <img src="/logo.png" alt="" />
+                </div>
               </div>
             </div>
             <div class="wheel-result-strip" aria-live="polite">
@@ -904,6 +905,6 @@
       </div>
     </div>
 
-    <script type="module" src="/app.js?v=29"></script>
+    <script type="module" src="/app.js?v=30"></script>
   </body>
 </html>

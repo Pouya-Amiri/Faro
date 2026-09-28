@@ -40,7 +40,7 @@ let legalSourceURL = "";
 let updateReleaseURL = "";
 const youtubeInfoCache = new Map();
 // The wheel is drawn on a canvas, so it cannot inherit the CSS tokens; these
-// two palettes mirror them instead. Both keep neighbouring segments in
+// palettes mirror them instead. Each keeps neighbouring segments in
 // different hues, and each theme owns its own label treatment.
 const wheelThemes = {
   dark: {
@@ -61,8 +61,15 @@ const wheelThemes = {
     // White on every segment with a drop shadow, as the dark wheel has always
     // drawn itself.
     label: () => ({ color: "#ffffff", shadow: "rgba(0, 0, 0, 0.6)" }),
-    separator: "rgba(22, 22, 29, 0.42)",
-    rim: "rgba(255, 255, 255, 0.3)",
+    separator: "rgba(255, 255, 255, 0.2)",
+    // Lit from the top left: the bezel runs from its first colour to its second.
+    bezel: ["#3b3b40", "#1c1c1f"],
+    bezelLine: "rgba(255, 255, 255, 0.14)",
+    // Pegs, pointer and the winner outline take the theme accent.
+    accent: "#0a84ff",
+    pointerRim: "#f5f5f7",
+    // Washes the segments that did not win.
+    dim: "rgba(12, 12, 14, 0.58)",
     empty: "#18181a"
   },
   light: {
@@ -87,8 +94,15 @@ const wheelThemes = {
       const ink = wheelLabelColor(segment, "#FCFBF9", "#25272A");
       return { color: ink, shadow: ink === "#25272A" ? "transparent" : "rgba(0, 0, 0, 0.6)" };
     },
-    separator: "rgba(37, 39, 42, 0.3)",
-    rim: "rgba(37, 39, 42, 0.18)",
+    separator: "rgba(255, 255, 255, 0.75)",
+    // Lit from the top left: the bezel runs from its first colour to its second.
+    bezel: ["#FFFFFF", "#DAD6D0"],
+    bezelLine: "rgba(37, 39, 42, 0.16)",
+    // Pegs, pointer and the winner outline take the theme accent.
+    accent: "#4D699B",
+    pointerRim: "#FFFFFF",
+    // Washes the segments that did not win.
+    dim: "rgba(247, 245, 242, 0.66)",
     empty: "#FFFFFF"
   },
   sage: {
@@ -112,8 +126,15 @@ const wheelThemes = {
       const ink = wheelLabelColor(segment, "#F2F6EC", "#222922");
       return { color: ink, shadow: ink === "#222922" ? "transparent" : "rgba(0, 0, 0, 0.6)" };
     },
-    separator: "rgba(34, 41, 34, 0.3)",
-    rim: "rgba(34, 41, 34, 0.18)",
+    separator: "rgba(248, 251, 244, 0.7)",
+    // Lit from the top left: the bezel runs from its first colour to its second.
+    bezel: ["#F8FBF4", "#C6CFBC"],
+    bezelLine: "rgba(34, 41, 34, 0.18)",
+    // Pegs, pointer and the winner outline take the theme accent.
+    accent: "#BA5220",
+    pointerRim: "#F8FBF4",
+    // Washes the segments that did not win.
+    dim: "rgba(226, 231, 220, 0.66)",
     empty: "#E2E7DC"
   },
   midnight: {
@@ -133,8 +154,15 @@ const wheelThemes = {
     ],
     // High-contrast silver-white ink with subtle drop shadow on deep maritime segments
     label: () => ({ color: "#F0F4F8", shadow: "rgba(0, 0, 0, 0.75)" }),
-    separator: "rgba(12, 16, 23, 0.45)",
-    rim: "rgba(180, 200, 225, 0.3)",
+    separator: "rgba(240, 244, 248, 0.18)",
+    // Lit from the top left: the bezel runs from its first colour to its second.
+    bezel: ["#2A3854", "#101723"],
+    bezelLine: "rgba(180, 200, 225, 0.16)",
+    // Pegs, pointer and the winner outline take the theme accent.
+    accent: "#E5A93C",
+    pointerRim: "#F0F4F8",
+    // Washes the segments that did not win.
+    dim: "rgba(8, 11, 17, 0.6)",
     empty: "#0C1017"
   },
   pine: {
@@ -152,10 +180,21 @@ const wheelThemes = {
       "#10B981", // Emerald beacon
       "#9F5874"  // Coastal heather
     ],
-    // High-contrast clean mist ink with drop shadow on maritime brass segments
-    label: () => ({ color: "#E8ECE8", shadow: "rgba(0, 0, 0, 0.75)" }),
-    separator: "rgba(17, 23, 19, 0.55)",
-    rim: "#313A33",
+    // Mist ink with a drop shadow, except on the pale brass segments, which
+    // take the dark sea-charcoal ink instead.
+    label: (segment) => {
+      const ink = wheelLabelColor(segment, "#E8ECE8", "#111713");
+      return { color: ink, shadow: ink === "#111713" ? "transparent" : "rgba(0, 0, 0, 0.75)" };
+    },
+    separator: "rgba(232, 236, 232, 0.16)",
+    // Lit from the top left: the bezel runs from its first colour to its second.
+    bezel: ["#323D35", "#141A16"],
+    bezelLine: "rgba(232, 236, 232, 0.12)",
+    // Pegs, pointer and the winner outline take the theme accent.
+    accent: "#C6A15B",
+    pointerRim: "#E8ECE8",
+    // Washes the segments that did not win.
+    dim: "rgba(10, 14, 11, 0.6)",
     empty: "#111713"
   }
 };
@@ -821,11 +860,16 @@ function wheelTargetRotation(wheel) {
   return Number(wheel.turns || 8) * Math.PI * 2 - (Number(wheel.winner || 0) + 0.5) * arc - jitter;
 }
 
-// The wheel face is drawn once per queue/theme/size into an offscreen canvas
-// and each animation frame only rotates that bitmap. Redrawing every segment
-// and shadowed label per frame was expensive with CPU rendering. Geometry is
-// expressed against a 1000px reference wheel and scaled to the real size.
+// The wheel is composited from cached layers, so an animation frame only
+// copies bitmaps: a fixed base (drop shadow and bezel), the rotating face
+// (segments, labels and pegs), a fixed overlay (shading and hub) and the
+// pointer. Redrawing every segment and shadowed label per frame was expensive
+// with CPU rendering. Geometry is expressed against a 1000px reference wheel
+// and scaled to the real size.
 const wheelFaceCache = { key: "", canvas: null };
+const wheelFrameCache = { key: "", base: null, overlay: null, pointer: null };
+const wheelGeometry = { radius: 462, bezel: 36, peg: 8, hub: 86, pivot: 46, head: 26, tip: 106 };
+const wheelFont = '-apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif';
 
 function wheelCanvasSize(canvas) {
   const cssSize = canvas.clientWidth || 350;
@@ -846,43 +890,158 @@ function wheelSegmentColor(index, count, palette) {
   return palette[index % size];
 }
 
-function wheelFace(items, theme, size, highlight) {
-  const key = JSON.stringify([document.documentElement.dataset.theme, size, highlight, items.map((item) => item.label)]);
+// Moves a #rrggbb colour towards another by the given amount.
+function mixWheelColor(hex, target, amount) {
+  const from = parseInt(hex.slice(1), 16), to = parseInt(target.slice(1), 16);
+  const channel = (shift) => Math.round(((from >> shift) & 255) * (1 - amount) + ((to >> shift) & 255) * amount);
+  return `rgb(${channel(16)}, ${channel(8)}, ${channel(0)})`;
+}
+
+// Queue labels are often release file names. The wheel shows the part that
+// tells them apart ("Show Name S01E02"); the result line keeps the full name.
+function wheelLabelText(label) {
+  let text = String(label || "").trim();
+  if (/\s/.test(text)) return text;
+  text = text.replace(/\.[a-z0-9]{2,4}$/i, "").replace(/[._]+/g, " ").trim();
+  const episode = text.match(/^(.*?\bS\d{1,2} ?E\d{1,3})\b/i);
+  if (episode) return episode[1];
+  const tag = text.search(/ (?:2160p|1440p|1080p|720p|576p|480p|4k|uhd|hdr|x26[45]|h ?26[45]|hevc|av1|web(?:-?dl|rip)?|blu-?ray|bdrip|brrip|dvdrip|remux)\b/i);
+  return tag > 0 ? text.slice(0, tag) : text;
+}
+
+// Labels of one series all start the same; the wheel drops the words every
+// label shares when each keeps something of its own ("S01E02").
+function wheelLabelTexts(items) {
+  const texts = items.map((item, index) => wheelLabelText(item.label) || `Item ${index + 1}`);
+  if (texts.length < 2) return texts;
+  const words = texts.map((text) => text.split(" "));
+  let shared = 0;
+  while (words.every((parts) => parts.length > shared + 1 && parts[shared] === words[0][shared])) shared++;
+  return shared ? words.map((parts) => parts.slice(shared).join(" ")) : texts;
+}
+
+function fitWheelLabel(ctx, text, width) {
+  if (ctx.measureText(text).width <= width) return text;
+  let low = 0, high = text.length;
+  while (low < high) {
+    const middle = (low + high + 1) >> 1;
+    if (ctx.measureText(`${text.slice(0, middle).trimEnd()}…`).width <= width) low = middle;
+    else high = middle - 1;
+  }
+  return `${text.slice(0, low).trimEnd()}…`;
+}
+
+function wheelSector(ctx, radius, start, end) {
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, radius, start, end); ctx.closePath();
+}
+
+// resting is the rotation the wheel will stop at; labels are laid out to read
+// upright there.
+function wheelFace(items, theme, size, highlight, resting) {
+  const turn = Math.PI * 2, restingAngle = ((resting % turn) + turn) % turn;
+  const key = JSON.stringify([document.documentElement.dataset.theme, size, highlight, restingAngle.toFixed(3), items.map((item) => item.label)]);
   if (wheelFaceCache.key === key && wheelFaceCache.canvas) return wheelFaceCache.canvas;
   const face = wheelFaceCache.canvas || document.createElement("canvas");
   face.width = size;
   face.height = size;
   const ctx = face.getContext("2d");
-  const scale = size / 1000, center = size / 2, radius = center - 14 * scale;
-  const arc = Math.PI * 2 / items.length;
+  const scale = size / 1000, center = size / 2, radius = (wheelGeometry.radius - wheelGeometry.bezel) * scale;
+  const hub = wheelGeometry.hub * scale, count = items.length, arc = Math.PI * 2 / count;
+  const colors = items.map((_, index) => wheelSegmentColor(index, count, theme.segments));
+  const segmentStart = (index) => -Math.PI / 2 + index * arc;
   ctx.clearRect(0, 0, size, size);
   ctx.save();
   ctx.translate(center, center);
-  for (let index = 0; index < items.length; index++) {
-    const start = -Math.PI / 2 + index * arc, end = start + arc;
-    ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, radius, start, end); ctx.closePath();
-    // A queue position owns its color. The spin seed only affects trajectory,
-    // so opening or spinning the same wheel never repaints its segments.
-    ctx.fillStyle = wheelSegmentColor(index, items.length, theme.segments);
+
+  // A queue position owns its color. The spin seed only affects trajectory,
+  // so opening or spinning the same wheel never repaints its segments. Each
+  // segment deepens towards the hub and brightens towards the rim.
+  colors.forEach((color, index) => {
+    const shading = ctx.createRadialGradient(0, 0, hub, 0, 0, radius);
+    shading.addColorStop(0, mixWheelColor(color, "#000000", 0.24));
+    shading.addColorStop(0.62, color);
+    shading.addColorStop(1, mixWheelColor(color, "#ffffff", 0.1));
+    wheelSector(ctx, radius, segmentStart(index), segmentStart(index + 1));
+    ctx.fillStyle = shading;
     ctx.fill();
-    ctx.strokeStyle = theme.separator; ctx.lineWidth = 3 * scale; ctx.stroke();
-    if (index === highlight) {
-      ctx.save(); ctx.globalAlpha = 0.28; ctx.fillStyle = "#ffffff"; ctx.fill(); ctx.restore();
+  });
+  if (count > 1) {
+    ctx.beginPath();
+    for (let index = 0; index < count; index++) {
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(segmentStart(index)) * radius, Math.sin(segmentStart(index)) * radius);
     }
-    if (items.length <= 24) {
-      const label = String(items[index].label || `Item ${index + 1}`);
-      const maximum = items.length > 12 ? 20 : 30;
-      const text = label.length > maximum ? `${label.slice(0, maximum - 1)}…` : label;
-      const ink = theme.label(theme.segments[index % theme.segments.length]);
+    ctx.strokeStyle = theme.separator;
+    ctx.lineWidth = 2.5 * scale;
+    ctx.stroke();
+  }
+
+  // The winner stays lit and outlined; every other segment is washed out.
+  if (highlight >= 0 && highlight < count) {
+    ctx.fillStyle = theme.dim;
+    for (let index = 0; index < count; index++) {
+      if (index === highlight) continue;
+      wheelSector(ctx, radius, segmentStart(index), segmentStart(index + 1));
+      ctx.fill();
+    }
+    ctx.save();
+    wheelSector(ctx, radius, segmentStart(highlight), segmentStart(highlight + 1));
+    ctx.clip();
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 14 * scale;
+    ctx.strokeStyle = theme.accent;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (count <= 24) {
+    // One size for every label: as large as the segments allow, shrinking
+    // (down to a floor) until the longest fits before any is shortened.
+    const outer = radius - 32 * scale, inner = hub + 22 * scale;
+    const texts = wheelLabelTexts(items);
+    let fontSize = Math.max(20, Math.min(36, radius / scale * 0.6 * arc * 0.55)) * scale;
+    const setFont = () => { ctx.font = `700 ${fontSize}px ${wheelFont}`; };
+    setFont();
+    const longest = Math.max(...texts.map((text) => ctx.measureText(text).width));
+    if (longest > outer - inner) {
+      fontSize = Math.max(24 * scale, fontSize * (outer - inner) / longest);
+      setFont();
+    }
+    ctx.textBaseline = "middle";
+    texts.forEach((label, index) => {
+      const ink = theme.label(colors[index]);
+      const text = fitWheelLabel(ctx, label, outer - inner);
+      const angle = segmentStart(index) + arc / 2;
+      // Labels that will rest on the left half turn over so none reads upside
+      // down there; each still starts from the rim.
+      const flipped = Math.cos(angle + restingAngle) < -1e-6;
       ctx.save();
-      ctx.rotate(start + arc / 2);
-      ctx.textAlign = "right";
-      ctx.textBaseline = "middle";
-      ctx.font = `600 ${(items.length > 12 ? 32 : 38) * scale}px -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif`;
+      ctx.rotate(flipped ? angle + Math.PI : angle);
+      ctx.textAlign = flipped ? "left" : "right";
+      ctx.globalAlpha = highlight >= 0 && index !== highlight ? 0.55 : 1;
       ctx.fillStyle = ink.color;
       ctx.shadowColor = ink.shadow;
       ctx.shadowBlur = 4 * scale;
-      ctx.fillText(text, radius - 34 * scale, 0, radius * 0.65);
+      ctx.fillText(text, flipped ? -outer : outer, 0);
+      ctx.restore();
+    });
+  }
+
+  // Pegs sit on the bezel between segments; past a few dozen they would
+  // merge into a solid ring.
+  if (count > 1 && count <= 60) {
+    const pegRadius = (wheelGeometry.radius - wheelGeometry.bezel / 2) * scale, peg = wheelGeometry.peg * scale;
+    for (let index = 0; index < count; index++) {
+      const x = Math.cos(segmentStart(index)) * pegRadius, y = Math.sin(segmentStart(index)) * pegRadius;
+      const shine = ctx.createRadialGradient(x - peg * 0.35, y - peg * 0.35, peg * 0.1, x, y, peg);
+      shine.addColorStop(0, mixWheelColor(theme.accent, "#ffffff", 0.45));
+      shine.addColorStop(1, theme.accent);
+      ctx.save();
+      ctx.shadowColor = "rgba(0, 0, 0, 0.4)";
+      ctx.shadowBlur = 5 * scale;
+      ctx.beginPath(); ctx.arc(x, y, peg, 0, Math.PI * 2);
+      ctx.fillStyle = shine;
+      ctx.fill();
       ctx.restore();
     }
   }
@@ -892,27 +1051,133 @@ function wheelFace(items, theme, size, highlight) {
   return face;
 }
 
-function drawWheel(wheel, rotation = 0, highlight = -1) {
+// The layers that do not turn: the bezel with its drop shadow underneath the
+// face, the rim shading and hub above it, and the pointer sprite.
+function wheelFrame(theme, size) {
+  const key = `${document.documentElement.dataset.theme}:${size}`;
+  if (wheelFrameCache.key === key) return wheelFrameCache;
+  const scale = size / 1000, center = size / 2;
+  const outer = wheelGeometry.radius * scale, radius = (wheelGeometry.radius - wheelGeometry.bezel) * scale, hub = wheelGeometry.hub * scale;
+  const layer = (name, width = size, height = size) => {
+    const canvas = wheelFrameCache[name] || document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    wheelFrameCache[name] = canvas;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    return ctx;
+  };
+  const lit = (ctx, x, y, extent, [light, dark]) => {
+    const gradient = ctx.createLinearGradient(x - extent, y - extent, x + extent, y + extent);
+    gradient.addColorStop(0, light);
+    gradient.addColorStop(1, dark);
+    return gradient;
+  };
+
+  let ctx = layer("base");
+  ctx.save();
+  ctx.shadowColor = "rgba(0, 0, 0, 0.3)";
+  ctx.shadowBlur = 30 * scale;
+  ctx.shadowOffsetY = 10 * scale;
+  ctx.beginPath(); ctx.arc(center, center, outer, 0, Math.PI * 2);
+  ctx.fillStyle = lit(ctx, center, center, outer, theme.bezel);
+  ctx.fill();
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(center, center, outer - 1.5 * scale, 0, Math.PI * 2);
+  ctx.strokeStyle = theme.bezelLine;
+  ctx.lineWidth = 3 * scale;
+  ctx.stroke();
+
+  ctx = layer("overlay");
+  // The face sinks slightly under the bezel, and a soft sheen falls across
+  // its upper half.
+  const rimShade = ctx.createRadialGradient(center, center, radius - 40 * scale, center, center, radius);
+  rimShade.addColorStop(0, "rgba(0, 0, 0, 0)");
+  rimShade.addColorStop(1, "rgba(0, 0, 0, 0.26)");
+  ctx.beginPath(); ctx.arc(center, center, radius, 0, Math.PI * 2);
+  ctx.fillStyle = rimShade;
+  ctx.fill();
+  const sheen = ctx.createLinearGradient(0, center - radius, 0, center + radius * 0.2);
+  sheen.addColorStop(0, "rgba(255, 255, 255, 0.16)");
+  sheen.addColorStop(1, "rgba(255, 255, 255, 0)");
+  ctx.fillStyle = sheen;
+  ctx.fill();
+  ctx.beginPath(); ctx.arc(center, center, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.28)";
+  ctx.lineWidth = 2 * scale;
+  ctx.stroke();
+  ctx.save();
+  ctx.shadowColor = "rgba(0, 0, 0, 0.35)";
+  ctx.shadowBlur = 18 * scale;
+  ctx.shadowOffsetY = 4 * scale;
+  ctx.beginPath(); ctx.arc(center, center, hub, 0, Math.PI * 2);
+  ctx.fillStyle = lit(ctx, center, center, hub, theme.bezel);
+  ctx.fill();
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(center, center, hub - 3.5 * scale, 0, Math.PI * 2);
+  ctx.strokeStyle = theme.accent;
+  ctx.lineWidth = 7 * scale;
+  ctx.stroke();
+
+  // The pointer is drawn with its pivot at the sprite's origin plus padding,
+  // so a frame can rotate it about the pin.
+  const pad = 24 * scale, head = wheelGeometry.head * scale, length = (wheelGeometry.tip - wheelGeometry.pivot) * scale;
+  ctx = layer("pointer", Math.ceil(2 * (head + pad)), Math.ceil(head + length + 2 * pad));
+  const x = head + pad, y = head + pad, spread = Math.acos(head / length);
+  ctx.save();
+  ctx.shadowColor = "rgba(0, 0, 0, 0.38)";
+  ctx.shadowBlur = 12 * scale;
+  ctx.shadowOffsetY = 4 * scale;
+  ctx.beginPath();
+  ctx.moveTo(x, y + length);
+  ctx.arc(x, y, head, Math.PI / 2 + spread, Math.PI / 2 - spread + Math.PI * 2);
+  ctx.closePath();
+  const body = ctx.createLinearGradient(0, y - head, 0, y + length);
+  body.addColorStop(0, mixWheelColor(theme.accent, "#ffffff", 0.22));
+  body.addColorStop(1, theme.accent);
+  ctx.fillStyle = body;
+  ctx.fill();
+  ctx.restore();
+  ctx.lineJoin = "round";
+  ctx.lineWidth = 4 * scale;
+  ctx.strokeStyle = theme.pointerRim;
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, y, 8 * scale, 0, Math.PI * 2);
+  ctx.fillStyle = theme.pointerRim;
+  ctx.fill();
+  wheelFrameCache.pivot = [x, y];
+  wheelFrameCache.key = key;
+  return wheelFrameCache;
+}
+
+// pointerAngle tilts the pointer about its pin, in radians; negative is
+// towards the left, where the pegs come from. resting is where a spin will
+// stop, which decides the label orientation.
+function drawWheel(wheel, rotation = 0, highlight = -1, pointerAngle = 0, resting = rotation) {
   const canvas = $("wheel-canvas"), ctx = canvas.getContext("2d");
   const items = wheel?.items?.length ? wheel.items : (snapshot?.playlist?.items || []).map(({ id, label }) => ({ id, label }));
   const theme = wheelTheme();
-  const size = wheelCanvasSize(canvas), center = size / 2, scale = size / 1000, radius = center - 14 * scale;
+  const size = wheelCanvasSize(canvas), center = size / 2, scale = size / 1000;
+  const frame = wheelFrame(theme, size);
   ctx.clearRect(0, 0, size, size);
-  if (!items.length) {
-    ctx.beginPath(); ctx.arc(center, center, radius, 0, Math.PI * 2);
-    ctx.fillStyle = theme.empty; ctx.fill();
-    return;
+  ctx.drawImage(frame.base, 0, 0);
+  if (items.length) {
+    ctx.save();
+    ctx.translate(center, center);
+    ctx.rotate(rotation);
+    ctx.drawImage(wheelFace(items, theme, size, highlight, resting), -center, -center);
+    ctx.restore();
+  } else {
+    ctx.beginPath(); ctx.arc(center, center, (wheelGeometry.radius - wheelGeometry.bezel) * scale, 0, Math.PI * 2);
+    ctx.fillStyle = theme.empty;
+    ctx.fill();
   }
+  ctx.drawImage(frame.overlay, 0, 0);
   ctx.save();
-  ctx.translate(center, center);
-  ctx.rotate(rotation);
-  ctx.drawImage(wheelFace(items, theme, size, highlight), -center, -center);
+  ctx.translate(center, wheelGeometry.pivot * scale);
+  ctx.rotate(pointerAngle);
+  ctx.drawImage(frame.pointer, -frame.pivot[0], -frame.pivot[1]);
   ctx.restore();
-  ctx.beginPath();
-  ctx.arc(center, center, radius, 0, Math.PI * 2);
-  ctx.strokeStyle = theme.rim;
-  ctx.lineWidth = 4 * scale;
-  ctx.stroke();
 }
 
 function wheelCandidate(wheel, rotation) {
@@ -1014,7 +1279,11 @@ function animateWheel(wheel) {
     const progress = preferences.reduceMotion ? 1 : Math.max(0, Math.min(1, raw));
     const eased = 1 - Math.pow(1 - progress, 5);
     wheelRotation = target * eased;
-    drawWheel(wheel, wheelRotation);
+    // The next peg pushes the pointer aside as it arrives and lets it snap
+    // back once it has passed.
+    const passed = (Math.abs(wheelRotation) % arc) / arc;
+    const flick = preferences.reduceMotion || progress >= 1 ? 0 : Math.max(0, (passed - 0.62) / 0.38);
+    drawWheel(wheel, wheelRotation, -1, -0.36 * flick, target);
     const tick = Math.floor(Math.abs(wheelRotation) / arc);
     if (!preferences.reduceMotion && !document.hidden && raw >= 0 && raw < 1 && tick !== lastWheelTick) {
       if (lastWheelTick >= 0) playWheelTick(progress);
@@ -1038,6 +1307,7 @@ function showWheel(wheel, serverNowUnixMs = Date.now()) {
     activeWheel = wheel;
     if (dismissedWheelID !== wheel.id && !dialog.open) dialog.showModal();
     $("wheel-status").textContent = `${wheel.requesterName || "A participant"} is spinning…`;
+    dialog.classList.remove("has-winner");
     $("wheel-spin-again").disabled = true;
     if (changed && dismissedWheelID !== wheel.id) animateWheel(wheel);
   } else if (wheel.phase === "completed") {
@@ -1048,6 +1318,7 @@ function showWheel(wheel, serverNowUnixMs = Date.now()) {
     wheelRotation = wheelTargetRotation(wheel);
     drawWheel(wheel, wheelRotation, wheel.winner);
     $("wheel-status").textContent = "Selected for the room";
+    dialog.classList.add("has-winner");
     $("wheel-candidate").textContent = wheel.items?.[wheel.winner]?.label || "Queue item selected";
     $("wheel-spin-again").disabled = !canControl();
     if (wasSpinning && dialog.open && !document.hidden && dismissedWheelID !== wheel.id) playWheelResult();
@@ -1072,6 +1343,7 @@ function openWheelWindow() {
     wheelRotation = 0;
     drawWheel(preview, 0);
     $("wheel-status").textContent = items.length >= 2 ? "The server chooses one item for everyone" : "Add at least two queue items";
+    dialog.classList.remove("has-winner");
     $("wheel-candidate").textContent = items.length ? "Ready to spin" : "Queue is empty";
     $("wheel-count").textContent = `${items.length} queue item${items.length === 1 ? "" : "s"}`;
     $("wheel-spin-again").disabled = !canControl() || items.length < 2;
@@ -1776,13 +2048,18 @@ function enhanceSelect(select) {
     trigger.disabled = select.disabled;
     trigger.title = select.title || option?.textContent || "";
   };
+  // Long option lists scroll inside the menu rather than the menu itself, so
+  // the menu's painted surface stays put (see "Smooth corners" in styles.css).
+  const options = document.createElement("div");
+  options.className = "custom-select-options";
   const rebuild = () => {
-    menu.replaceChildren(...[...select.options].map((option) => menuButton(option.textContent, () => {
+    options.replaceChildren(...[...select.options].map((option) => menuButton(option.textContent, () => {
       select.value = option.value;
       select.dispatchEvent(new Event("change", { bubbles: true }));
       sync();
       closePopovers();
     }, { checked: option.value === select.value, disabled: option.disabled })));
+    menu.replaceChildren(options);
   };
   trigger.onclick = (event) => {
     event.stopPropagation();
