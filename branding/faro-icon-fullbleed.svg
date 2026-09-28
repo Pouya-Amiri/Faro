@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1C2656"/><stop offset="1" stop-color="#34408C"/>
+    </linearGradient>
+    <linearGradient id="beamR" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F9DFA8"/><stop offset="0.45" stop-color="#9C94C4"/><stop offset="1" stop-color="#3E4A94"/>
+    </linearGradient>
+    <linearGradient id="beamL" x1="1" y1="0" x2="0" y2="0">
+      <stop offset="0" stop-color="#F9DFA8"/><stop offset="0.45" stop-color="#9C94C4"/><stop offset="1" stop-color="#3E4A94"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFEFC6"/><stop offset="1" stop-color="#F6C46C"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.22"/><stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="tw"><path d="M380 690 L644 690 L704 1100 L320 1100 Z"/></clipPath>
+    <clipPath id="sq"><rect width="1024" height="1024"/></clipPath>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <g clip-path="url(#sq)"><g transform="translate(512 512) scale(1.2427) translate(-512 -512)">
+    <polygon points="512,500 1000,396 1000,714 512,600" fill="url(#beamR)"/>
+    <polygon points="512,500 24,396 24,714 512,600" fill="url(#beamL)"/>
+    <path d="M380 690 L644 690 L704 1100 L320 1100 Z" fill="#8E92E4"/>
+    <g clip-path="url(#tw)"><path d="M300 884 L740 764 L740 854 L300 974 Z" fill="#F4E4C4"/></g>
+    <rect x="386" y="428" width="252" height="244" rx="14" fill="url(#gold)"/>
+    <path d="M480 494 L480 606 L576 550 Z" fill="#24306A" stroke="#24306A" stroke-width="24" stroke-linejoin="round"/>
+    <rect x="334" y="664" width="356" height="48" rx="16" fill="#18214C"/>
+    <path d="M356 438 L512 334 L668 438 Z" fill="#8E92E4" stroke="#8E92E4" stroke-width="22" stroke-linejoin="round"/>
+    <circle cx="512" cy="304" r="28" fill="#F6C46C"/>
+  </g></g>
+</svg>

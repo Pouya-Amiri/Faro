@@ -41,7 +41,7 @@ let updateReleaseURL = "";
 const youtubeInfoCache = new Map();
 // The wheel is drawn on a canvas, so it cannot inherit the CSS tokens; these
 // palettes mirror them instead. Each keeps neighbouring segments in
-// different hues, and each theme owns its own label treatment.
+// different hues, and each theme sets its own label ink.
 const wheelThemes = {
   dark: {
     segments: [
@@ -58,9 +58,9 @@ const wheelThemes = {
       "#65a30d", // Lime
       "#c026d3"  // Fuchsia
     ],
-    // White on every segment with a drop shadow, as the dark wheel has always
-    // drawn itself.
-    label: () => ({ color: "#ffffff", shadow: "rgba(0, 0, 0, 0.6)" }),
+    // Every theme labels all of its segments in one light ink over a drop
+    // shadow; each palette is dark enough to carry it.
+    label: { color: "#ffffff", shadow: "rgba(0, 0, 0, 0.6)" },
     separator: "rgba(255, 255, 255, 0.2)",
     // Lit from the top left: the bezel runs from its first colour to its second.
     bezel: ["#3b3b40", "#1c1c1f"],
@@ -87,13 +87,7 @@ const wheelThemes = {
       "#8A6A4F", // umber
       "#3F7A8C"  // cyan
     ],
-    // The muted paper set runs from light ochre to dark indigo, so each label
-    // takes whichever of the two inks reads better on its own segment. The
-    // shadow only earns its place under the light one.
-    label: (segment) => {
-      const ink = wheelLabelColor(segment, "#FCFBF9", "#25272A");
-      return { color: ink, shadow: ink === "#25272A" ? "transparent" : "rgba(0, 0, 0, 0.6)" };
-    },
+    label: { color: "#FCFBF9", shadow: "rgba(0, 0, 0, 0.6)" },
     separator: "rgba(255, 255, 255, 0.75)",
     // Lit from the top left: the bezel runs from its first colour to its second.
     bezel: ["#FFFFFF", "#DAD6D0"],
@@ -120,12 +114,7 @@ const wheelThemes = {
       "#675284", // plum
       "#49784D"  // fern
     ],
-    // Same per-segment ink logic as the light wheel, re-based onto the calculator
-    // palette and its crisp LCD charcoal ink.
-    label: (segment) => {
-      const ink = wheelLabelColor(segment, "#F2F6EC", "#222922");
-      return { color: ink, shadow: ink === "#222922" ? "transparent" : "rgba(0, 0, 0, 0.6)" };
-    },
+    label: { color: "#F2F6EC", shadow: "rgba(0, 0, 0, 0.6)" },
     separator: "rgba(248, 251, 244, 0.7)",
     // Lit from the top left: the bezel runs from its first colour to its second.
     bezel: ["#F8FBF4", "#C6CFBC"],
@@ -145,15 +134,14 @@ const wheelThemes = {
       "#DC2626", // Signal red
       "#4338CA", // Deep indigo
       "#059669", // Emerald buoy
-      "#CA8A04", // Maritime gold
+      "#C08304", // Maritime gold
       "#7C3AED", // Deep violet
       "#0284C7", // Sky blue
       "#EA580C", // Port orange
       "#0F766E", // Deep teal
       "#BE185D"  // Beacon rose
     ],
-    // High-contrast silver-white ink with subtle drop shadow on deep maritime segments
-    label: () => ({ color: "#F0F4F8", shadow: "rgba(0, 0, 0, 0.75)" }),
+    label: { color: "#F0F4F8", shadow: "rgba(0, 0, 0, 0.75)" },
     separator: "rgba(240, 244, 248, 0.18)",
     // Lit from the top left: the bezel runs from its first colour to its second.
     bezel: ["#2A3854", "#101723"],
@@ -167,25 +155,20 @@ const wheelThemes = {
   },
   pine: {
     segments: [
-      "#C6A15B", // Lighthouse brass
+      "#AA8A4E", // Lighthouse brass
       "#2E8B57", // Deep sea green
-      "#D1AE68", // Polished brass
+      "#9C7A3E", // Polished brass
       "#C96767", // Signal red
       "#257A68", // Maritime spruce
       "#7B61FF", // Atlantic dusk
-      "#65A97D", // Sea glass green
+      "#5E9D74", // Sea glass green
       "#A98648", // Burnished brass
       "#2B6CB0", // Deep ocean blue
       "#A3704C", // Teak wood
-      "#10B981", // Emerald beacon
+      "#0EA372", // Emerald beacon
       "#9F5874"  // Coastal heather
     ],
-    // Mist ink with a drop shadow, except on the pale brass segments, which
-    // take the dark sea-charcoal ink instead.
-    label: (segment) => {
-      const ink = wheelLabelColor(segment, "#E8ECE8", "#111713");
-      return { color: ink, shadow: ink === "#111713" ? "transparent" : "rgba(0, 0, 0, 0.75)" };
-    },
+    label: { color: "#E8ECE8", shadow: "rgba(0, 0, 0, 0.75)" },
     separator: "rgba(232, 236, 232, 0.16)",
     // Lit from the top left: the bezel runs from its first colour to its second.
     bezel: ["#323D35", "#141A16"],
@@ -200,21 +183,6 @@ const wheelThemes = {
 };
 function wheelTheme() {
   return wheelThemes[document.documentElement.dataset.theme] || wheelThemes.dark;
-}
-function relativeLuminance(hex) {
-  const value = parseInt(hex.slice(1), 16);
-  return [16, 8, 0].reduce((total, shift, index) => {
-    const channel = ((value >> shift) & 255) / 255;
-    const linear = channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
-    return total + linear * [0.2126, 0.7152, 0.0722][index];
-  }, 0);
-}
-function wheelLabelColor(background, light, ink) {
-  const ratio = (color) => {
-    const [high, low] = [relativeLuminance(color), relativeLuminance(background)].sort((a, b) => b - a);
-    return (high + 0.05) / (low + 0.05);
-  };
-  return ratio(light) >= ratio(ink) ? light : ink;
 }
 const sunIcon = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.41M17.66 6.34l1.41-1.41"/></svg>';
 const moonIcon = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>';
@@ -862,13 +830,13 @@ function wheelTargetRotation(wheel) {
 
 // The wheel is composited from cached layers, so an animation frame only
 // copies bitmaps: a fixed base (drop shadow and bezel), the rotating face
-// (segments, labels and pegs), a fixed overlay (shading and hub) and the
+// (segments, labels and pegs), a fixed overlay (shading and axle hole) and the
 // pointer. Redrawing every segment and shadowed label per frame was expensive
 // with CPU rendering. Geometry is expressed against a 1000px reference wheel
 // and scaled to the real size.
 const wheelFaceCache = { key: "", canvas: null };
 const wheelFrameCache = { key: "", base: null, overlay: null, pointer: null };
-const wheelGeometry = { radius: 462, bezel: 36, peg: 8, hub: 86, pivot: 46, head: 26, tip: 106 };
+const wheelGeometry = { radius: 470, bezel: 20, peg: 6, hole: 18, pivot: 36, head: 22, tip: 84 };
 const wheelFont = '-apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif';
 
 function wheelCanvasSize(canvas) {
@@ -946,7 +914,7 @@ function wheelFace(items, theme, size, highlight, resting) {
   face.height = size;
   const ctx = face.getContext("2d");
   const scale = size / 1000, center = size / 2, radius = (wheelGeometry.radius - wheelGeometry.bezel) * scale;
-  const hub = wheelGeometry.hub * scale, count = items.length, arc = Math.PI * 2 / count;
+  const count = items.length, arc = Math.PI * 2 / count;
   const colors = items.map((_, index) => wheelSegmentColor(index, count, theme.segments));
   const segmentStart = (index) => -Math.PI / 2 + index * arc;
   ctx.clearRect(0, 0, size, size);
@@ -955,9 +923,9 @@ function wheelFace(items, theme, size, highlight, resting) {
 
   // A queue position owns its color. The spin seed only affects trajectory,
   // so opening or spinning the same wheel never repaints its segments. Each
-  // segment deepens towards the hub and brightens towards the rim.
+  // segment deepens towards the centre and brightens towards the rim.
   colors.forEach((color, index) => {
-    const shading = ctx.createRadialGradient(0, 0, hub, 0, 0, radius);
+    const shading = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
     shading.addColorStop(0, mixWheelColor(color, "#000000", 0.24));
     shading.addColorStop(0.62, color);
     shading.addColorStop(1, mixWheelColor(color, "#ffffff", 0.1));
@@ -997,7 +965,7 @@ function wheelFace(items, theme, size, highlight, resting) {
   if (count <= 24) {
     // One size for every label: as large as the segments allow, shrinking
     // (down to a floor) until the longest fits before any is shortened.
-    const outer = radius - 32 * scale, inner = hub + 22 * scale;
+    const outer = radius - 32 * scale, inner = 70 * scale;
     const texts = wheelLabelTexts(items);
     let fontSize = Math.max(20, Math.min(36, radius / scale * 0.6 * arc * 0.55)) * scale;
     const setFont = () => { ctx.font = `700 ${fontSize}px ${wheelFont}`; };
@@ -1009,7 +977,6 @@ function wheelFace(items, theme, size, highlight, resting) {
     }
     ctx.textBaseline = "middle";
     texts.forEach((label, index) => {
-      const ink = theme.label(colors[index]);
       const text = fitWheelLabel(ctx, label, outer - inner);
       const angle = segmentStart(index) + arc / 2;
       // Labels that will rest on the left half turn over so none reads upside
@@ -1019,8 +986,8 @@ function wheelFace(items, theme, size, highlight, resting) {
       ctx.rotate(flipped ? angle + Math.PI : angle);
       ctx.textAlign = flipped ? "left" : "right";
       ctx.globalAlpha = highlight >= 0 && index !== highlight ? 0.55 : 1;
-      ctx.fillStyle = ink.color;
-      ctx.shadowColor = ink.shadow;
+      ctx.fillStyle = theme.label.color;
+      ctx.shadowColor = theme.label.shadow;
       ctx.shadowBlur = 4 * scale;
       ctx.fillText(text, flipped ? -outer : outer, 0);
       ctx.restore();
@@ -1052,12 +1019,12 @@ function wheelFace(items, theme, size, highlight, resting) {
 }
 
 // The layers that do not turn: the bezel with its drop shadow underneath the
-// face, the rim shading and hub above it, and the pointer sprite.
+// face, the rim shading and axle hole above it, and the pointer sprite.
 function wheelFrame(theme, size) {
   const key = `${document.documentElement.dataset.theme}:${size}`;
   if (wheelFrameCache.key === key) return wheelFrameCache;
   const scale = size / 1000, center = size / 2;
-  const outer = wheelGeometry.radius * scale, radius = (wheelGeometry.radius - wheelGeometry.bezel) * scale, hub = wheelGeometry.hub * scale;
+  const outer = wheelGeometry.radius * scale, radius = (wheelGeometry.radius - wheelGeometry.bezel) * scale, hole = wheelGeometry.hole * scale;
   const layer = (name, width = size, height = size) => {
     const canvas = wheelFrameCache[name] || document.createElement("canvas");
     canvas.width = width;
@@ -1077,8 +1044,8 @@ function wheelFrame(theme, size) {
   let ctx = layer("base");
   ctx.save();
   ctx.shadowColor = "rgba(0, 0, 0, 0.3)";
-  ctx.shadowBlur = 30 * scale;
-  ctx.shadowOffsetY = 10 * scale;
+  ctx.shadowBlur = 20 * scale;
+  ctx.shadowOffsetY = 6 * scale;
   ctx.beginPath(); ctx.arc(center, center, outer, 0, Math.PI * 2);
   ctx.fillStyle = lit(ctx, center, center, outer, theme.bezel);
   ctx.fill();
@@ -1091,7 +1058,7 @@ function wheelFrame(theme, size) {
   ctx = layer("overlay");
   // The face sinks slightly under the bezel, and a soft sheen falls across
   // its upper half.
-  const rimShade = ctx.createRadialGradient(center, center, radius - 40 * scale, center, center, radius);
+  const rimShade = ctx.createRadialGradient(center, center, radius - 30 * scale, center, center, radius);
   rimShade.addColorStop(0, "rgba(0, 0, 0, 0)");
   rimShade.addColorStop(1, "rgba(0, 0, 0, 0.26)");
   ctx.beginPath(); ctx.arc(center, center, radius, 0, Math.PI * 2);
@@ -1106,17 +1073,18 @@ function wheelFrame(theme, size) {
   ctx.strokeStyle = "rgba(0, 0, 0, 0.28)";
   ctx.lineWidth = 2 * scale;
   ctx.stroke();
-  ctx.save();
-  ctx.shadowColor = "rgba(0, 0, 0, 0.35)";
-  ctx.shadowBlur = 18 * scale;
-  ctx.shadowOffsetY = 4 * scale;
-  ctx.beginPath(); ctx.arc(center, center, hub, 0, Math.PI * 2);
-  ctx.fillStyle = lit(ctx, center, center, hub, theme.bezel);
+  // A small axle hole: dark inside, shaded from the top, with light
+  // catching its lower lip.
+  const depth = ctx.createRadialGradient(center, center - hole * 0.4, hole * 0.2, center, center, hole);
+  depth.addColorStop(0, "rgba(0, 0, 0, 0.92)");
+  depth.addColorStop(1, "rgba(0, 0, 0, 0.6)");
+  ctx.beginPath(); ctx.arc(center, center, hole, 0, Math.PI * 2);
+  ctx.fillStyle = depth;
   ctx.fill();
-  ctx.restore();
-  ctx.beginPath(); ctx.arc(center, center, hub - 3.5 * scale, 0, Math.PI * 2);
-  ctx.strokeStyle = theme.accent;
-  ctx.lineWidth = 7 * scale;
+  ctx.beginPath(); ctx.arc(center, center, hole + 1.5 * scale, Math.PI * 0.15, Math.PI * 0.85);
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+  ctx.lineWidth = 3 * scale;
+  ctx.lineCap = "round";
   ctx.stroke();
 
   // The pointer is drawn with its pivot at the sprite's origin plus padding,
@@ -2048,18 +2016,13 @@ function enhanceSelect(select) {
     trigger.disabled = select.disabled;
     trigger.title = select.title || option?.textContent || "";
   };
-  // Long option lists scroll inside the menu rather than the menu itself, so
-  // the menu's painted surface stays put (see "Smooth corners" in styles.css).
-  const options = document.createElement("div");
-  options.className = "custom-select-options";
   const rebuild = () => {
-    options.replaceChildren(...[...select.options].map((option) => menuButton(option.textContent, () => {
+    menu.replaceChildren(...[...select.options].map((option) => menuButton(option.textContent, () => {
       select.value = option.value;
       select.dispatchEvent(new Event("change", { bubbles: true }));
       sync();
       closePopovers();
     }, { checked: option.value === select.value, disabled: option.disabled })));
-    menu.replaceChildren(options);
   };
   trigger.onclick = (event) => {
     event.stopPropagation();
