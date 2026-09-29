@@ -1037,6 +1037,8 @@ body[data-platform="mac"] .window-drag-region { right: 0; }
 .compact-modal { width: min(430px, calc(100vw - 44px)); }
 .compact-modal-shell { width: 100%; }
 .compact-modal .modal-footer { justify-content: flex-end; }
+.confirm-remember { margin-right: auto; display: flex; align-items: center; gap: 8px; color: var(--text-dim); font-size: var(--fs-md); }
+.confirm-remember .form-checkbox { width: 17px; height: 17px; flex-basis: 17px; }
 
 .toast-popup { min-height: 40px; padding: 0 14px; border-radius: 10px; font-size: var(--fs-md); }
 

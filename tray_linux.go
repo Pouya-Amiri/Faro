@@ -1,6 +1,11 @@
 package main
 
-import "github.com/godbus/dbus/v5"
+import (
+	"runtime"
+	"strings"
+
+	"github.com/godbus/dbus/v5"
+)
 
 // trayHostAvailable reports whether a StatusNotifierItem host is running.
 // Stock GNOME has none unless the AppIndicator extension is enabled, and
@@ -21,4 +26,23 @@ func trayHostAvailable() bool {
 	}
 	host, ok := registered.Value().(bool)
 	return ok && host
+}
+
+// trayMenuOpening reports whether the tray click handler is running because
+// the tray menu opened. Wails' Linux tray calls the click handler both for a
+// primary click (StatusNotifierItem.Activate) and when the host opens the
+// menu (a dbusmenu "opened" Event, which is what a right click sends), and it
+// exposes no separate hook for the latter, so the caller tells them apart.
+func trayMenuOpening() bool {
+	callers := make([]uintptr, 8)
+	frames := runtime.CallersFrames(callers[:runtime.Callers(2, callers)])
+	for {
+		frame, more := frames.Next()
+		if strings.HasSuffix(frame.Function, ".(*linuxSystemTray).Event") {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
 }

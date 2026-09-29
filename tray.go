@@ -38,7 +38,12 @@ func setupTray(app *application.App, window *application.WebviewWindow, desktop 
 	menu.AddSeparator()
 	menu.Add("Quit Faro").OnClick(func(*application.Context) { controller.requestQuit() })
 	tray := app.SystemTray.New()
-	tray.SetIcon(trayIcon).SetMenu(menu).OnClick(controller.showWindow)
+	tray.SetIcon(trayIcon).SetMenu(menu).OnClick(func() {
+		// Only a primary click shows the window; opening the menu does not.
+		if !trayMenuOpening() {
+			controller.showWindow()
+		}
+	})
 	tray.SetTooltip("Faro")
 
 	window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
@@ -80,8 +85,10 @@ func (c *trayController) requestQuit() {
 }
 
 // needsConfirmation reports whether quitting now would leave a room, in which
-// case it shows the window and asks the page to confirm through
-// Desktop.Quit. A second request within quitConfirmWindow does not ask again.
+// case the page finishes the quit through Desktop.Quit: it asks first, in the
+// shown window, unless the user turned that question off. Either way the page
+// gets to pause playback for the room on the way out. A second request within
+// quitConfirmWindow does not wait for the page again.
 func (c *trayController) needsConfirmation() bool {
 	service := c.desktop.service
 	if service == nil || !service.InRoom() && !service.ServerStatus().Running {
@@ -94,8 +101,11 @@ func (c *trayController) needsConfirmation() bool {
 	if repeated {
 		return false
 	}
-	c.showWindow()
-	c.app.Event.Emit("faro:confirm-quit", map[string]bool{"hosting": service.ServerStatus().Running})
+	ask := !loadWindowSettings().SkipQuitConfirm
+	if ask {
+		c.showWindow()
+	}
+	c.app.Event.Emit("faro:confirm-quit", map[string]bool{"hosting": service.ServerStatus().Running, "ask": ask})
 	return true
 }
 
@@ -141,4 +151,11 @@ func (d *Desktop) TrayStatus() TrayStatus {
 
 func (d *Desktop) SetCloseToTray(enabled bool) error {
 	return updateWindowSettings(func(settings *windowSettings) { settings.QuitOnClose = !enabled })
+}
+
+// ConfirmQuit reports whether quitting from a room asks first.
+func (d *Desktop) ConfirmQuit() bool { return !loadWindowSettings().SkipQuitConfirm }
+
+func (d *Desktop) SetConfirmQuit(enabled bool) error {
+	return updateWindowSettings(func(settings *windowSettings) { settings.SkipQuitConfirm = !enabled })
 }

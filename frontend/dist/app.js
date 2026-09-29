@@ -2037,10 +2037,14 @@ function enhanceAllSelects() {
   document.querySelectorAll("select").forEach(enhanceSelect);
 }
 
-function askConfirmation(title, message, acceptLabel = "Continue") {
+// remember offers a "Don't ask again" box; its answer is left in
+// #confirm-remember for the caller to read once the question resolves.
+function askConfirmation(title, message, acceptLabel = "Continue", { remember = false } = {}) {
   const dialog = $("confirm-dialog");
   // Only one question at a time; a newer one answers the older with "no".
   if (dialog.open) dialog.close("cancel");
+  $("confirm-remember").checked = false;
+  $("confirm-remember-row").classList.toggle("hidden", !remember);
   $("confirm-title").textContent = title;
   $("confirm-message").textContent = message;
   $("confirm-accept").textContent = acceptLabel;
@@ -2548,6 +2552,7 @@ $("copy-room-name").onclick = () => { closePopovers(); copyText(snapshot.room.id
 function openPreferences() {
   renderConnectionInfo();
   void refreshTrayStatus();
+  void refreshQuitConfirmation();
   if (!$("settings-dialog").open) $("settings-dialog").showModal();
 }
 $("open-settings").onclick = openPreferences;
@@ -3015,12 +3020,17 @@ if (wails?.Events) {
     applyWindowChrome();
   });
   wails.Events.On("faro:open-files", () => { void collectLaunchPaths(); });
+  // The backend asks the page to finish a quit that leaves a room; ask is
+  // false once the user has turned the question off.
   wails.Events.On("faro:confirm-quit", async (event) => {
     const hosting = Boolean(event.data?.hosting);
-    const quit = await askConfirmation("Quit Faro?", hosting
-      ? "You are hosting this room. Quitting ends it for everyone watching."
-      : "Quitting takes you out of the room.", "Quit");
-    if (!quit) return;
+    if (event.data?.ask !== false) {
+      const quit = await askConfirmation("Quit Faro?", hosting
+        ? "You are hosting this room. Quitting ends it for everyone watching."
+        : "Quitting takes you out of the room.", "Quit", { remember: true });
+      if (!quit) return;
+      if ($("confirm-remember").checked) await setConfirmQuit(false).catch(showError);
+    }
     if (preferences.pauseOnLeave && canControl() && snapshot && !snapshot.playback.paused) {
       try { await invoke("SetPaused", true); } catch (_) {}
     }
@@ -3062,6 +3072,22 @@ if (hasBackend && document.body.dataset.platform === "linux") {
     $("hardware-acceleration-row").classList.remove("hidden");
   }).catch(() => {});
 }
+async function refreshQuitConfirmation() {
+  if (!hasBackend) return;
+  try {
+    $("confirm-quit").checked = Boolean(await invoke("ConfirmQuit"));
+    $("confirm-quit-row").classList.remove("hidden");
+  } catch {}
+}
+async function setConfirmQuit(enabled) {
+  await invoke("SetConfirmQuit", enabled);
+  $("confirm-quit").checked = enabled;
+}
+void refreshQuitConfirmation();
+$("confirm-quit").onchange = (event) => {
+  setConfirmQuit(event.target.checked)
+    .catch((error) => { event.target.checked = !event.target.checked; showError(error); });
+};
 async function refreshTrayStatus() {
   if (!hasBackend) return;
   try {

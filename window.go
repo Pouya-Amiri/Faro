@@ -227,6 +227,8 @@ type windowSettings struct {
 	HardwareAcceleration bool   `json:"hardwareAcceleration,omitempty"`
 	// QuitOnClose turns off keeping Faro in the tray when its window closes.
 	QuitOnClose bool `json:"quitOnClose,omitempty"`
+	// SkipQuitConfirm quits from a room without asking first.
+	SkipQuitConfirm bool `json:"skipQuitConfirm,omitempty"`
 }
 
 func windowSettingsPath() (string, error) {

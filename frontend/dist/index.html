@@ -25,7 +25,7 @@
         document.documentElement.style.colorScheme = isDark ? "dark" : "light";
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=41" />
+    <link rel="stylesheet" href="/styles.css?v=42" />
     <link rel="stylesheet" href="/desktop.css?v=18" />
   </head>
   <body>
@@ -702,6 +702,14 @@
                     </span>
                   </label>
 
+                  <label id="confirm-quit-row" class="checkbox-row hidden" for="confirm-quit">
+                    <input id="confirm-quit" class="form-checkbox" type="checkbox" checked />
+                    <span class="checkbox-content">
+                      <strong>Ask before quitting from a room</strong>
+                      <small>Quitting ends a room you host for everyone watching, or takes you out of one you joined.</small>
+                    </span>
+                  </label>
+
                   <label class="checkbox-row" for="check-updates">
                     <input id="check-updates" class="form-checkbox" type="checkbox" checked />
                     <span class="checkbox-content">
@@ -872,6 +880,10 @@
               </div>
             </header>
             <footer class="modal-footer">
+              <label id="confirm-remember-row" class="confirm-remember hidden" for="confirm-remember">
+                <input id="confirm-remember" class="form-checkbox" type="checkbox" />
+                <span>Don't ask again</span>
+              </label>
               <button id="confirm-cancel" class="btn btn-secondary" value="cancel">Cancel</button>
               <button id="confirm-accept" class="btn btn-danger" value="accept">Continue</button>
             </footer>
@@ -902,6 +914,6 @@
       </div>
     </div>
 
-    <script type="module" src="/app.js?v=31"></script>
+    <script type="module" src="/app.js?v=32"></script>
   </body>
 </html>
