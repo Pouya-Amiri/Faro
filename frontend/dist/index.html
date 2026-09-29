@@ -25,7 +25,7 @@
         document.documentElement.style.colorScheme = isDark ? "dark" : "light";
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=42" />
+    <link rel="stylesheet" href="/styles.css?v=43" />
     <link rel="stylesheet" href="/desktop.css?v=18" />
   </head>
   <body>
@@ -85,10 +85,11 @@
                   <svg viewBox="0 0 16 16" width="15" height="15"><path d="M8 2v7m0 0 2.75-2.75M8 9 5.25 6.25M3 11.5v1A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5v-1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </span>
                 <span class="update-notice-copy">
-                  <strong>Update available</strong>
-                  <span>Faro <span data-update-version></span> is ready</span>
+                  <strong data-update-title>Update available</strong>
+                  <span data-update-detail>A new version is ready</span>
                 </span>
                 <svg class="update-notice-arrow" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span class="update-notice-meter" aria-hidden="true"><span data-update-meter></span></span>
               </button>
               <div class="sidebar-footer">
                 <button id="welcome-theme" class="btn btn-secondary btn-sidebar-theme" type="button" aria-label="Switch theme" title="Toggle theme">
@@ -269,6 +270,11 @@
           </div>
 
           <div class="command-bar-right">
+            <button id="update-pill" class="btn btn-sm update-pill hidden" type="button" data-update-open title="Update Faro">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 17v1.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V17"/></svg>
+              <span id="update-pill-label">Update</span>
+            </button>
+
             <button id="copy-invite" class="btn btn-secondary btn-sm" type="button" title="Copy room invite link">
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></svg>
               <span>Copy invite</span>
@@ -647,10 +653,11 @@
                     <svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 2v7m0 0 2.75-2.75M8 9 5.25 6.25M3 11.5v1A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5v-1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
                   </span>
                   <span class="update-notice-copy">
-                    <strong>Update available</strong>
-                    <span>Faro <span data-update-version></span></span>
+                    <strong data-update-title>Update available</strong>
+                    <span data-update-detail>A new version is ready</span>
                   </span>
                   <svg class="update-notice-arrow" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span class="update-notice-meter" aria-hidden="true"><span data-update-meter></span></span>
                 </button>
                 <button type="button" class="pref-nav-btn pref-nav-legal" data-settings="legal">
                   <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.5h6l2 2V13.5H4V2.5Z" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10 2.5v2h2M6 7h4M6 9.5h4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
@@ -714,9 +721,15 @@
                     <input id="check-updates" class="form-checkbox" type="checkbox" checked />
                     <span class="checkbox-content">
                       <strong>Check for updates</strong>
-                      <small>Ask GitHub for the latest release when Faro starts. Nothing about you or your rooms is sent.</small>
+                      <small>Ask GitHub for new releases every few hours while Faro runs. Nothing about you or your rooms is sent.</small>
                     </span>
                   </label>
+
+                  <div class="update-status-row">
+                    <span class="update-status-dot" id="update-status-dot" aria-hidden="true"></span>
+                    <span id="update-status-text" class="update-status-text" aria-live="polite">Faro</span>
+                    <button id="update-check-now" class="btn btn-secondary btn-sm" type="button">Check now</button>
+                  </div>
 
                   <label id="hardware-acceleration-row" class="checkbox-row hidden" for="hardware-acceleration">
                     <input id="hardware-acceleration" class="form-checkbox" type="checkbox" />
@@ -891,6 +904,56 @@
         </dialog>
 
       </section>
+
+      <!-- Software update. Outside both views so it opens from either. -->
+      <dialog id="update-dialog" class="desktop-modal update-modal" aria-labelledby="update-title" aria-describedby="update-subtitle">
+        <div class="modal-shell update-shell">
+          <header class="update-hero">
+            <span class="update-hero-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 3.5v11m0 0 4.25-4.25M12 14.5 7.75 10.25M4.5 16v2A2.5 2.5 0 0 0 7 20.5h10a2.5 2.5 0 0 0 2.5-2.5v-2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            <div class="update-hero-copy">
+              <span class="modal-eyebrow">Software update</span>
+              <h2 id="update-title">A new version of Faro is available</h2>
+              <p id="update-subtitle" class="update-subtitle"></p>
+            </div>
+            <button id="update-close" class="btn btn-ghost btn-icon update-close" type="button" aria-label="Close" title="Close">
+              <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true"><path d="M2.5 2.5L9.5 9.5M9.5 2.5L2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+            </button>
+          </header>
+
+          <div class="update-body">
+            <section id="update-notes-section" class="update-notes-section">
+              <h3 class="update-section-label">What's new</h3>
+              <div id="update-notes" class="update-notes" tabindex="0"></div>
+            </section>
+
+            <div id="update-progress" class="update-progress hidden" role="status" aria-live="polite">
+              <div class="update-progress-row">
+                <span id="update-progress-label">Downloading update</span>
+                <span id="update-progress-value"></span>
+              </div>
+              <div class="update-progress-track"><span id="update-progress-bar" class="update-progress-bar"></span></div>
+            </div>
+
+            <p id="update-note" class="update-callout info hidden"></p>
+            <p id="update-warning" class="update-callout warning hidden"></p>
+            <p id="update-error" class="update-callout error hidden" role="alert"></p>
+          </div>
+
+          <footer class="modal-footer update-footer">
+            <button id="update-release" class="btn btn-ghost btn-sm update-link" type="button">
+              <span>Release page</span>
+              <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M4.5 2.5h5v5M9.5 2.5 3 9" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <div class="update-actions">
+              <button id="update-open-download" class="btn btn-secondary hidden" type="button">Show download</button>
+              <button id="update-later" class="btn btn-secondary" type="button">Later</button>
+              <button id="update-install" class="btn btn-primary" type="button">Update and restart</button>
+            </div>
+          </footer>
+        </div>
+      </dialog>
     </main>
 
     <div id="context-menu" class="popover-menu context-menu hidden" role="menu"></div>
@@ -914,6 +977,6 @@
       </div>
     </div>
 
-    <script type="module" src="/app.js?v=32"></script>
+    <script type="module" src="/app.js?v=33"></script>
   </body>
 </html>

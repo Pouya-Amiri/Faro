@@ -37,7 +37,8 @@ let streamState = { state: "idle", offerId: "", route: "" };
 let syncStatus = { state: "idle", driftSeconds: 0 };
 let legalInfoLoaded = false;
 let legalSourceURL = "";
-let updateReleaseURL = "";
+let updateStatus = null;
+let updateNotifiedVersion = "";
 const youtubeInfoCache = new Map();
 // The wheel is drawn on a canvas, so it cannot inherit the CSS tokens; these
 // palettes mirror them instead. Each keeps neighbouring segments in
@@ -199,26 +200,6 @@ let preferences = loadPreferences();
 function invoke(name, ...args) {
   if (!hasBackend) return Promise.reject(new Error("Faro desktop bridge is not ready"));
   return wails.Call.ByName(`main.Desktop.${name}`, ...args);
-}
-
-function presentAvailableUpdate(status) {
-  if (!status?.available || !status.latestVersion || !status.releaseUrl) return;
-  const version = `v${String(status.latestVersion).replace(/^v/i, "")}`;
-  updateReleaseURL = status.releaseUrl;
-  document.querySelectorAll("[data-update-notice]").forEach((notice) => {
-    const versionLabel = notice.querySelector("[data-update-version]");
-    if (versionLabel) versionLabel.textContent = version;
-    notice.setAttribute("aria-label", `Faro ${version} is available. Open the latest release.`);
-    notice.classList.remove("hidden");
-  });
-}
-
-async function checkForUpdates() {
-  try {
-    presentAvailableUpdate(await invoke("CheckForUpdates"));
-  } catch (_) {
-    // Update checks are advisory and must never interrupt the app startup path.
-  }
 }
 
 function showToast(message, type = "success") {
@@ -2585,11 +2566,285 @@ $("legal-source").onclick = async () => {
   if (legalSourceURL) wails?.Browser?.OpenURL(legalSourceURL).catch(showError);
 };
 
-document.querySelectorAll("[data-update-notice]").forEach((notice) => {
-  notice.onclick = () => {
-    if (updateReleaseURL) wails?.Browser?.OpenURL(updateReleaseURL).catch(showError);
-  };
+
+// Software updates. The backend owns the whole process (checking, the
+// download, verification and the install); the page renders the status it
+// reports through faro:update events and asks it to act.
+function updateBusy(status = updateStatus) {
+  return ["downloading", "installing", "restarting"].includes(status?.phase);
+}
+
+function updateVersionLabel(version) {
+  return version ? `v${String(version).replace(/^v/i, "")}` : "";
+}
+
+function updatePercent(status) {
+  if (!status?.downloadSize) return 0;
+  return Math.max(0, Math.min(100, Math.floor((status.received / status.downloadSize) * 100)));
+}
+
+// Short progress text shared by the notices, the room button and the tray.
+function updateProgressText(status) {
+  switch (status.phase) {
+    case "downloading": return status.downloadSize ? `Downloading · ${updatePercent(status)}%` : "Downloading…";
+    case "installing": return "Installing…";
+    case "restarting": return "Restarting…";
+  }
+  return "";
+}
+
+function applyUpdateStatus(status) {
+  if (!status) return;
+  const previous = updateStatus;
+  updateStatus = status;
+  renderUpdateNotices();
+  renderUpdatePreferences();
+  if ($("update-dialog").open) {
+    if (!status.available && !updateBusy(status)) $("update-dialog").close();
+    else renderUpdateDialog();
+  }
+  // Pause for the room just before Faro restarts, as leaving would.
+  if (status.phase === "installing" && previous?.phase !== "installing" && preferences.pauseOnLeave && canControl() && snapshot && !snapshot.playback.paused) {
+    invoke("SetPaused", true).catch(() => {});
+  }
+  // Mention a newly found release once, without interrupting.
+  if (status.available && status.phase === "idle" && status.latestVersion !== updateNotifiedVersion && previous && !previous.available
+    && !$("update-dialog").open && !$("settings-dialog").open) {
+    updateNotifiedVersion = status.latestVersion;
+    showToast(`Faro ${updateVersionLabel(status.latestVersion)} is available`);
+  }
+}
+
+function renderUpdateNotices() {
+  const status = updateStatus;
+  const visible = Boolean(status?.available);
+  const busy = updateBusy(status);
+  const failed = Boolean(status?.installError) && !busy;
+  const version = updateVersionLabel(status?.latestVersion);
+  document.querySelectorAll("[data-update-notice]").forEach((notice) => {
+    notice.classList.toggle("hidden", !visible);
+    if (!visible) return;
+    notice.classList.toggle("busy", busy);
+    notice.classList.toggle("failed", failed);
+    notice.querySelector("[data-update-title]").textContent = busy ? "Updating Faro" : failed ? "Update didn't finish" : "Update available";
+    notice.querySelector("[data-update-detail]").textContent = busy ? updateProgressText(status) : failed ? "Open to try again" : `Faro ${version} is ready`;
+    notice.querySelector("[data-update-meter]").style.width = status.phase === "downloading" ? `${updatePercent(status)}%` : status.phase === "idle" ? "0%" : "100%";
+    notice.setAttribute("aria-label", busy ? `Updating Faro: ${updateProgressText(status)}` : `Faro ${version} is available. Show the update.`);
+  });
+  const pill = $("update-pill");
+  pill.classList.toggle("hidden", !visible);
+  pill.classList.toggle("busy", busy);
+  pill.classList.toggle("failed", failed);
+  $("update-pill-label").textContent = status?.phase === "downloading" && status.downloadSize ? `${updatePercent(status)}%` : busy ? "Updating…" : "Update";
+  pill.title = visible ? (busy ? updateProgressText(status) : `Faro ${version} is available`) : "";
+}
+
+function relativeTime(milliseconds) {
+  const seconds = Math.max(0, Math.round((Date.now() - milliseconds) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+function renderUpdatePreferences() {
+  const status = updateStatus;
+  if (!status) return;
+  const current = updateVersionLabel(status.currentVersion);
+  let text = `Faro ${current}`;
+  let tone = "";
+  if (status.phase === "checking") {
+    text = "Checking for updates…";
+    tone = "busy";
+  } else if (status.available) {
+    text = updateBusy(status) ? `Updating to ${updateVersionLabel(status.latestVersion)} · ${updateProgressText(status)}` : `Faro ${updateVersionLabel(status.latestVersion)} is available`;
+    tone = "available";
+  } else if (status.checkError) {
+    text = `Couldn't check for updates. ${status.checkError}`;
+    tone = "error";
+  } else if (status.checkedAt) {
+    text = `Faro ${current} is up to date · checked ${relativeTime(status.checkedAt)}`;
+    tone = "ok";
+  }
+  $("update-status-text").textContent = text;
+  $("update-status-dot").className = `update-status-dot ${tone}`;
+  $("update-check-now").disabled = status.phase !== "idle";
+  $("update-check-now").textContent = status.available && !updateBusy(status) ? "View update" : "Check now";
+}
+
+// Release notes are Markdown written by GitHub's release note generator or by
+// hand. A small subset is rendered as text nodes: headings, bullets and
+// paragraphs, with links reduced to their text and pull request credits to
+// their number. Nothing is ever inserted as HTML.
+function releaseNoteText(line) {
+  return line
+    .replace(/\s+by @[\w-]+ in (https:\/\/github\.com\/\S+\/pull\/(\d+))/g, " (#$2)")
+    .replace(/https:\/\/github\.com\/\S+\/pull\/(\d+)/g, "#$1")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/(\*\*|__|`)/g, "")
+    .replace(/^\s*\*\s+/, "")
+    .trim();
+}
+
+function renderReleaseNotes(container, markdown) {
+  container.replaceChildren();
+  let list = null;
+  for (const raw of String(markdown || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || /^\*\*Full Changelog\*\*/i.test(line) || /^<!--/.test(line)) { list = null; continue; }
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    const bullet = line.match(/^[-*+]\s+(.*)$/);
+    if (heading) {
+      list = null;
+      const text = releaseNoteText(heading[1]);
+      if (!text || /^what'?s changed$/i.test(text)) continue;
+      const element = document.createElement("h4");
+      element.textContent = text;
+      container.append(element);
+    } else if (bullet) {
+      const text = releaseNoteText(bullet[1]);
+      if (!text) continue;
+      if (!list) { list = document.createElement("ul"); container.append(list); }
+      const item = document.createElement("li");
+      item.textContent = text;
+      list.append(item);
+    } else {
+      list = null;
+      const text = releaseNoteText(line);
+      if (!text) continue;
+      const element = document.createElement("p");
+      element.textContent = text;
+      container.append(element);
+    }
+  }
+  return container.childElementCount > 0;
+}
+
+function roomLeaveWarning() {
+  if (!snapshot) return "";
+  return hosted.running
+    ? "You're hosting this room. Restarting ends it for everyone watching."
+    : "Restarting takes you out of this room. You can rejoin with the same invite afterwards.";
+}
+
+function renderUpdateDialog() {
+  const status = updateStatus;
+  if (!status) return;
+  const version = updateVersionLabel(status.latestVersion);
+  const busy = updateBusy(status);
+  $("update-title").textContent = busy
+    ? (status.phase === "downloading" ? `Downloading Faro ${version}` : status.phase === "installing" ? `Installing Faro ${version}` : "Restarting Faro")
+    : `Faro ${version} is available`;
+  const details = [`You have ${updateVersionLabel(status.currentVersion)}`];
+  if (status.publishedAt) details.push(`released ${new Date(status.publishedAt).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}`);
+  if (status.downloadSize && status.canInstall) details.push(formatBytes(status.downloadSize));
+  $("update-subtitle").textContent = details.join(" · ");
+
+  const notesKey = `${status.latestVersion}\n${status.releaseNotes || ""}`;
+  if ($("update-notes").dataset.key !== notesKey) {
+    $("update-notes").dataset.key = notesKey;
+    $("update-notes-section").classList.toggle("hidden", !renderReleaseNotes($("update-notes"), status.releaseNotes));
+  }
+
+  $("update-progress").classList.toggle("hidden", !busy);
+  $("update-progress").classList.toggle("indeterminate", busy && (status.phase !== "downloading" || !status.downloadSize));
+  if (busy) {
+    const labels = { downloading: "Downloading update", installing: "Installing update", restarting: "Restarting Faro" };
+    $("update-progress-label").textContent = labels[status.phase];
+    $("update-progress-value").textContent = status.phase === "downloading" && status.downloadSize
+      ? `${formatBytes(status.received) || "0 B"} of ${formatBytes(status.downloadSize)}`
+      : "";
+    $("update-progress-bar").style.width = status.phase === "downloading" && status.downloadSize ? `${updatePercent(status)}%` : "";
+  }
+
+  const note = status.phase === "installing" && status.method === "windows-installer"
+    ? "Faro will close while the installer runs, then open again."
+    : status.note || "";
+  $("update-note").textContent = note;
+  $("update-note").classList.toggle("hidden", !note || Boolean(status.installError && !busy));
+  const warning = status.canInstall && status.phase !== "restarting" ? roomLeaveWarning() : "";
+  $("update-warning").textContent = warning;
+  $("update-warning").classList.toggle("hidden", !warning);
+  const failed = Boolean(status.installError) && !busy;
+  $("update-error").textContent = status.installError || "";
+  $("update-error").classList.toggle("hidden", !failed);
+
+  const install = $("update-install");
+  install.disabled = busy;
+  install.textContent = !status.canInstall ? "Download"
+    : busy ? (status.phase === "downloading" ? "Downloading…" : status.phase === "installing" ? "Installing…" : "Restarting…")
+    : failed ? "Try again"
+    : snapshot && hosted.running ? "End room and update" : "Update and restart";
+  install.classList.toggle("btn-danger-solid", Boolean(!busy && status.canInstall && snapshot && hosted.running));
+  // Installing cannot be interrupted; the dialog can still be closed.
+  $("update-later").textContent = status.phase === "downloading" ? "Cancel" : "Later";
+  $("update-later").classList.toggle("hidden", status.phase === "installing" || status.phase === "restarting");
+  $("update-open-download").classList.toggle("hidden", !(failed && status.downloaded));
+}
+
+function openUpdateDialog() {
+  if (!updateStatus?.available) return;
+  closePopovers();
+  renderUpdateDialog();
+  const dialog = $("update-dialog");
+  if (!dialog.open) dialog.showModal();
+  (updateBusy() ? $("update-later") : $("update-install")).focus();
+}
+
+function openUpdateRelease() {
+  const url = updateStatus?.releaseUrl;
+  if (url) wails?.Browser?.OpenURL(url).catch(showError);
+}
+
+async function checkForUpdatesNow() {
+  if (updateStatus?.available && !updateBusy()) { openUpdateDialog(); return; }
+  try {
+    const status = await invoke("CheckForUpdates");
+    applyUpdateStatus(status);
+    if (status.available) openUpdateDialog();
+  } catch (error) {
+    // The status line already explains a failed check; the toast is for a
+    // build without an updater at all.
+    if (!updateStatus?.checkError) showError(error);
+  }
+}
+
+async function startUpdates() {
+  if (!hasBackend) return;
+  try { applyUpdateStatus(await invoke("UpdateStatus")); } catch { return; }
+  wails.Events.On("faro:update", (event) => applyUpdateStatus(event.data));
+  wails.Events.On("faro:open-update", () => openUpdateDialog());
+  invoke("SetUpdateChecks", preferences.checkUpdates !== false).catch(() => {});
+  if (updateStatus?.updatedFrom) {
+    showToast(`Faro updated to ${updateVersionLabel(updateStatus.currentVersion)}`);
+  }
+  // Keep "checked 5 min ago" honest while Preferences is open.
+  setInterval(() => { if ($("settings-dialog").open) renderUpdatePreferences(); }, 30000);
+}
+
+document.querySelectorAll("[data-update-notice], [data-update-open]").forEach((button) => {
+  button.onclick = () => openUpdateDialog();
 });
+$("update-install").onclick = () => {
+  if (!updateStatus?.canInstall) { openUpdateRelease(); return; }
+  invoke("InstallUpdate").catch(showError);
+};
+$("update-later").onclick = () => {
+  if (updateStatus?.phase === "downloading") invoke("CancelUpdate").catch(showError);
+  else $("update-dialog").close();
+};
+$("update-close").onclick = () => $("update-dialog").close();
+$("update-release").onclick = openUpdateRelease;
+$("update-open-download").onclick = () => invoke("OpenUpdateDownload").catch(showError);
+$("update-dialog").addEventListener("click", (event) => { if (event.target === $("update-dialog")) $("update-dialog").close(); });
+$("update-check-now").onclick = () => { void checkForUpdatesNow(); };
+$("check-updates").onchange = (event) => {
+  savePreferences({ checkUpdates: event.target.checked });
+  invoke("SetUpdateChecks", event.target.checked).catch(() => {});
+};
 
 function cycleTheme() {
   // data-theme is already resolved, so the toggle never needs the system query.
@@ -2993,6 +3248,7 @@ document.addEventListener("keydown", (event) => {
     // Only the topmost dialog closes; the confirmation sits above the others.
     event.preventDefault();
     if ($("confirm-dialog").open) $("confirm-dialog").close("cancel");
+    else if ($("update-dialog").open) $("update-dialog").close();
     else if ($("wheel-dialog").open) dismissWheelWindow();
     else if ($("settings-dialog").open) $("settings-dialog").close();
     return;
@@ -3109,5 +3365,4 @@ $("hardware-acceleration").onchange = (event) => {
     .then(() => showToast("Restart Faro to apply the rendering change"))
     .catch((error) => { event.target.checked = !event.target.checked; showError(error); });
 };
-if (hasBackend && preferences.checkUpdates !== false) void checkForUpdates();
-$("check-updates").onchange = (event) => savePreferences({ checkUpdates: event.target.checked });
+void startUpdates();

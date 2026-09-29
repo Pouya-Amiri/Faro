@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Pouya-Amiri/Faro/frontend"
+	"github.com/Pouya-Amiri/Faro/internal/updater"
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
@@ -21,6 +22,9 @@ const (
 )
 
 func main() {
+	// After an update, the relaunched copy waits here for the old one to exit
+	// and release the single-instance lock.
+	updater.WaitForPredecessor()
 	preferWayland()
 
 	var tray *trayController

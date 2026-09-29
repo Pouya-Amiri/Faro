@@ -12,7 +12,7 @@ import (
 	"github.com/Pouya-Amiri/Faro/internal/buildinfo"
 	"github.com/Pouya-Amiri/Faro/internal/legal"
 	"github.com/Pouya-Amiri/Faro/internal/protocol"
-	"github.com/Pouya-Amiri/Faro/internal/updatecheck"
+	"github.com/Pouya-Amiri/Faro/internal/updater"
 	"github.com/Pouya-Amiri/Faro/internal/youtube"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -29,6 +29,8 @@ type Desktop struct {
 	tray        *trayController
 	launchMu    sync.Mutex
 	launchPaths []string
+
+	updates *updater.Manager
 }
 
 func NewDesktop(wailsApp *application.App, background application.RGBA) *Desktop {
@@ -41,10 +43,14 @@ func (d *Desktop) ServiceStartup(ctx context.Context, _ application.ServiceOptio
 	d.service = app.New(ctx, func(event app.Event) {
 		d.app.Event.Emit("faro:event", event)
 	})
+	d.startUpdates()
 	return nil
 }
 
 func (d *Desktop) ServiceShutdown() error {
+	if d.updates != nil {
+		d.updates.Close()
+	}
 	if d.service != nil {
 		d.service.Shutdown()
 	}
@@ -52,10 +58,6 @@ func (d *Desktop) ServiceShutdown() error {
 }
 
 func (d *Desktop) Version() string { return buildinfo.EffectiveVersion() }
-
-func (d *Desktop) CheckForUpdates() (updatecheck.Status, error) {
-	return updatecheck.Check(context.Background(), buildinfo.EffectiveVersion())
-}
 
 func (d *Desktop) LegalInfo() legal.Information {
 	return legal.Info(buildinfo.EffectiveVersion())

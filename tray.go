@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Pouya-Amiri/Faro/internal/updater"
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
@@ -29,12 +30,21 @@ type trayController struct {
 
 	confirmMu    sync.Mutex
 	confirmAsked time.Time
+
+	updateMu    sync.Mutex
+	updateItem  *application.MenuItem
+	updateLabel string
 }
 
 func setupTray(app *application.App, window *application.WebviewWindow, desktop *Desktop) *trayController {
 	controller := &trayController{app: app, window: window, desktop: desktop}
 	menu := app.NewMenu()
 	menu.Add("Show Faro").OnClick(func(*application.Context) { controller.showWindow() })
+	// Shown while an update is available; opens the update dialog.
+	controller.updateItem = menu.Add("Update Faro…").SetHidden(true).OnClick(func(*application.Context) {
+		controller.showWindow()
+		app.Event.Emit("faro:open-update", nil)
+	})
 	menu.AddSeparator()
 	menu.Add("Quit Faro").OnClick(func(*application.Context) { controller.requestQuit() })
 	tray := app.SystemTray.New()
@@ -66,6 +76,32 @@ func setupTray(app *application.App, window *application.WebviewWindow, desktop 
 		controller.showWindow()
 	})
 	return controller
+}
+
+// showUpdate reflects an available update in the tray menu. The menu is only
+// rebuilt when its text changes, not for every progress report.
+func (c *trayController) showUpdate(status updater.Status) {
+	label := ""
+	if status.Available {
+		switch status.Phase {
+		case updater.PhaseDownloading:
+			label = "Downloading update…"
+		case updater.PhaseInstalling, updater.PhaseRestarting:
+			label = "Installing update…"
+		default:
+			label = "Update to Faro " + status.LatestVersion + "…"
+		}
+	}
+	c.updateMu.Lock()
+	defer c.updateMu.Unlock()
+	if label == c.updateLabel {
+		return
+	}
+	c.updateLabel = label
+	if label != "" {
+		c.updateItem.SetLabel(label)
+	}
+	c.updateItem.SetHidden(label == "")
 }
 
 func (c *trayController) showWindow() {
