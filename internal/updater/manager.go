@@ -5,6 +5,7 @@
 package updater
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,9 @@ const (
 	// scheduled check catches up soon after it wakes.
 	pollInterval = 5 * time.Minute
 	checkTimeout = 20 * time.Second
+	// installTimeout bounds applying an update, including any system
+	// authentication prompt the user leaves open.
+	installTimeout = 30 * time.Minute
 )
 
 // retryDelays space out retries after failed background checks.
@@ -82,6 +86,9 @@ type Options struct {
 	// Notify receives the status after every change; download progress is
 	// throttled. Calls are made one at a time from a single goroutine.
 	Notify func(Status)
+	// BeforeRestart runs, and is waited for, once an update is installed and
+	// before Faro relaunches, so the app can prepare for quitting.
+	BeforeRestart func()
 	// Restart quits Faro once an update is installed and the new version's
 	// launch has been arranged.
 	Restart func()
@@ -345,9 +352,12 @@ func (m *Manager) check(ctx context.Context) error {
 	defer m.wake()
 	defer m.mu.Unlock()
 	m.checking = false
-	if m.status.Phase == PhaseChecking {
-		m.status.Phase = PhaseIdle
+	if m.status.Phase != PhaseChecking {
+		// An install started while GitHub was answering. The release being
+		// installed stays the one on offer until that job ends.
+		return nil
 	}
+	m.status.Phase = PhaseIdle
 	if err != nil {
 		m.status.CheckError = describeError(err)
 		return err
@@ -360,7 +370,7 @@ func (m *Manager) check(ctx context.Context) error {
 
 // acceptRelease records the latest release. Callers hold m.mu.
 func (m *Manager) acceptRelease(latest release, current installation) {
-	m.status.LatestVersion = latest.version.String()
+	m.status.LatestVersion = latest.name
 	if latest.version.compare(m.current) <= 0 {
 		m.latest = nil
 		m.status.Available = false
@@ -381,7 +391,7 @@ func (m *Manager) acceptRelease(latest release, current installation) {
 		m.downloadPath = ""
 		// A report that the previous launch's update did not finish stays
 		// only while that release is still the one on offer.
-		if latest.version.String() != m.unfinished {
+		if latest.name != m.unfinished {
 			m.status.InstallError = ""
 		}
 		m.unfinished = ""
@@ -394,7 +404,7 @@ func (m *Manager) acceptRelease(latest release, current installation) {
 	if !latest.published.IsZero() {
 		m.status.PublishedAt = latest.published.UnixMilli()
 	}
-	name := current.assetName(latest.version.String())
+	name := current.assetName(latest.name)
 	file, hasFile := latest.assets[name]
 	_, hasSums := latest.assets[checksumsName]
 	m.status.DownloadSize = file.size
@@ -430,7 +440,7 @@ func (m *Manager) run(ctx context.Context, latest release, current installation)
 }
 
 func (m *Manager) install(ctx context.Context, latest release, current installation) error {
-	release := latest.version.String()
+	release := latest.name
 	name := current.assetName(release)
 	file, ok := latest.assets[name]
 	if !ok {
@@ -450,7 +460,16 @@ func (m *Manager) install(ctx context.Context, latest release, current installat
 		return err
 	}
 
+	// From here on the install cannot be interrupted. Cancel and Close read
+	// jobCancel under the same lock, so a cancellation either lands before
+	// this point and is honoured, or finds nothing left to cancel.
 	m.mu.Lock()
+	if ctx.Err() != nil || m.closed {
+		m.downloadPath = path
+		m.status.Downloaded = true
+		m.mu.Unlock()
+		return context.Canceled
+	}
 	m.jobCancel = nil
 	m.downloadPath = path
 	m.status.Downloaded = true
@@ -459,10 +478,15 @@ func (m *Manager) install(ctx context.Context, latest release, current installat
 	m.mu.Unlock()
 
 	m.writePendingUpdate(release)
-	relaunch, err := m.options.apply(context.Background(), current, path, release)
+	applyCtx, cancelApply := context.WithTimeout(context.Background(), installTimeout)
+	relaunch, err := m.options.apply(applyCtx, current, path, release)
+	cancelApply()
 	if err != nil {
 		m.clearPendingUpdate()
 		return err
+	}
+	if m.options.BeforeRestart != nil {
+		m.options.BeforeRestart()
 	}
 	m.mu.Lock()
 	m.status.Phase = PhaseRestarting
@@ -545,7 +569,7 @@ func (m *Manager) pendingPath() string { return filepath.Join(m.options.cacheDir
 func (m *Manager) writePendingUpdate(release string) {
 	data, _ := json.Marshal(pendingUpdate{Version: release, From: m.current.String()})
 	if os.MkdirAll(m.options.cacheDir, 0o700) == nil {
-		_ = os.WriteFile(m.pendingPath(), data, 0o600)
+		_ = writeFileAtomic(m.pendingPath(), bytes.NewReader(data), 0o600)
 	}
 }
 
@@ -569,8 +593,8 @@ func (m *Manager) readPendingUpdate() {
 	case compared == 0 && pending.From != "" && pending.From != m.current.String():
 		m.status.UpdatedFrom = pending.From
 	case compared > 0:
-		m.unfinished = target.String()
-		m.status.InstallError = fmt.Sprintf("The update to Faro %s didn't finish. Try again, or download it from the release page.", target)
+		m.unfinished = pending.Version
+		m.status.InstallError = fmt.Sprintf("The update to Faro %s didn't finish. Try again, or download it from the release page.", pending.Version)
 	}
 }
 

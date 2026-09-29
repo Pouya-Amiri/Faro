@@ -18,6 +18,10 @@ func detectInstallation() installation {
 		return manualInstallation("Faro updates through your software center.")
 	}
 	if image := os.Getenv("APPIMAGE"); image != "" {
+		// Replace the file itself, not a symbolic link pointing at it.
+		if resolved, err := filepath.EvalSymlinks(image); err == nil {
+			image = resolved
+		}
 		if info, err := os.Stat(image); err == nil && info.Mode().IsRegular() {
 			if !writableDirectory(filepath.Dir(image)) {
 				return manualInstallation("Faro can't replace its AppImage in " + filepath.Dir(image) + ". Download the new AppImage instead.")

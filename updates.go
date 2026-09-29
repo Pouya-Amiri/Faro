@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/Pouya-Amiri/Faro/internal/buildinfo"
 	"github.com/Pouya-Amiri/Faro/internal/updater"
@@ -21,6 +22,7 @@ func (d *Desktop) startUpdates() {
 				d.tray.showUpdate(status)
 			}
 		},
+		BeforeRestart: d.prepareUpdateRestart,
 		// The page has already warned about leaving a room before it asked
 		// for the install, so quitting here does not ask again.
 		Restart: d.Quit,
@@ -54,12 +56,33 @@ func (d *Desktop) SetUpdateChecks(enabled bool) {
 }
 
 // InstallUpdate downloads and installs the available update, then restarts
-// Faro. Progress arrives as faro:update events.
-func (d *Desktop) InstallUpdate() error {
+// Faro. Progress arrives as faro:update events. pauseRoom carries the page's
+// pause-on-leave preference, which the restart honours like a normal quit.
+func (d *Desktop) InstallUpdate(pauseRoom bool) error {
 	if d.updates == nil {
 		return errUpdatesUnavailable
 	}
+	d.pauseBeforeUpdate.Store(pauseRoom)
 	return d.updates.Install()
+}
+
+// prepareUpdateRestart pauses the room, when asked to, before Faro restarts.
+// It runs in the updater and is waited for, rather than depending on the page
+// seeing a particular progress event. Pausing is refused without playback
+// control, and a slow room must not hold the restart up for long.
+func (d *Desktop) prepareUpdateRestart() {
+	if !d.pauseBeforeUpdate.Load() || d.service == nil || !d.service.InRoom() {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = d.service.SetPaused(true)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+	}
 }
 
 // CancelUpdate stops an update download.

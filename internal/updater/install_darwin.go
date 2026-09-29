@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func detectInstallation() installation {
@@ -90,7 +92,9 @@ func checkBundle(source, current, release string) error {
 		return fmt.Errorf("the update disk image contains an unexpected app (%s)", firstNonEmpty(id, "unknown"))
 	}
 	if got := bundleValue(source, "CFBundleShortVersionString"); got != "" {
-		if parsed, err := parseVersion(got); err != nil || parsed.String() != release {
+		// Compare precedence only: Info.plist may omit build metadata.
+		want, _ := parseVersion(release)
+		if parsed, err := parseVersion(got); err != nil || parsed.compare(want) != 0 {
 			return fmt.Errorf("the update disk image contains Faro %s instead of %s", got, release)
 		}
 	}
@@ -128,33 +132,56 @@ func replaceBundle(ctx context.Context, source, target string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(staging)
+	keep := false
+	defer func() {
+		if !keep {
+			_ = os.RemoveAll(staging)
+		}
+	}()
+	// Cleanup reads this to tell whose backup a leftover staging holds.
+	if err := os.WriteFile(filepath.Join(staging, stagingTargetFile), []byte(target), 0o600); err != nil {
+		return err
+	}
 	staged := filepath.Join(staging, "Faro.app")
 	if err := stageBundle(ctx, source, staged); err != nil {
 		return err
 	}
+	// Exchange the two bundles in one atomic step, so the app is never
+	// missing from its folder. The staged path then holds the previous
+	// version, which the running process no longer needs on disk.
+	err = unix.RenamexNp(staged, target, unix.RENAME_SWAP)
+	if err == nil || !errors.Is(err, unix.ENOTSUP) && !errors.Is(err, unix.EINVAL) {
+		return err
+	}
+	// The volume cannot swap: move the old bundle aside, then the new one in.
 	previous := filepath.Join(staging, "previous.app")
 	if err := os.Rename(target, previous); err != nil {
 		return err
 	}
 	if err := os.Rename(staged, target); err != nil {
 		if restoreErr := os.Rename(previous, target); restoreErr != nil {
-			return fmt.Errorf("replace Faro: %v; restoring the previous version also failed: %v", err, restoreErr)
+			keep = true
+			return fmt.Errorf("replace Faro: %v. The previous version could not be put back; it is kept at %s", err, previous)
 		}
 		return err
 	}
-	// The running process keeps its own files open, so the previous bundle
-	// can be removed (with the staging directory) straight away.
 	return nil
 }
 
-// administratorSwap moves the old bundle aside, copies the new one into place
-// and removes the old one, restoring it if the copy fails.
+// stagingTargetFile, inside a staging directory, names the bundle it updates.
+const stagingTargetFile = "target"
+
+// administratorSwap first restores a bundle an interrupted earlier attempt
+// left moved aside. It then copies the new bundle in beside the old one, the
+// slow step, before touching the old one, so only two quick renames separate
+// the old version from the new, and puts the old one back if the second
+// rename fails.
 const administratorSwap = `on run argv
 	set target to quoted form of item 1 of argv
 	set staged to quoted form of item 2 of argv
+	set incoming to quoted form of ((item 1 of argv) & ".faro-new")
 	set previous to quoted form of ((item 1 of argv) & ".faro-previous")
-	do shell script "/bin/rm -rf " & previous & " && /bin/mv " & target & " " & previous & " && if /usr/bin/ditto " & staged & " " & target & "; then /bin/rm -rf " & previous & "; else /bin/rm -rf " & target & "; /bin/mv " & previous & " " & target & "; exit 1; fi" with prompt "Faro wants to install an update." with administrator privileges
+	do shell script "if [ ! -e " & target & " ] && [ -e " & previous & " ]; then /bin/mv " & previous & " " & target & " || exit 1; fi; /bin/rm -rf " & incoming & " " & previous & " && /usr/bin/ditto " & staged & " " & incoming & " && /bin/mv " & target & " " & previous & " && if /bin/mv " & incoming & " " & target & "; then /bin/rm -rf " & previous & "; else /bin/mv " & previous & " " & target & "; exit 1; fi" with prompt "Faro wants to install an update." with administrator privileges
 end run`
 
 func replaceBundleAsAdministrator(ctx context.Context, source, target string) error {
@@ -190,7 +217,8 @@ func openDownload(file string) error {
 }
 
 // cleanupInstallation removes staging directories left beside the bundle by
-// an update that was interrupted.
+// an interrupted update. A staging directory that still holds a backup of a
+// bundle that is now missing is kept, since it is the only copy.
 func cleanupInstallation() {
 	current := detectInstallation()
 	if current.method != MethodMacApp {
@@ -198,6 +226,15 @@ func cleanupInstallation() {
 	}
 	leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(current.target), ".faro-update-*"))
 	for _, leftover := range leftovers {
+		if _, err := os.Stat(filepath.Join(leftover, "previous.app")); err == nil {
+			owner, err := os.ReadFile(filepath.Join(leftover, stagingTargetFile))
+			if err != nil {
+				continue
+			}
+			if _, err := os.Stat(string(owner)); err != nil {
+				continue
+			}
+		}
 		_ = os.RemoveAll(leftover)
 	}
 }

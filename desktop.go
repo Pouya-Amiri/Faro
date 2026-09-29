@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Pouya-Amiri/Faro/internal/app"
 	"github.com/Pouya-Amiri/Faro/internal/buildinfo"
@@ -30,7 +31,8 @@ type Desktop struct {
 	launchMu    sync.Mutex
 	launchPaths []string
 
-	updates *updater.Manager
+	updates           *updater.Manager
+	pauseBeforeUpdate atomic.Bool
 }
 
 func NewDesktop(wailsApp *application.App, background application.RGBA) *Desktop {

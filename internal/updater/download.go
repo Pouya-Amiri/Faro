@@ -34,11 +34,18 @@ type progressFunc func(received, total int64)
 // whose SHA-256 has been checked against want. A partial file left by an
 // interrupted download is resumed, and a complete, verified file is reused.
 func download(ctx context.Context, client *http.Client, item asset, want, dir, userAgent string, progress progressFunc) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	final := filepath.Join(dir, item.name)
 	if fileHash(final) == want {
+		// Hashing a cached file takes a moment; a cancellation meanwhile wins.
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		progress(item.size, item.size)
 		return final, nil
 	}
@@ -167,6 +174,11 @@ func fetchRange(ctx context.Context, client *http.Client, item asset, file *os.F
 		}
 		if readErr == io.EOF {
 			progress(offset, total)
+			if item.size > 0 && offset < item.size {
+				// A body that ends cleanly but early, as a proxy may send,
+				// is resumed like a dropped connection.
+				return offset, true, fmt.Errorf("the download ended after %d of %d bytes", offset, item.size)
+			}
 			return offset, false, nil
 		}
 		if readErr != nil {

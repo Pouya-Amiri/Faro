@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -477,5 +478,163 @@ func TestDescribeErrorReadsAsASentence(t *testing.T) {
 	}
 	if got := describeError(context.DeadlineExceeded); !strings.Contains(got, "too long") {
 		t.Fatalf("describeError(timeout) = %q", got)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
+
+func TestCheckDuringInstallKeepsTheReleaseBeingInstalled(t *testing.T) {
+	current := appImageInstallation()
+	fake := newFakeGitHub(t, "v1.2.0", map[string][]byte{current.assetName("1.2.0"): []byte("x")})
+	applying, release := make(chan struct{}), make(chan struct{})
+	manager, _ := testManager(t, fake, "1.1.1", current, func(context.Context, installation, string, string) (func() error, error) {
+		close(applying)
+		<-release
+		return nil, errCancelled
+	})
+	if _, err := manager.Check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// A second check that answers 1.3.0 only after the install has begun.
+	fake.tag = "v1.3.0"
+	gate := make(chan struct{})
+	transport := manager.options.client.Transport
+	manager.options.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/latest" {
+			<-gate
+		}
+		return transport.RoundTrip(request)
+	})
+	checked := make(chan struct{})
+	go func() { _, _ = manager.Check(context.Background()); close(checked) }()
+	for manager.Status().Phase != PhaseChecking {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := manager.Install(); err != nil {
+		t.Fatal(err)
+	}
+	<-applying
+	close(gate)
+	<-checked
+	if status := manager.Status(); status.LatestVersion != "1.2.0" || !status.Downloaded || status.Phase != PhaseInstalling {
+		t.Fatalf("a check replaced the release being installed: %#v", status)
+	}
+	close(release)
+}
+
+func TestCancelledDownloadDoesNotReuseCache(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte("cached")
+	if err := os.WriteFile(filepath.Join(dir, "a.bin"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := download(ctx, http.DefaultClient, asset{name: "a.bin", size: 6, url: "http://127.0.0.1:1/"}, hex.EncodeToString(digest[:]), dir, "test", func(int64, int64) {})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled download returned %v", err)
+	}
+}
+
+func TestCancelBeforeInstallingIsHonoured(t *testing.T) {
+	current := appImageInstallation()
+	name := current.assetName("1.2.0")
+	fake := newFakeGitHub(t, "v1.2.0", map[string][]byte{name: []byte("new")})
+	applied := atomic.Bool{}
+	manager, updates := testManager(t, fake, "1.1.1", current, func(context.Context, installation, string, string) (func() error, error) {
+		applied.Store(true)
+		return func() error { return nil }, nil
+	})
+	if _, err := manager.Check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Cancel as the download starts; the install must never begin.
+	for len(updates) > 0 {
+		<-updates
+	}
+	manager.options.downloadClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		response, err := fake.server.Client().Transport.RoundTrip(request)
+		if err == nil && strings.HasSuffix(request.URL.Path, name) {
+			manager.Cancel()
+		}
+		return response, err
+	})}
+	if err := manager.Install(); err != nil {
+		t.Fatal(err)
+	}
+	status := waitForStatus(t, updates, func(status Status) bool { return status.Phase == PhaseIdle })
+	if applied.Load() || status.InstallError != "" {
+		t.Fatalf("a cancelled update was installed: applied=%v %#v", applied.Load(), status)
+	}
+}
+
+func TestBeforeRestartRunsBeforeRestart(t *testing.T) {
+	current := appImageInstallation()
+	fake := newFakeGitHub(t, "v1.2.0", map[string][]byte{current.assetName("1.2.0"): []byte("new")})
+	manager, _ := testManager(t, fake, "1.1.1", current, func(context.Context, installation, string, string) (func() error, error) {
+		return func() error { return nil }, nil
+	})
+	var order []string
+	var mu sync.Mutex
+	restarted := make(chan struct{})
+	manager.options.BeforeRestart = func() { mu.Lock(); order = append(order, "prepare"); mu.Unlock() }
+	manager.options.Restart = func() { mu.Lock(); order = append(order, "restart"); mu.Unlock(); close(restarted) }
+	if _, err := manager.Check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Install(); err != nil {
+		t.Fatal(err)
+	}
+	<-restarted
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(order, ",") != "prepare,restart" {
+		t.Fatalf("restart hooks ran as %v", order)
+	}
+}
+
+func TestBuildMetadataIsKeptInAssetNames(t *testing.T) {
+	current := appImageInstallation()
+	name := current.assetName("1.2.0+build.42")
+	if name != "Faro-1.2.0+build.42-linux-"+archName(runtime.GOARCH, "x86_64", "aarch64")+".AppImage" {
+		t.Fatalf("unexpected asset name %q", name)
+	}
+	fake := newFakeGitHub(t, "v1.2.0+build.42", map[string][]byte{name: []byte("x")})
+	manager, _ := testManager(t, fake, "1.1.1", current, nil)
+	status, err := manager.Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.CanInstall || status.LatestVersion != "1.2.0+build.42" {
+		t.Fatalf("release with build metadata was not installable: %#v", status)
+	}
+}
+
+func TestDownloadRetriesCleanShortBody(t *testing.T) {
+	payload := []byte("abcdefgh")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			// Chunked and ended cleanly, but short.
+			w.(http.Flusher).Flush()
+			_, _ = w.Write(payload[:4])
+			return
+		}
+		start, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(r.Header.Get("Range"), "bytes="), "-"))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(payload)-1, len(payload)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(payload[start:])
+	}))
+	defer server.Close()
+	digest := sha256.Sum256(payload)
+	path, err := download(context.Background(), server.Client(), asset{name: "b.bin", size: 8, url: server.URL}, hex.EncodeToString(digest[:]), t.TempDir(), "test", func(int64, int64) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(payload) || requests.Load() != 2 {
+		t.Fatalf("short body was not resumed: %q after %d requests", got, requests.Load())
 	}
 }

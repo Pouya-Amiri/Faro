@@ -2603,10 +2603,6 @@ function applyUpdateStatus(status) {
     if (!status.available && !updateBusy(status)) $("update-dialog").close();
     else renderUpdateDialog();
   }
-  // Pause for the room just before Faro restarts, as leaving would.
-  if (status.phase === "installing" && previous?.phase !== "installing" && preferences.pauseOnLeave && canControl() && snapshot && !snapshot.playback.paused) {
-    invoke("SetPaused", true).catch(() => {});
-  }
   // Mention a newly found release once, without interrupting.
   if (status.available && status.phase === "idle" && status.latestVersion !== updateNotifiedVersion && previous && !previous.available
     && !$("update-dialog").open && !$("settings-dialog").open) {
@@ -2661,6 +2657,8 @@ function renderUpdatePreferences() {
     tone = "busy";
   } else if (status.available) {
     text = updateBusy(status) ? `Updating to ${updateVersionLabel(status.latestVersion)} · ${updateProgressText(status)}` : `Faro ${updateVersionLabel(status.latestVersion)} is available`;
+    // A known release must not hide that the latest check failed.
+    if (status.checkError && !updateBusy(status)) text += " · the last check for newer releases failed";
     tone = "available";
   } else if (status.checkError) {
     text = `Couldn't check for updates. ${status.checkError}`;
@@ -2672,7 +2670,7 @@ function renderUpdatePreferences() {
   $("update-status-text").textContent = text;
   $("update-status-dot").className = `update-status-dot ${tone}`;
   $("update-check-now").disabled = status.phase !== "idle";
-  $("update-check-now").textContent = status.available && !updateBusy(status) ? "View update" : "Check now";
+  $("update-check-now").textContent = status.available && !updateBusy(status) && !status.checkError ? "View update" : "Check now";
 }
 
 // Release notes are Markdown written by GitHub's release note generator or by
@@ -2800,7 +2798,7 @@ function openUpdateRelease() {
 }
 
 async function checkForUpdatesNow() {
-  if (updateStatus?.available && !updateBusy()) { openUpdateDialog(); return; }
+  if (updateStatus?.available && !updateBusy() && !updateStatus.checkError) { openUpdateDialog(); return; }
   try {
     const status = await invoke("CheckForUpdates");
     applyUpdateStatus(status);
@@ -2830,7 +2828,9 @@ document.querySelectorAll("[data-update-notice], [data-update-open]").forEach((b
 });
 $("update-install").onclick = () => {
   if (!updateStatus?.canInstall) { openUpdateRelease(); return; }
-  invoke("InstallUpdate").catch(showError);
+  // The backend pauses the room itself right before restarting, when this
+  // participant is still in one and allowed to.
+  invoke("InstallUpdate", Boolean(preferences.pauseOnLeave)).catch(showError);
 };
 $("update-later").onclick = () => {
   if (updateStatus?.phase === "downloading") invoke("CancelUpdate").catch(showError);

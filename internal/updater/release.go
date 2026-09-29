@@ -33,6 +33,9 @@ const (
 
 // release is the newest published GitHub release.
 type release struct {
+	// name is the full release version, including any build metadata, as
+	// release file names use it; version is its parsed form for precedence.
+	name      string
 	version   version
 	notes     string
 	url       string
@@ -91,6 +94,7 @@ func fetchLatest(ctx context.Context, client *http.Client, endpoint, userAgent, 
 		return release{}, fmt.Errorf("read the latest release version: %w", err)
 	}
 	result := release{
+		name:      strings.TrimPrefix(strings.TrimSpace(payload.TagName), "v"),
 		version:   parsed,
 		notes:     truncateUTF8(strings.TrimSpace(payload.Body), maximumNotes),
 		url:       ReleasesURL,

@@ -119,10 +119,35 @@ func runInstaller(current installation, installer string) (func() error, error) 
 		if err := command.Start(); err == nil {
 			return command.Process.Release()
 		}
-		// Without PowerShell, start the installer directly; it closes Faro
-		// through the Restart Manager if Faro has not exited yet.
+		// Without PowerShell, cmd.exe does the same: start(1) goes through
+		// the shell, so the installer can still ask for elevation, waits for
+		// it and reopens Faro. It cannot wait for Faro to exit first, but the
+		// installer closes a Faro that is still running through the Restart
+		// Manager (/CLOSEAPPLICATIONS).
+		if err := startCmdHelper(installer, arguments, current.target); err == nil {
+			return nil
+		}
 		return shellExecute(installer, strings.Join(arguments, " "), directory)
 	}, nil
+}
+
+func startCmdHelper(installer string, arguments []string, app string) error {
+	cmd := filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe")
+	if _, err := os.Stat(cmd); err != nil {
+		cmd = "cmd.exe"
+	}
+	command := exec.Command(cmd)
+	// Paths cannot contain double quotes, so quoting each one is enough;
+	// Go's own argument escaping does not match cmd.exe's rules.
+	command.SysProcAttr = &syscall.SysProcAttr{
+		CmdLine:       fmt.Sprintf(`cmd.exe /d /c start "" /wait "%s" %s & start "" "%s"`, installer, strings.Join(arguments, " "), app),
+		CreationFlags: windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP,
+		HideWindow:    true,
+	}
+	if err := command.Start(); err != nil {
+		return err
+	}
+	return command.Process.Release()
 }
 
 func encodePowerShell(script string) string {
@@ -152,44 +177,67 @@ func shellExecute(file, parameters, directory string) error {
 }
 
 // replacePortable swaps the new Faro.exe (and its notices) in beside the
-// running one. Windows lets a running executable be renamed but not replaced,
-// so the old one moves aside and is deleted on the next start.
+// running one. Everything is unpacked and checked before anything is
+// replaced. Windows lets a running executable be renamed but not replaced,
+// so the old one moves aside and is deleted on the next start; the two
+// renames that swap it are back to back, which keeps the moment Faro.exe is
+// absent as short as the file system allows.
 func replacePortable(current installation, archive string) (func() error, error) {
 	reader, err := zip.OpenReader(archive)
 	if err != nil {
 		return nil, fmt.Errorf("open the update: %w", err)
 	}
 	defer reader.Close()
-	var executable *zip.File
+	entries := map[string]*zip.File{}
 	for _, entry := range reader.File {
-		if strings.EqualFold(entry.Name, "Faro.exe") {
-			executable = entry
+		for _, name := range portableFiles {
+			if strings.EqualFold(entry.Name, name) {
+				entries[name] = entry
+			}
 		}
 	}
-	if executable == nil {
-		return nil, errors.New("the update archive does not contain Faro.exe")
+	for _, name := range portableFiles {
+		if entries[name] == nil {
+			return nil, fmt.Errorf("the update archive does not contain %s", name)
+		}
 	}
-	staged := current.target + ".new"
-	if err := extractEntry(executable, staged); err != nil {
-		return nil, fmt.Errorf("unpack the update: %w", err)
+	directory := filepath.Dir(current.target)
+	staged := map[string]string{}
+	defer func() {
+		for _, path := range staged {
+			_ = os.Remove(path)
+		}
+	}()
+	for _, name := range portableFiles {
+		target := filepath.Join(directory, name)
+		if name == "Faro.exe" {
+			target = current.target
+		}
+		path := target + ".new"
+		if err := extractEntry(entries[name], path); err != nil {
+			return nil, fmt.Errorf("unpack %s from the update: %w", name, err)
+		}
+		staged[name] = path
+	}
+	// The notices first: if one cannot be replaced, Faro itself is untouched.
+	for _, name := range portableFiles[1:] {
+		if err := os.Rename(staged[name], filepath.Join(directory, name)); err != nil {
+			return nil, fmt.Errorf("replace %s: %w", name, err)
+		}
+		delete(staged, name)
 	}
 	previous := current.target + ".old"
 	_ = os.Remove(previous)
 	if err := os.Rename(current.target, previous); err != nil {
-		_ = os.Remove(staged)
 		return nil, fmt.Errorf("replace Faro: %w", err)
 	}
-	if err := os.Rename(staged, current.target); err != nil {
-		_ = os.Rename(previous, current.target)
-		_ = os.Remove(staged)
-		return nil, fmt.Errorf("replace Faro: %w", err)
-	}
-	directory := filepath.Dir(current.target)
-	for _, entry := range reader.File {
-		if name := entry.Name; strings.EqualFold(name, "LICENSE") || strings.EqualFold(name, "THIRD_PARTY_NOTICES.txt") {
-			_ = extractEntry(entry, filepath.Join(directory, name))
+	if err := os.Rename(staged["Faro.exe"], current.target); err != nil {
+		if restoreErr := os.Rename(previous, current.target); restoreErr != nil {
+			return nil, fmt.Errorf("replace Faro: %v. The previous version could not be put back; rename %s to %s to restore it", err, previous, filepath.Base(current.target))
 		}
+		return nil, fmt.Errorf("replace Faro: %w", err)
 	}
+	delete(staged, "Faro.exe")
 	target := current.target
 	return func() error {
 		command := exec.Command(target)
@@ -198,6 +246,9 @@ func replacePortable(current installation, archive string) (func() error, error)
 		return startDetached(command)
 	}, nil
 }
+
+// portableFiles is the portable archive's contents, Faro.exe first.
+var portableFiles = []string{"Faro.exe", "LICENSE", "THIRD_PARTY_NOTICES.txt"}
 
 func extractEntry(entry *zip.File, target string) error {
 	if entry.UncompressedSize64 > maximumDownload {
