@@ -54,7 +54,7 @@ func Start(ctx context.Context, cfg Config, initialSource string) (*VLC, error) 
 		return nil, err
 	}
 	args := launchArguments(runtime.GOOS, address, cfg.ExtraArgs, initialSource)
-	command := exec.CommandContext(ctx, executable, args...)
+	command := exec.CommandContext(ctx, discovery.Resolve(executable), args...)
 	if err := command.Start(); err != nil {
 		return nil, fmt.Errorf("start VLC: %w", err)
 	}

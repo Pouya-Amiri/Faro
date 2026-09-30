@@ -149,6 +149,22 @@ func usableFile(path string) bool {
 	return runtime.GOOS == "windows" || info.Mode().Perm()&0o111 != 0
 }
 
+// Resolve returns executable with symbolic links and junctions resolved, so
+// it can be started without traversing them. Scoop's apps\<name>\current is a
+// junction created by the user, and Windows refuses to follow such a mount
+// point for processes under its redirection trust policy ("the path cannot be
+// traversed because it contains an untrusted mount point"). The link itself
+// is read without being followed, so resolving it is not affected.
+func Resolve(executable string) string {
+	if runtime.GOOS != "windows" {
+		return executable
+	}
+	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+		return resolved
+	}
+	return executable
+}
+
 func absolute(path string) string {
 	result, err := filepath.Abs(path)
 	if err == nil {
