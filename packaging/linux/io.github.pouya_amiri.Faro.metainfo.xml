@@ -22,6 +22,11 @@
     <id>io.github.pouya_amiri.Faro.desktop</id>
   </provides>
   <releases>
+    <release version="1.1.2" date="2026-09-30">
+      <description>
+        <p>Installs updates in place and checks for them periodically, adds a "Don't ask again" option to the quit dialog, and fixes starting mpv or VLC installed with Scoop on Windows.</p>
+      </description>
+    </release>
     <release version="1.1.1" date="2026-09-28">
       <description>
         <p>Redesigns the selection wheel, makes the selected tab easier to see in the light and sage themes, and introduces a new app icon.</p>
