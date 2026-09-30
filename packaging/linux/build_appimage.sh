@@ -7,11 +7,11 @@ arch="${2:?usage: build_appimage.sh VERSION ARCH}"
 case "$arch" in
   x86_64)
     tool_sha256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
-    runtime_sha256="1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf"
+    runtime_sha256="2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
     ;;
   aarch64)
     tool_sha256="f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158"
-    runtime_sha256="7d5d772b7c32f0c84caf0a452a3072a5709027d7eac5856feb89a7a7a8881372"
+    runtime_sha256="00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444"
     ;;
   *)
     echo "unsupported AppImage architecture: $arch" >&2
@@ -23,22 +23,32 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 build_dir="$root_dir/build/linux/appimage"
 app_dir="$build_dir/Faro.AppDir"
 tool_version="1.9.1"
+# A tagged runtime release; "continuous" is rebuilt in place, which breaks
+# the checksum below whenever upstream publishes a new build.
+runtime_version="20251108"
 tool="$build_dir/appimagetool-$arch.AppImage"
-runtime="$build_dir/runtime-$arch"
+runtime="$build_dir/runtime-$runtime_version-$arch"
 output="$root_dir/dist_actions/Faro-$version-linux-$arch.AppImage"
 
 mkdir -p "$build_dir" "$root_dir/dist_actions"
+verify() {
+  if ! printf '%s  %s\n' "$1" "$2" | sha256sum --check --status; then
+    echo "checksum mismatch for $(basename "$2"): expected $1, got $(sha256sum "$2" | cut -d' ' -f1)" >&2
+    rm -f "$2"
+    exit 1
+  fi
+}
 if [[ ! -f "$tool" ]]; then
   curl --fail --location --retry 3 --silent --show-error --output "$tool" \
     "https://github.com/AppImage/appimagetool/releases/download/$tool_version/appimagetool-$arch.AppImage"
 fi
-printf '%s  %s\n' "$tool_sha256" "$tool" | sha256sum --check --status
+verify "$tool_sha256" "$tool"
 chmod 0755 "$tool"
 if [[ ! -f "$runtime" ]]; then
   curl --fail --location --retry 3 --silent --show-error --output "$runtime" \
-    "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-$arch"
+    "https://github.com/AppImage/type2-runtime/releases/download/$runtime_version/runtime-$arch"
 fi
-printf '%s  %s\n' "$runtime_sha256" "$runtime" | sha256sum --check --status
+verify "$runtime_sha256" "$runtime"
 
 rm -rf "$app_dir"
 install -Dm755 "$root_dir/build/bin/faro" "$app_dir/usr/bin/faro"
