@@ -45,6 +45,15 @@ func (s *Service) SetRole(participantID string, role protocol.Role) error {
 	return client.SetRole(protocol.RoomRoleSet{ParticipantID: participantID, Role: role})
 }
 
+// KickParticipant removes a participant from the room.
+func (s *Service) KickParticipant(participantID string) error {
+	client, err := s.connected()
+	if err != nil {
+		return err
+	}
+	return client.KickParticipant(protocol.RoomParticipantKick{ParticipantID: participantID})
+}
+
 func (s *Service) SetPaused(paused bool) error {
 	client, mediaPlayer, err := s.connectedPlayer()
 	if err != nil {

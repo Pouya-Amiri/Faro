@@ -174,9 +174,27 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 				s.showChatInPlayer(event.Chat)
 			}
 			if event.Activity != nil {
+				// The activity arrives after the playlist and playback updates
+				// it describes, so the selected item is applied again once the
+				// dismissal is lifted.
+				if s.applyActivityPlaybackIntent(client, *event.Activity) {
+					select {
+					case playlistUpdates <- struct{}{}:
+					default:
+					}
+					go s.reconcilePlaylistStreams(ctx, client)
+				}
 				s.sink(Event{Kind: "activity", Activity: event.Activity})
 			}
 			if event.Error != nil {
+				if event.Error.Code == protocol.ErrorKicked {
+					// The server closes the connection next; leaving now keeps
+					// the client from reconnecting into the room it was
+					// removed from.
+					s.leaveAfterKick(client)
+					s.sink(Event{Kind: "error", Error: event.Error})
+					return
+				}
 				s.sink(Event{Kind: "error", Error: event.Error})
 			}
 			if event.Wheel != nil {
@@ -422,6 +440,25 @@ func (s *Service) applyWheelPlaybackIntent(wheel protocol.PlaylistWheel) {
 	}
 }
 
+// applyActivityPlaybackIntent lifts a closed player's dismissal when someone
+// else starts playback, by playing a queue item or resuming the room, the way
+// a wheel winner does. It reports whether the dismissal was lifted.
+func (s *Service) applyActivityPlaybackIntent(client *faroclient.Client, activity protocol.ActivityMessage) bool {
+	if activity.Action != protocol.ActivityPlaylistPlayed && activity.Action != protocol.ActivityPlaybackResumed {
+		return false
+	}
+	if activity.ParticipantID == "" || activity.ParticipantID == client.Snapshot().SelfID {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.client != client || !s.playerDismissed || s.player != nil {
+		return false
+	}
+	s.playerDismissed = false
+	return true
+}
+
 func (s *Service) ensurePlayer(intent playerStartIntent) (*faroclient.Client, player.Player, error) {
 	s.playerLifecycleMu.Lock()
 	defer s.playerLifecycleMu.Unlock()
@@ -534,6 +571,15 @@ func (s *Service) releasePlayerWithDismissal(target player.Player, message strin
 	}
 	if message != "" {
 		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "player_closed", Message: message}})
+	}
+}
+
+func (s *Service) leaveAfterKick(client *faroclient.Client) {
+	s.mu.RLock()
+	current := s.client == client
+	s.mu.RUnlock()
+	if current {
+		s.Disconnect()
 	}
 }
 

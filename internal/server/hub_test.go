@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +131,89 @@ func TestModeratedRoomKeepsAControllerWhenOwnerLeaves(t *testing.T) {
 	h.leave(owner.participant)
 	if member.participant.state.Role != protocol.RoleModerator {
 		t.Fatalf("remaining participant was not promoted: %s", member.participant.state.Role)
+	}
+}
+
+func TestKickRespectsRolesAndClosesTheRemovedSession(t *testing.T) {
+	h := newHub(1, 5)
+	join := func(id, name string) *participant {
+		t.Helper()
+		s := testSession(id)
+		local, remote := net.Pipe()
+		t.Cleanup(func() { _ = remote.Close() })
+		s.conn = local
+		joined, err := h.join(s, protocol.Hello{Name: name, Room: "movie"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return joined.participant
+	}
+	owner, moderator, other, member, watcher := join("owner", "Ada"), join("moderator", "Grace"), join("other", "Linus"), join("member", "Ken"), join("watcher", "Barbara")
+	for _, p := range []*participant{moderator, other} {
+		if err := h.setRole(owner, protocol.RoomRoleSet{ParticipantID: p.state.ID, Role: protocol.RoleModerator}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, denied := range []struct {
+		actor, target *participant
+	}{
+		{member, watcher}, {moderator, owner}, {moderator, other}, {owner, owner},
+	} {
+		if err := h.kick(denied.actor, protocol.RoomParticipantKick{ParticipantID: denied.target.state.ID}); err == nil {
+			t.Fatalf("%s removed %s", denied.actor.state.Name, denied.target.state.Name)
+		}
+	}
+	for len(watcher.session.out) > 0 {
+		<-watcher.session.out
+	}
+	if err := h.kick(moderator, protocol.RoomParticipantKick{ParticipantID: member.state.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if h.rooms["movie"].participants[member.state.ID] != nil {
+		t.Fatal("removed participant is still in the room")
+	}
+	var kickedNotice bool
+	for len(watcher.session.out) > 0 {
+		frame := <-watcher.session.out
+		if frame.envelope.Type != protocol.TypeActivityMessage {
+			continue
+		}
+		activity, err := protocol.DecodePayload[protocol.ActivityMessage](frame.envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kickedNotice = activity.Action == protocol.ActivityParticipantKick && activity.ParticipantName == "Grace" && activity.TargetName == "Ken"
+	}
+	if !kickedNotice {
+		t.Fatal("the room was not told who removed whom")
+	}
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case frame := <-member.session.out:
+			if frame.envelope.Type != protocol.TypeError {
+				continue
+			}
+			failure, err := protocol.DecodePayload[protocol.Error](frame.envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if failure.Code != protocol.ErrorKicked || !failure.Fatal {
+				t.Fatalf("removed participant got %+v", failure)
+			}
+			frame.done <- nil
+			select {
+			case <-member.session.done:
+			case <-time.After(time.Second):
+				t.Fatal("removed participant's connection stayed open")
+			}
+			if err := h.kick(owner, protocol.RoomParticipantKick{ParticipantID: other.state.ID}); err != nil {
+				t.Fatalf("owner could not remove a moderator: %v", err)
+			}
+			return
+		case <-deadline:
+			t.Fatal("removed participant was not told why")
+		}
 	}
 }
 

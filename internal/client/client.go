@@ -408,6 +408,9 @@ func (c *Client) SetRoomMode(value protocol.RoomModeSet) error {
 func (c *Client) SetRole(value protocol.RoomRoleSet) error {
 	return c.command(protocol.TypeRoomRoleSet, value)
 }
+func (c *Client) KickParticipant(value protocol.RoomParticipantKick) error {
+	return c.command(protocol.TypeRoomParticipantKick, value)
+}
 func (c *Client) SetPlayback(value protocol.PlaybackSet) error {
 	return c.command(protocol.TypePlaybackSet, value)
 }

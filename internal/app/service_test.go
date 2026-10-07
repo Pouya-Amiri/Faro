@@ -540,6 +540,139 @@ func TestWheelWinnerReopensDismissedPlayersButCancellationDoesNot(t *testing.T) 
 	}
 }
 
+func TestOthersStartingPlaybackReopensDismissedPlayer(t *testing.T) {
+	cases := []struct {
+		activity protocol.ActivityMessage
+		reopens  bool
+	}{
+		{protocol.ActivityMessage{Action: protocol.ActivityPlaylistPlayed, ParticipantID: "other"}, true},
+		{protocol.ActivityMessage{Action: protocol.ActivityPlaybackResumed, ParticipantID: "other"}, true},
+		{protocol.ActivityMessage{Action: protocol.ActivityPlaybackPaused, ParticipantID: "other"}, false},
+		{protocol.ActivityMessage{Action: protocol.ActivityPlaylistUpdated, ParticipantID: "other"}, false},
+		{protocol.ActivityMessage{Action: protocol.ActivityPlaylistPlayed}, false},
+	}
+	for _, test := range cases {
+		client := &faroclient.Client{}
+		s := New(context.Background(), nil)
+		s.client = client
+		s.playerDismissed = true
+		if got := s.applyActivityPlaybackIntent(client, test.activity); got != test.reopens || s.playerDismissed == test.reopens {
+			t.Fatalf("%s: reopened=%t dismissed=%t, want reopened=%t", test.activity.Action, got, s.playerDismissed, test.reopens)
+		}
+	}
+	s := New(context.Background(), nil)
+	s.client = &faroclient.Client{}
+	s.playerDismissed = true
+	if s.applyActivityPlaybackIntent(&faroclient.Client{}, protocol.ActivityMessage{Action: protocol.ActivityPlaylistPlayed, ParticipantID: "other"}) {
+		t.Fatal("an activity from a previous connection lifted the dismissal")
+	}
+}
+
+func TestDismissedPlayerReopensWhenAnotherParticipantPlaysAnItem(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	host, viewer := New(context.Background(), nil), New(context.Background(), nil)
+	status, err := host.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	t.Cleanup(viewer.Shutdown)
+	host.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	viewer.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	for index, s := range []*Service{host, viewer} {
+		name := "Host"
+		if index == 1 {
+			name = "Viewer"
+		}
+		if err := s.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: name, Player: "mpv"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "episode.mkv")
+	if err := os.WriteFile(path, []byte(strings.Repeat("episode-", 1000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "Episode", Source: path}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := host.Snapshot()
+	viewer.rememberSource(snapshot.Playlist.Items[0].Media.Fingerprint, path)
+	viewer.mu.Lock()
+	viewer.playerDismissed = true
+	viewer.mu.Unlock()
+	if err := host.SelectPlaylist(0, ""); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		viewer.mu.RLock()
+		mediaPlayer, dismissed := viewer.player, viewer.playerDismissed
+		viewer.mu.RUnlock()
+		if mediaPlayer != nil && !dismissed {
+			if state, _ := mediaPlayer.State(context.Background()); state.Source == path {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the viewer's closed player did not reopen when the host played an item")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestKickedParticipantLeavesAndDoesNotRejoin(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	kicked := make(chan string, 1)
+	host := New(context.Background(), nil)
+	viewer := New(context.Background(), func(event Event) {
+		if event.Error != nil && event.Error.Code == protocol.ErrorKicked {
+			kicked <- event.Error.Message
+		}
+	})
+	status, err := host.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	t.Cleanup(viewer.Shutdown)
+	if err := host.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Host", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := viewer.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Viewer", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := viewer.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := viewer.KickParticipant(snapshot.SelfID); err == nil {
+		t.Fatal("a participant removed themselves")
+	}
+	if err := host.KickParticipant(snapshot.SelfID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case message := <-kicked:
+		if !strings.Contains(message, "Host") {
+			t.Fatalf("kick message %q does not say who removed the viewer", message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the viewer was not told it was removed")
+	}
+	if viewer.InRoom() {
+		t.Fatal("the removed viewer is still in the room")
+	}
+	// The first reconnect attempt would come within 1.2 seconds.
+	time.Sleep(1500 * time.Millisecond)
+	snapshot, err = host.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Participants) != 1 {
+		t.Fatalf("room has %d participants after the kick, want 1", len(snapshot.Participants))
+	}
+}
+
 func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
 	t.Setenv("FARO_TLS_DIR", t.TempDir())
 	s := New(context.Background(), nil)
@@ -658,7 +791,16 @@ func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
 func TestExplicitPlayRequestsAvailableStreamForDismissedViewer(t *testing.T) {
 	t.Setenv("FARO_TLS_DIR", t.TempDir())
 	network := streamtransport.NewFakeNetwork()
-	host, viewer := New(context.Background(), nil), New(context.Background(), nil)
+	played := make(chan struct{}, 1)
+	host := New(context.Background(), nil)
+	viewer := New(context.Background(), func(event Event) {
+		if event.Activity != nil && event.Activity.Action == protocol.ActivityPlaylistPlayed {
+			select {
+			case played <- struct{}{}:
+			default:
+			}
+		}
+	})
 	host.streamFactory, viewer.streamFactory = network, network
 	status, err := host.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie", StreamingDERPMapURL: "https://derp.example.test/map.json"})
 	if err != nil {
@@ -684,12 +826,19 @@ func TestExplicitPlayRequestsAvailableStreamForDismissedViewer(t *testing.T) {
 	if err := host.SetPlaylist([]PlaylistInput{{Label: "Shared", Source: path}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	viewer.mu.Lock()
-	viewer.playerDismissed = true
-	viewer.mu.Unlock()
 	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
 	}
+	// The viewer closes its player after the host played the item, so only an
+	// explicit Play may start the stream that is offered afterwards.
+	select {
+	case <-played:
+	case <-time.After(5 * time.Second):
+		t.Fatal("viewer did not see the host play the item")
+	}
+	viewer.mu.Lock()
+	viewer.playerDismissed = true
+	viewer.mu.Unlock()
 	snapshot, _ := host.Snapshot()
 	if err := host.OfferPlaylistStream(snapshot.Playlist.Items[0].ID); err != nil {
 		t.Fatal(err)

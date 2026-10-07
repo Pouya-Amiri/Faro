@@ -127,6 +127,14 @@ func (h *hub) leave(p *participant) {
 		return
 	}
 	h.mu.Lock()
+	notify := h.removeParticipantLocked(p)
+	h.mu.Unlock()
+	notify()
+}
+
+// removeParticipantLocked takes p out of its room and returns what tells the
+// remaining participants, to be called once h.mu is released.
+func (h *hub) removeParticipantLocked(p *participant) func() {
 	var recipients []*session
 	var participants []protocol.Participant
 	var cancelled *protocol.PlaylistWheel
@@ -153,13 +161,52 @@ func (h *hub) leave(p *participant) {
 		}
 		break
 	}
-	h.mu.Unlock()
-	if cancelled != nil {
-		broadcast(recipients, protocol.TypePlaylistWheelUpdated, *cancelled)
+	return func() {
+		if cancelled != nil {
+			broadcast(recipients, protocol.TypePlaylistWheelUpdated, *cancelled)
+		}
+		broadcast(recipients, protocol.TypeParticipantsUpdated, participants)
+		broadcast(streamRecipients, protocol.TypeStreamOffersUpdated, streamOffers)
+		sendRevocations(revocations)
 	}
-	broadcast(recipients, protocol.TypeParticipantsUpdated, participants)
-	broadcast(streamRecipients, protocol.TypeStreamOffersUpdated, streamOffers)
-	sendRevocations(revocations)
+}
+
+// kick removes a participant from p's room and closes their connection with a
+// fatal error, so their client does not rejoin on its own. Owners can remove
+// anyone but another owner; moderators can remove members.
+func (h *hub) kick(p *participant, request protocol.RoomParticipantKick) error {
+	h.mu.Lock()
+	r := h.roomForLocked(p)
+	if r == nil || p.state.Role != protocol.RoleOwner && p.state.Role != protocol.RoleModerator {
+		h.mu.Unlock()
+		return invalid("forbidden", "only owners and moderators can remove participants")
+	}
+	target := r.participants[request.ParticipantID]
+	if target == nil {
+		h.mu.Unlock()
+		return invalid("participant_not_found", "participant not found")
+	}
+	if target == p {
+		h.mu.Unlock()
+		return invalid("forbidden", "leave the room instead of removing yourself")
+	}
+	if target.state.Role == protocol.RoleOwner || p.state.Role == protocol.RoleModerator && target.state.Role != protocol.RoleMember {
+		h.mu.Unlock()
+		return invalid("forbidden", "only the room owner can remove a moderator, and nobody can remove an owner")
+	}
+	notify := h.removeParticipantLocked(target)
+	recipients := sessionsOf(r)
+	activity := activityMessage(p.state.ID, p.state.Name, protocol.ActivityParticipantKick, 0, 0, "", 0)
+	activity.TargetName = target.state.Name
+	message := p.state.Name + " removed you from the room"
+	h.mu.Unlock()
+	notify()
+	broadcast(recipients, protocol.TypeActivityMessage, activity)
+	go func() {
+		target.session.fatal(protocol.ErrorKicked, message)
+		target.session.close()
+	}()
+	return nil
 }
 
 func ensureModerator(r *room) {

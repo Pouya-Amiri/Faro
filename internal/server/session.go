@@ -191,6 +191,12 @@ func (s *session) handle(envelope protocol.Envelope) error {
 			return err
 		}
 		return s.server.hub.setRole(s.participant, request)
+	case protocol.TypeRoomParticipantKick:
+		request, err := decode[protocol.RoomParticipantKick](envelope)
+		if err != nil {
+			return err
+		}
+		return s.server.hub.kick(s.participant, request)
 	case protocol.TypePlaybackSet:
 		request, err := decode[protocol.PlaybackSet](envelope)
 		if err != nil {

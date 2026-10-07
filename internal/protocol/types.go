@@ -20,6 +20,7 @@ const (
 	TypeRoomModeSet           MessageType = "room.mode.set"
 	TypeRoomUpdated           MessageType = "room.updated"
 	TypeRoomRoleSet           MessageType = "room.role.set"
+	TypeRoomParticipantKick   MessageType = "room.participant.kick"
 	TypeParticipantsUpdated   MessageType = "participants.updated"
 	TypePlaybackSet           MessageType = "playback.set"
 	TypePlaybackUpdated       MessageType = "playback.updated"
@@ -311,6 +312,12 @@ type RoomRoleSet struct {
 	Role          Role   `json:"role"`
 }
 
+// RoomParticipantKick removes a participant from the room. Owners can remove
+// anyone but another owner; moderators can remove members.
+type RoomParticipantKick struct {
+	ParticipantID string `json:"participantId"`
+}
+
 type PlaybackSet struct {
 	PositionSeconds float64 `json:"positionSeconds"`
 	Paused          bool    `json:"paused"`
@@ -352,6 +359,10 @@ const (
 	ErrorPlaylistItemNotFound = "playlist_item_not_found"
 )
 
+// ErrorKicked is the fatal error sent to a participant removed from the room.
+// The client does not reconnect after it.
+const ErrorKicked = "kicked"
+
 type PlaylistWheelSpin struct{}
 
 type ChatSend struct {
@@ -378,6 +389,7 @@ const (
 	ActivityPlaylistPlayed  ActivityAction = "playlist.played"
 	ActivityWheelStarted    ActivityAction = "wheel.started"
 	ActivityWheelCompleted  ActivityAction = "wheel.completed"
+	ActivityParticipantKick ActivityAction = "participant.kicked"
 )
 
 // ActivityMessage is a server-authored, ephemeral room event. Clients format
@@ -387,6 +399,7 @@ type ActivityMessage struct {
 	ParticipantID   string         `json:"participantId,omitempty"`
 	ParticipantName string         `json:"participantName,omitempty"`
 	ItemLabel       string         `json:"itemLabel,omitempty"`
+	TargetName      string         `json:"targetName,omitempty"`
 	ItemCount       int            `json:"itemCount,omitempty"`
 	PositionSeconds float64        `json:"positionSeconds,omitempty"`
 	DeltaSeconds    float64        `json:"deltaSeconds,omitempty"`

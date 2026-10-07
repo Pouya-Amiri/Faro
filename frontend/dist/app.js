@@ -30,6 +30,7 @@ let wheelAudioContext = null;
 let wheelSpinOutput = null;
 let lastWheelTick = -1;
 let lastWheelSoundTime = -Infinity;
+let wheelAudioIdleTimer = 0;
 let addingPlaylistURL = false;
 let streamingAvailable = false;
 let streamState = { state: "idle", offerId: "", route: "" };
@@ -1137,8 +1138,15 @@ function wheelCandidate(wheel, rotation) {
   return items[Math.floor(normalized / arc) % items.length];
 }
 
+// The context is unlocked by the first gesture, but it only runs while the
+// wheel makes sound. A running context keeps an audio stream open to the
+// sound server, and one left open between spins is the likeliest source of
+// stray wheel sounds heard long after a spin with WebKitGTK on GNOME.
 function ensureWheelAudio() {
-  if (preferences.wheelSound === false) return null;
+  if (preferences.wheelSound === false) {
+    suspendWheelAudio();
+    return null;
+  }
   const AudioContext = window.AudioContext || window.webkitAudioContext;
   if (!AudioContext) return null;
   if (!wheelAudioContext) {
@@ -1148,12 +1156,33 @@ function ensureWheelAudio() {
   if (wheelAudioContext.state === "suspended") {
     wheelAudioContext.resume().catch(() => {});
   }
+  suspendWheelAudioWhenQuiet();
   return wheelAudioContext;
+}
+
+// Every sound restarts the countdown, so the context is suspended only after
+// the last tone has fully decayed and the stream has rendered silence.
+function suspendWheelAudioWhenQuiet() {
+  clearTimeout(wheelAudioIdleTimer);
+  wheelAudioIdleTimer = setTimeout(suspendWheelAudio, 2000);
+}
+
+function suspendWheelAudio() {
+  clearTimeout(wheelAudioIdleTimer);
+  wheelAudioIdleTimer = 0;
+  if (wheelAudioContext?.state === "running") wheelAudioContext.suspend().catch(() => {});
 }
 
 function playWheelTone(frequency, gainValue = 0.09, duration = 0.035, delay = 0) {
   const audio = ensureWheelAudio();
-  if (!audio || audio.state !== "running") return;
+  if (!audio) return;
+  if (audio.state === "suspended") {
+    audio.resume().then(() => {
+      if (audio.state === "running") playWheelTone(frequency, gainValue, duration, delay);
+    }).catch(() => {});
+    return;
+  }
+  if (audio.state !== "running") return;
   try {
     const startTime = Math.max(audio.currentTime, 0) + 0.002 + delay;
     const oscillator = audio.createOscillator();
@@ -1258,7 +1287,12 @@ function showWheel(wheel, serverNowUnixMs = Date.now()) {
     $("wheel-status").textContent = `${wheel.requesterName || "A participant"} is spinning…`;
     dialog.classList.remove("has-winner");
     $("wheel-spin-again").disabled = true;
-    if (changed && dismissedWheelID !== wheel.id) animateWheel(wheel);
+    if (changed && dismissedWheelID !== wheel.id) {
+      // The server starts the spin after a short lead-in; the suspended audio
+      // resumes during it.
+      ensureWheelAudio();
+      animateWheel(wheel);
+    }
   } else if (wheel.phase === "completed") {
     const wasSpinning = activeWheel?.id === wheel.id && activeWheel?.phase === "started";
     activeWheel = wheel;
@@ -1428,6 +1462,19 @@ function renderParticipants(referenceMedia) {
     }
     return item;
   }));
+}
+
+// Owners can remove anyone but another owner; moderators can remove members.
+function canKick(person) {
+  const role = self()?.role;
+  if (!person || person.id === snapshot?.selfId || person.role === "owner") return false;
+  return role === "owner" || role === "moderator" && person.role === "member";
+}
+
+async function kickParticipant(person) {
+  const confirmed = await askConfirmation(`Remove ${person.name}?`, `${person.name} leaves the room now. They can rejoin with an invite.`, "Remove");
+  if (!confirmed) return;
+  await invoke("KickParticipant", person.id).catch(showError);
 }
 
 function capitalize(value) { return value ? value[0].toUpperCase() + value.slice(1) : ""; }
@@ -2053,6 +2100,19 @@ async function leaveRoom() {
   }
   try { await invoke("LeaveRoom"); }
   catch (error) { showError(error); }
+  closeRoomView();
+}
+
+// The backend has already left the room; a server this participant hosts
+// keeps running.
+async function leaveRoomAfterKick(message) {
+  closeRoomView();
+  hosted = await invoke("ServerStatus").catch(() => ({ running: false }));
+  renderConnectionInfo();
+  showError(message || "You were removed from the room");
+}
+
+function closeRoomView() {
   hosted = { running: false };
   snapshot = null; timeline = []; playlistHistory = [];
   playlistRenderKey = ""; participantsRenderKey = ""; availabilityKey = "";
@@ -2417,6 +2477,7 @@ function activityDescription(activity) {
     case "playlist.played": return `${name} played ${activity.itemLabel || "a queue item"}`;
     case "wheel.started": return `${name} spun the wheel`;
     case "wheel.completed": return `The wheel chose ${activity.itemLabel || "a queue item"}`;
+    case "participant.kicked": return `${name} removed ${activity.targetName || "someone"} from the room`;
     default: return `${name} changed the room`;
   }
 }
@@ -2429,6 +2490,7 @@ function activityIcon(action) {
   if (action === "playback.rate") return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17a8 8 0 1 1 16 0M12 13l4-4"/></svg>';
   if (action === "playlist.updated") return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7h11M8 12h11M8 17h11"/><circle cx="4" cy="7" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="17" r="1"/></svg>';
   if (action === "wheel.started" || action === "wheel.completed") return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4v16M4 12h16M6.3 6.3l11.4 11.4M6.3 17.7 17.7 6.3"/></svg>';
+  if (action === "participant.kicked") return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="8" r="3.5"/><path d="M3.5 19a6.5 6.5 0 0 1 13 0M16 9h5"/></svg>';
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/></svg>';
 }
 
@@ -2981,6 +3043,7 @@ document.addEventListener("contextmenu", (event) => {
       const role = person.role === "moderator" ? "member" : "moderator";
       items.push(menuButton(role === "moderator" ? "Make moderator" : "Make member", () => { closePopovers(); invoke("SetRole", person.id, role).catch(showError); }));
     }
+    if (canKick(person)) items.push(menuSeparator(), menuButton("Remove from room…", () => { closePopovers(); kickParticipant(person); }, { danger: true }));
     showContextMenu(event, items);
     return;
   }
@@ -3233,6 +3296,10 @@ function receive(event) {
   if (event.wheel) showWheel(event.wheel, event.serverNowUnixMs);
   if (event.chat) addChat(event.chat);
   if (event.activity) addActivity(event.activity);
+  if (event.error?.code === "kicked") {
+    void leaveRoomAfterKick(event.error.message);
+    return;
+  }
   if (event.error) {
     if (["stream_connect", "stream_player", "stream_open", "stream_identity", "stream_unavailable"].includes(event.error.code)) {
       streamState = { state: "idle", offerId: "", route: "" };

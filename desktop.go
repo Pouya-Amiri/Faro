@@ -88,6 +88,10 @@ func (d *Desktop) SetRole(participantID string, role protocol.Role) error {
 	return d.service.SetRole(participantID, role)
 }
 
+func (d *Desktop) KickParticipant(participantID string) error {
+	return d.service.KickParticipant(participantID)
+}
+
 func (d *Desktop) SetPaused(paused bool) error { return d.service.SetPaused(paused) }
 
 func (d *Desktop) Seek(seconds float64) error { return d.service.Seek(seconds) }
