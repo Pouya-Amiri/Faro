@@ -411,6 +411,9 @@ svg { display: block; flex: 0 0 auto; }
 .field-status.detected { color: var(--success); }
 .field-status.missing { color: var(--warning); }
 .form-input.player-detected { border-color: var(--success); }
+.input-with-action { display: flex; gap: 8px; }
+.input-with-action .form-input { flex: 1; min-width: 0; }
+.input-with-action .btn { flex: none; min-height: 38px; }
 .form-input, .form-select, .participant-role-select {
   width: 100%; outline: none;
   user-select: text;
@@ -522,6 +525,8 @@ svg { display: block; flex: 0 0 auto; }
 .stream-input-drawer { padding: 8px 10px; background: var(--panel-alt); border-bottom: 1px solid var(--line); }
 .drawer-fields { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; }
 .stream-input-hint { grid-column: 1 / -1; color: var(--text-hint); font-size: var(--fs-xs); line-height: 1.4; }
+.stream-input-hint.warning { color: var(--warning); }
+.inline-link { padding: 0; border: 0; background: none; color: var(--accent); font-size: inherit; text-decoration: underline; cursor: pointer; }
 .queue-table-header, .queue-item { display: grid; align-items: center; }
 .queue-table-header {
   flex: 0 0 28px; border-bottom: 1px solid var(--line); 
@@ -1185,7 +1190,7 @@ input[type="number"] { appearance: textfield; }
   background-image: linear-gradient(100deg, var(--flag-tint), color-mix(in srgb, var(--flag-tint), transparent 75%) 65%, transparent);
 }
 .queue-item.needs-file .queue-status-tag { color: var(--text-quiet); }
-#host-mode-hint, .form-hint { color: var(--text-hint); line-height: 1.5; }
+#host-mode-hint, .form-hint { color: var(--text-hint); font-size: var(--fs-xs); line-height: 1.5; }
 .queue-meta-col { flex-direction: column; align-items: flex-start; gap: 3px; padding: 8px 0; }
 @media (max-width: 1000px) {
   .queue-duration { display: none; }

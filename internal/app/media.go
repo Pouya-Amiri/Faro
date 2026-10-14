@@ -702,6 +702,19 @@ func (s *Service) YouTubeInfo(source string) (youtube.Info, error) {
 	return s.youtube.Inspect(ctx, source)
 }
 
+// YouTubeSupport reports whether this device can play YouTube links.
+func (s *Service) YouTubeSupport() youtube.Support {
+	checker, supported := s.youtube.(interface {
+		Support(context.Context) youtube.Support
+	})
+	if !supported {
+		return youtube.Support{}
+	}
+	ctx, cancel := context.WithTimeout(s.root, 10*time.Second)
+	defer cancel()
+	return checker.Support(ctx)
+}
+
 func (s *Service) SetYouTubeQuality(source string, height int) error {
 	if !youtube.IsURL(source) {
 		return errors.New("a YouTube URL is required")

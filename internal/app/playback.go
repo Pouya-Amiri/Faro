@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Pouya-Amiri/Faro/internal/player"
@@ -18,6 +19,36 @@ import (
 
 // DetectPlayer returns the launcher Faro would use for the selected player.
 func DetectPlayer(name string) (string, error) { return discovery.Find(name) }
+
+// DetectedPlayer reports where a supported player is installed. Executable
+// is empty when it was not found.
+type DetectedPlayer struct {
+	Player     string `json:"player"`
+	Executable string `json:"executable,omitempty"`
+}
+
+// DetectPlayers looks for every supported player at once and returns them in
+// preference order, so the first one found is the best choice.
+func DetectPlayers() []DetectedPlayer {
+	players := discovery.SupportedPlayers()
+	result := make([]DetectedPlayer, len(players))
+	var wait sync.WaitGroup
+	for index, name := range players {
+		result[index].Player = name
+		wait.Go(func() { result[index].Executable, _ = discovery.Find(name) })
+	}
+	wait.Wait()
+	return result
+}
+
+// PlayerExecutable returns the launcher Faro will start for player: the
+// executable the user chose, validated, or else the detected installation.
+func PlayerExecutable(name, executable string) (string, error) {
+	if strings.TrimSpace(executable) == "" {
+		return discovery.Find(name)
+	}
+	return discovery.Executable(name, executable)
+}
 
 // SupportedPlayers returns the player profiles available on this platform.
 func SupportedPlayers() []string { return discovery.SupportedPlayers() }

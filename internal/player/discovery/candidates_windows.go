@@ -55,6 +55,9 @@ func platformCandidates(profile string) []string {
 	return candidates
 }
 
+// bundleLaunchers is empty: app bundles exist only on macOS.
+func bundleLaunchers(string) []string { return nil }
+
 func platformSupports(profile string) bool {
 	return profile == "mpv" || profile == "mpv.net" || profile == "memento" || profile == "vlc"
 }

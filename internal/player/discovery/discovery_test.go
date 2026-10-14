@@ -97,3 +97,36 @@ func TestUsableFileRejectsNonExecutableFilesOnUnix(t *testing.T) {
 		t.Fatal("non-executable file was accepted as a player launcher")
 	}
 }
+
+func TestExecutableValidatesChosenLauncher(t *testing.T) {
+	directory := t.TempDir()
+	name := "mpv"
+	if runtime.GOOS == "windows" {
+		name = "mpv.exe"
+	}
+	launcher := filepath.Join(directory, name)
+	if err := os.WriteFile(launcher, []byte("test launcher"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := Executable("mpv", launcher); err != nil || found != launcher {
+		t.Fatalf("Executable(launcher) = %q, %v", found, err)
+	}
+	t.Setenv("PATH", directory)
+	if found, err := Executable("mpv", "mpv"); err != nil || found != launcher {
+		t.Fatalf("Executable(command name) = %q, %v", found, err)
+	}
+	for _, path := range []string{"", filepath.Join(directory, "missing"), directory, "not-on-path"} {
+		if _, err := Executable("mpv", path); err == nil {
+			t.Fatalf("Executable(%q) accepted an unusable launcher", path)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		document := filepath.Join(directory, "notes.txt")
+		if err := os.WriteFile(document, []byte("text"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Executable("mpv", document); err == nil {
+			t.Fatal("Executable accepted a file that is not executable")
+		}
+	}
+}

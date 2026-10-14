@@ -32,6 +32,8 @@ let lastWheelTick = -1;
 let lastWheelSoundTime = -Infinity;
 let wheelAudioIdleTimer = 0;
 let addingPlaylistURL = false;
+// What this device lacks to play YouTube links; problem is "" when nothing.
+let youtubeSupport = { ytDlp: "", runtime: "", problem: "" };
 let streamingAvailable = false;
 let streamState = { state: "idle", offerId: "", route: "" };
 // How closely this participant's own player follows the room (from the backend).
@@ -559,11 +561,24 @@ function hydrateConnectForms() {
       status.className = "field-status";
       status.textContent = event.target.value.trim() ? "Using custom location" : "";
     });
-    detectPlayer(prefix, false);
+    $(`${prefix}-executable-browse`).onclick = () => chooseExecutable(prefix);
   }
   $("host-public").value = preferences.publicHost;
   $("host-listen").value = preferences.listenAddress;
   $("host-room").value = preferences.room;
+  void detectInstalledPlayers();
+}
+
+async function chooseExecutable(prefix) {
+  $(`${prefix}-error`).textContent = "";
+  try {
+    const path = await invoke("ChooseExecutable", $(`${prefix}-player`).value);
+    if (!path) return;
+    const input = $(`${prefix}-executable`);
+    input.value = path;
+    input.title = path;
+    input.dispatchEvent(new Event("input"));
+  } catch (error) { $(`${prefix}-error`).textContent = errorText(error); }
 }
 
 async function configurePlayerOptions() {
@@ -586,35 +601,74 @@ async function configurePlayerOptions() {
 }
 
 const playerDetectionSequence = { join: 0, host: 0 };
-async function detectPlayer(prefix, force) {
-  const input = $(`${prefix}-executable`);
+function beginPlayerDetection(prefix) {
   const status = $(`${prefix}-executable-status`);
-  const player = $(`${prefix}-player`).value;
-  const sequence = ++playerDetectionSequence[prefix];
   status.className = "field-status";
   status.textContent = "Looking for player…";
-  input.classList.remove("player-detected");
-  try {
-    const path = await invoke("DetectPlayer", player);
-    if (sequence !== playerDetectionSequence[prefix]) return;
-    const useDetected = force || !input.value.trim() || Boolean(input.dataset.detected);
-    if (useDetected) {
-      input.value = path;
-      input.dataset.detected = path;
-      input.classList.add("player-detected");
-      status.className = "field-status detected";
-      status.textContent = "Detected automatically";
-      input.title = path;
-    } else {
-      input.dataset.detected = "";
-      status.textContent = "Using custom location";
-    }
-  } catch (_) {
-    if (sequence !== playerDetectionSequence[prefix]) return;
+  $(`${prefix}-executable`).classList.remove("player-detected");
+  return ++playerDetectionSequence[prefix];
+}
+
+// path is where the selected player was found, or "" when it was not.
+// force replaces a custom location, as when the player itself changed.
+function showDetectedPlayer(prefix, path, force) {
+  const input = $(`${prefix}-executable`);
+  const status = $(`${prefix}-executable-status`);
+  const custom = input.value.trim();
+  if (path && (force || !custom || input.dataset.detected || custom === path)) {
+    input.value = path;
+    input.dataset.detected = path;
+    input.classList.add("player-detected");
+    status.className = "field-status detected";
+    status.textContent = "Detected automatically";
+    input.title = path;
+  } else if (path) {
+    input.dataset.detected = "";
+    status.textContent = "Using custom location";
+  } else {
     if (force || input.dataset.detected) input.value = "";
     input.dataset.detected = "";
     status.className = "field-status missing";
-    status.textContent = input.value.trim() ? "Using custom location" : "Not found — choose the executable manually";
+    status.textContent = input.value.trim() ? "Using custom location" : "Not installed — install it or use Browse to choose its executable";
+  }
+}
+
+async function detectPlayer(prefix, force) {
+  const sequence = beginPlayerDetection(prefix);
+  let path = "";
+  try { path = await invoke("DetectPlayer", $(`${prefix}-player`).value); } catch (_) {}
+  if (sequence !== playerDetectionSequence[prefix]) return;
+  showDetectedPlayer(prefix, path, force);
+}
+
+// Every player is looked for at once. When the selected one is not installed
+// and no executable was chosen, the best installed player is selected
+// instead, so a first run works without visiting the player settings.
+async function detectInstalledPlayers() {
+  if (!hasBackend) return;
+  const prefixes = ["join", "host"];
+  const sequences = Object.fromEntries(prefixes.map((prefix) => [prefix, beginPlayerDetection(prefix)]));
+  let detections;
+  try { detections = await invoke("DetectPlayers"); }
+  catch (_) {
+    for (const prefix of prefixes) if (sequences[prefix] === playerDetectionSequence[prefix]) detectPlayer(prefix, false);
+    return;
+  }
+  const installed = new Map(detections.filter((entry) => entry.executable).map((entry) => [entry.player.toLowerCase(), entry.executable]));
+  for (const prefix of prefixes) {
+    // A player or executable chosen meanwhile takes precedence.
+    if (sequences[prefix] !== playerDetectionSequence[prefix]) continue;
+    const select = $(`${prefix}-player`);
+    let path = installed.get(select.value.toLowerCase()) || "";
+    if (!path && !$(`${prefix}-executable`).value.trim()) {
+      const best = [...select.options].find((option) => installed.has(option.value.toLowerCase()));
+      if (best) {
+        select.value = best.value;
+        select._syncCustomSelect?.();
+        path = installed.get(best.value.toLowerCase());
+      }
+    }
+    showDetectedPlayer(prefix, path, false);
   }
 }
 
@@ -632,7 +686,9 @@ function rememberConnectPreferences(prefix) {
   savePreferences({
     name: $(`${prefix}-name`).value.trim(),
     player: $(`${prefix}-player`).value,
-    executable: $(`${prefix}-executable`).value.trim(),
+    // A detected location is found again on the next start, so only one
+    // the user chose is remembered.
+    executable: $(`${prefix}-executable`).dataset.detected ? "" : $(`${prefix}-executable`).value.trim(),
     playerArgs: $(`${prefix}-args`).value.trim(),
     publicHost: $("host-public").value.trim(),
     listenAddress: $("host-listen").value.trim(),
@@ -677,6 +733,27 @@ async function refreshStreamingSupport() {
   try { streamingAvailable = Boolean(await invoke("StreamingAvailable")); }
   catch (_) { streamingAvailable = false; }
   if (snapshot) render();
+}
+
+// The backend looks for missing tools again on every check, so installing
+// one shows up without restarting Faro.
+async function refreshYouTubeSupport() {
+  if (!hasBackend) return;
+  try { youtubeSupport = { ytDlp: "", runtime: "", problem: "", ...(await invoke("YouTubeSupport")) }; }
+  catch (_) { return; }
+  const hint = $("stream-input-hint");
+  hint.classList.toggle("warning", Boolean(youtubeSupport.problem));
+  hint.replaceChildren(youtubeSupport.problem ? `${errorText(youtubeSupport.problem)}.` : `YouTube links play through yt-dlp with ${youtubeSupport.runtime}.`);
+  if (youtubeSupport.problem) {
+    const help = document.createElement("button");
+    help.type = "button";
+    help.className = "inline-link";
+    help.textContent = "How to install";
+    const url = youtubeSupport.ytDlp ? "https://github.com/yt-dlp/yt-dlp/wiki/EJS" : "https://github.com/yt-dlp/yt-dlp/wiki/Installation";
+    help.onclick = () => wails?.Browser?.OpenURL(url).catch(showError);
+    hint.append(" ", help);
+  }
+  if (snapshot) renderPlaylist();
 }
 
 function render() {
@@ -1497,7 +1574,7 @@ function renderPlaylist() {
   if (draggedPlaylistIndex >= 0) return;
   const key = JSON.stringify([
     items, snapshot.playlist.selected, allowed, availability, streamingAvailable, streamState,
-    snapshot.selfId, snapshot.streamOffers || [], preferences.youtubeQualities || {},
+    snapshot.selfId, snapshot.streamOffers || [], preferences.youtubeQualities || {}, youtubeSupport.problem,
     snapshot.participants.map((person) => [person.id, person.availableMedia])
   ]);
   if (key === playlistRenderKey && list.childElementCount === items.length) return;
@@ -1532,6 +1609,12 @@ function renderPlaylist() {
     const status = document.createElement("span");
     status.className = `queue-status-tag ${local || receiving ? "available" : "missing"}`;
     status.textContent = item.url ? "Online video" : local ? "Ready to watch" : receiving ? "Watching shared file" : "Choose a local copy";
+    if (isYouTubeURL(item.url) && youtubeSupport.problem) {
+      row.classList.add("needs-file");
+      status.className = "queue-status-tag missing";
+      status.textContent = youtubeSupport.ytDlp ? "Needs Deno or Node.js to play here" : "Needs yt-dlp to play here";
+      status.title = youtubeSupport.problem;
+    }
 
     metaCol.append(label, status);
 
@@ -1866,6 +1949,7 @@ async function enterRoom(request) {
   // Indexing can hash thousands of files. The room is already usable, so keep
   // discovery in the background and refresh availability as results arrive.
   void indexSavedDirectories();
+  void refreshYouTubeSupport();
   addPendingLaunchPaths();
 }
 
@@ -2202,6 +2286,8 @@ $("host-form").onsubmit = async (event) => {
     let startedServer = false;
     try {
       rememberConnectPreferences("host");
+      // Joining needs a working player; check it before starting the server.
+      await invoke("PlayerExecutable", $("host-player").value, $("host-executable").value.trim());
       hosted = await invoke("StartServer", {
         mode: $("host-mode").value,
         listenAddress: $("host-listen").value.trim(),
@@ -2308,6 +2394,7 @@ $("add-stream-btn").onclick = () => {
   streamDrawer.classList.toggle("hidden");
   if (!streamDrawer.classList.contains("hidden")) {
     $("playlist-source").focus();
+    void refreshYouTubeSupport();
   }
 };
 $("close-stream-drawer").onclick = () => streamDrawer.classList.add("hidden");
@@ -2328,7 +2415,10 @@ $("add-playlist").onclick = async () => {
     await appendToPlaylist([{ id: "", label, source, url: "", media: null, durationSeconds: Number(info?.duration) || 0 }]);
     input.value = "";
     streamDrawer.classList.add("hidden");
-  } catch (error) { showError(error); }
+  } catch (error) {
+    showError(error);
+    if (isYouTubeURL(source)) void refreshYouTubeSupport();
+  }
   finally {
     addingPlaylistURL = false;
     input.disabled = false;
@@ -2363,11 +2453,6 @@ $("shuffle-playlist").onclick = () => {
   updatePlaylist([...items, ...shuffled(tail)], { basedOnScreen: true }).catch(showError);
 };
 $("playlist-more").onclick = (event) => { event.stopPropagation(); togglePopover($("playlist-menu"), $("playlist-more")); };
-$("add-stream-focus").onclick = () => {
-  closePopovers();
-  streamDrawer.classList.remove("hidden");
-  $("playlist-source").focus();
-};
 $("save-playlist").onclick = () => { closePopovers(); copyText(snapshot.playlist.items.map((item) => item.url || item.label).join("\n"), "Playlist copied as text"); };
 $("shuffle-all").onclick = () => { closePopovers(); updatePlaylist(shuffled(playlistInputs()), { basedOnScreen: true }).catch(showError); };
 $("load-playlist-file").onclick = () => loadPlaylistFromFile();

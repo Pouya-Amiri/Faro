@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 const sponsorCategories = "sponsor,intro,outro,selfpromo,interaction"
@@ -49,23 +52,123 @@ type Stream struct {
 type commandRunner func(context.Context, string, ...string) ([]byte, error)
 
 type Resolver struct {
+	mu         sync.Mutex
 	executable string
 	runtimeArg []string
-	run        commandRunner
+	runtime    string
+	// runtimeProblem explains why no JavaScript runtime is usable.
+	runtimeProblem error
+	run            commandRunner
+	find           func(string) string
+	version        func(context.Context, string) (int, int, bool)
+}
+
+// Support reports whether YouTube links can play. Problem says what is
+// missing and is empty when they can.
+type Support struct {
+	YtDlp   string `json:"ytDlp,omitempty"`
+	Runtime string `json:"runtime,omitempty"`
+	Problem string `json:"problem,omitempty"`
+}
+
+var (
+	errYtDlpMissing   = errors.New("YouTube links need yt-dlp, which is not installed; install the current official yt-dlp build")
+	errRuntimeMissing = errors.New("YouTube links need Deno 2.3+ or Node.js 22+ for yt-dlp, and neither is installed")
+)
+
+// jsRuntimes are the runtimes yt-dlp's EJS challenge solver supports, in
+// order of preference. A zero minimum is not checked.
+var jsRuntimes = []struct {
+	name, executable, display string
+	major, minor              int
+}{
+	{"deno", "deno", "Deno", 2, 3},
+	{"node", "node", "Node.js", 22, 0},
+	{"quickjs", "qjs", "QuickJS", 0, 0},
+	{"bun", "bun", "Bun", 0, 0},
 }
 
 func NewResolver() *Resolver {
-	executable := findExecutable("yt-dlp")
-	var runtimeArg []string
-	for _, candidate := range []struct{ name, executable string }{
-		{"deno", "deno"}, {"node", "node"}, {"quickjs", "qjs"}, {"bun", "bun"},
-	} {
-		if path := findExecutable(candidate.executable); path != "" {
-			runtimeArg = []string{"--js-runtimes", candidate.name + ":" + path}
-			break
-		}
+	return &Resolver{run: runCommand, find: findExecutable, version: runtimeVersion}
+}
+
+// tools returns yt-dlp and its runtime argument. Missing tools are looked for
+// again on every use, so installing one takes effect without restarting Faro.
+func (r *Resolver) tools(ctx context.Context) (string, []string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.detect(ctx)
+	if r.executable == "" {
+		return "", nil, errYtDlpMissing
 	}
-	return &Resolver{executable: executable, runtimeArg: runtimeArg, run: runCommand}
+	if len(r.runtimeArg) == 0 {
+		if r.runtimeProblem != nil {
+			return "", nil, r.runtimeProblem
+		}
+		return "", nil, errRuntimeMissing
+	}
+	return r.executable, r.runtimeArg, nil
+}
+
+func (r *Resolver) detect(ctx context.Context) {
+	if r.find == nil {
+		return
+	}
+	if r.executable == "" {
+		r.executable = r.find("yt-dlp")
+	}
+	if len(r.runtimeArg) != 0 {
+		return
+	}
+	r.runtimeProblem = errRuntimeMissing
+	for _, candidate := range jsRuntimes {
+		path := r.find(candidate.executable)
+		if path == "" {
+			continue
+		}
+		if candidate.major > 0 && r.version != nil {
+			// An unreadable version is given the benefit of the doubt.
+			if major, minor, ok := r.version(ctx, path); ok && (major < candidate.major || major == candidate.major && minor < candidate.minor) {
+				r.runtimeProblem = fmt.Errorf("YouTube links need Deno 2.3+ or Node.js 22+ for yt-dlp; %s %d.%d is too old", candidate.display, major, minor)
+				continue
+			}
+		}
+		r.runtimeArg = []string{"--js-runtimes", candidate.name + ":" + path}
+		r.runtime = candidate.display
+		return
+	}
+}
+
+// Support looks for the tools again if any is missing.
+func (r *Resolver) Support(ctx context.Context) Support {
+	_, _, err := r.tools(ctx)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	support := Support{YtDlp: r.executable, Runtime: r.runtime}
+	if err != nil {
+		support.Problem = err.Error()
+	}
+	return support
+}
+
+var versionPattern = regexp.MustCompile(`(\d+)\.(\d+)`)
+
+// runtimeVersion reads the major and minor version from "node --version"
+// ("v22.3.0") or "deno --version" ("deno 2.3.1 (stable, ...)").
+func runtimeVersion(ctx context.Context, executable string) (int, int, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	output, err := newCommandContext(ctx, executable, "--version").Output()
+	if err != nil {
+		return 0, 0, false
+	}
+	match := versionPattern.FindStringSubmatch(string(output))
+	if match == nil {
+		return 0, 0, false
+	}
+	major, _ := strconv.Atoi(match[1])
+	minor, _ := strconv.Atoi(match[2])
+	return major, minor, true
 }
 
 // Finder-launched macOS apps inherit a minimal PATH which commonly omits
@@ -165,11 +268,9 @@ func (r *Resolver) extract(ctx context.Context, source string, height int, resol
 }
 
 func (r *Resolver) extractAttempts(ctx context.Context, source string, height int, resolve bool, attempts []extractAttempt) (extractOutput, string, error) {
-	if r.executable == "" {
-		return extractOutput{}, "", errors.New("yt-dlp was not found; install the current official yt-dlp build")
-	}
-	if len(r.runtimeArg) == 0 {
-		return extractOutput{}, "", errors.New("YouTube playback requires Deno 2.3+, Node.js 22+, or another yt-dlp EJS runtime")
+	executable, runtimeArg, err := r.tools(ctx)
+	if err != nil {
+		return extractOutput{}, "", err
 	}
 	var failures []string
 	for _, current := range attempts {
@@ -179,7 +280,7 @@ func (r *Resolver) extractAttempts(ctx context.Context, source string, height in
 			"--extractor-retries", "3", "--retries", "3", "--fragment-retries", "3",
 			"--sponsorblock-mark", sponsorCategories,
 		}
-		args = append(args, r.runtimeArg...)
+		args = append(args, runtimeArg...)
 		if current.remote {
 			args = append(args, "--remote-components", "ejs:github")
 		}
@@ -197,7 +298,7 @@ func (r *Resolver) extractAttempts(ctx context.Context, source string, height in
 			}
 		}
 		args = append(args, "--", source)
-		raw, err := r.run(ctx, r.executable, args...)
+		raw, err := r.run(ctx, executable, args...)
 		if err == nil {
 			var metadata extractOutput
 			if json.Unmarshal(raw, &metadata) == nil && metadata.Title != "" {

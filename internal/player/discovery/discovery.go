@@ -39,7 +39,43 @@ func Find(player string) (string, error) {
 			return absolute(candidate), nil
 		}
 	}
-	return "", fmt.Errorf("%s executable not found; install it or choose its location manually", displayName(profile))
+	return "", fmt.Errorf("no %s installation was found; install it, pick another player, or choose its executable", displayName(profile))
+}
+
+// Executable validates a launcher chosen by the user and returns its
+// absolute path. A bare command name is looked up on PATH, and a macOS app
+// bundle stands for the launcher inside it.
+func Executable(player, path string) (string, error) {
+	profile, _, err := executableNames(player)
+	if err != nil {
+		return "", err
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("choose the %s executable", displayName(profile))
+	}
+	if !strings.ContainsAny(path, `/\`) {
+		if found, lookErr := exec.LookPath(path); lookErr == nil {
+			return absolute(found), nil
+		}
+		return "", fmt.Errorf("%q was not found on PATH; choose the %s executable", path, displayName(profile))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("%s executable %s does not exist", displayName(profile), path)
+	}
+	if info.IsDir() {
+		for _, launcher := range bundleLaunchers(profile) {
+			if candidate := filepath.Join(path, launcher); usableFile(candidate) {
+				return absolute(candidate), nil
+			}
+		}
+		return "", fmt.Errorf("%s is a folder, not the %s executable", path, displayName(profile))
+	}
+	if !usableFile(path) {
+		return "", fmt.Errorf("%s is not an executable program", path)
+	}
+	return absolute(path), nil
 }
 
 // Supported reports whether the selected player has a launcher and control

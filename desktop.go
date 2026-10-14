@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -69,7 +70,45 @@ func (d *Desktop) DetectPlayer(player string) (string, error) { return app.Detec
 
 func (d *Desktop) SupportedPlayers() []string { return app.SupportedPlayers() }
 
+func (d *Desktop) DetectPlayers() []app.DetectedPlayer { return app.DetectPlayers() }
+
+func (d *Desktop) PlayerExecutable(player, executable string) (string, error) {
+	return app.PlayerExecutable(player, executable)
+}
+
+// ChooseExecutable asks for the player's launcher. A macOS app bundle is
+// accepted and replaced by the launcher inside it.
+func (d *Desktop) ChooseExecutable(player string) (string, error) {
+	options := &application.OpenFileDialogOptions{
+		Title:  "Choose the player executable",
+		Window: d.window,
+	}
+	switch runtime.GOOS {
+	case "windows":
+		options.Filters = []application.FileFilter{
+			{DisplayName: "Programs", Pattern: "*.exe;*.com"},
+			{DisplayName: "All files", Pattern: "*"},
+		}
+	case "darwin":
+		options.Directory = "/Applications"
+	default:
+		options.Directory = "/usr/bin"
+	}
+	path, err := d.app.Dialog.OpenFileWithOptions(options).PromptForSingleSelection()
+	if err != nil || path == "" {
+		return "", err
+	}
+	return app.PlayerExecutable(player, path)
+}
+
+// Connect refuses to join without a usable player, so a room is never
+// entered with nothing to play its media.
 func (d *Desktop) Connect(request app.ConnectionRequest) error {
+	executable, err := app.PlayerExecutable(request.Player, request.Executable)
+	if err != nil {
+		return err
+	}
+	request.Executable = executable
 	request.ClientVersion = buildinfo.EffectiveVersion()
 	return d.service.Connect(request)
 }
@@ -107,6 +146,8 @@ func (d *Desktop) StreamingAvailable() bool { return d.service.StreamingAvailabl
 func (d *Desktop) YouTubeInfo(source string) (youtube.Info, error) {
 	return d.service.YouTubeInfo(source)
 }
+
+func (d *Desktop) YouTubeSupport() youtube.Support { return d.service.YouTubeSupport() }
 
 func (d *Desktop) SetYouTubeQuality(source string, height int) error {
 	return d.service.SetYouTubeQuality(source, height)

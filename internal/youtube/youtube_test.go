@@ -140,3 +140,41 @@ func TestRunCommandParsesStdoutOnly(t *testing.T) {
 		t.Fatalf("failure error = %v, want the stderr message", err)
 	}
 }
+
+func TestResolverSkipsRuntimesTooOldForYtDlp(t *testing.T) {
+	installed := map[string]string{"yt-dlp": "/bin/yt-dlp", "deno": "/bin/deno", "node": "/bin/node"}
+	versions := map[string][2]int{"/bin/deno": {2, 1}, "/bin/node": {22, 3}}
+	resolver := &Resolver{
+		find: func(name string) string { return installed[name] },
+		version: func(_ context.Context, path string) (int, int, bool) {
+			version := versions[path]
+			return version[0], version[1], true
+		},
+	}
+	support := resolver.Support(context.Background())
+	if support.Problem != "" || support.Runtime != "Node.js" || !slices.Equal(resolver.runtimeArg, []string{"--js-runtimes", "node:/bin/node"}) {
+		t.Fatalf("support = %#v, runtime argument = %v", support, resolver.runtimeArg)
+	}
+
+	versions["/bin/node"] = [2]int{20, 11}
+	resolver = &Resolver{find: resolver.find, version: resolver.version}
+	if support := resolver.Support(context.Background()); !strings.Contains(support.Problem, "Node.js 20.11 is too old") {
+		t.Fatalf("old runtimes were accepted: %#v", support)
+	}
+}
+
+func TestResolverFindsToolsInstalledAfterStart(t *testing.T) {
+	installed := map[string]string{}
+	resolver := &Resolver{find: func(name string) string { return installed[name] }}
+	if support := resolver.Support(context.Background()); !strings.Contains(support.Problem, "yt-dlp, which is not installed") {
+		t.Fatalf("missing yt-dlp was not reported: %#v", support)
+	}
+	installed["yt-dlp"] = "/bin/yt-dlp"
+	if support := resolver.Support(context.Background()); !strings.Contains(support.Problem, "neither is installed") {
+		t.Fatalf("missing runtime was not reported: %#v", support)
+	}
+	installed["qjs"] = "/bin/qjs"
+	if support := resolver.Support(context.Background()); support.Problem != "" || support.YtDlp != "/bin/yt-dlp" || support.Runtime != "QuickJS" {
+		t.Fatalf("installed tools were not found: %#v", support)
+	}
+}
