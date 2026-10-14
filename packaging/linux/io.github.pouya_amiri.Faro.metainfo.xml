@@ -22,6 +22,11 @@
     <id>io.github.pouya_amiri.Faro.desktop</id>
   </provides>
   <releases>
+    <release version="1.1.4" date="2026-10-14">
+      <description>
+        <p>Picks the best installed media player automatically, adds a Browse button for the player executable, refuses to join without a usable player, reports a missing yt-dlp or JavaScript runtime for YouTube links, removes a stutter when first opening Host room, and updates dependencies.</p>
+      </description>
+    </release>
     <release version="1.1.3" date="2026-10-07">
       <description>
         <p>Allows room owners and moderators to remove participants, automatically reopens dismissed players when others start playback, suspends wheel audio when idle, and pins the AppImage runtime to a tagged release.</p>
