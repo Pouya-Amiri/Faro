@@ -92,7 +92,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-github.com/coder/websocket v1.8.14
+github.com/coder/websocket v1.8.15
 
 --- LICENSE.txt ---
 
@@ -111,7 +111,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ==============================================================================
-github.com/creachadair/msync v0.8.1
+github.com/creachadair/msync v0.10.1
 
 --- LICENSE ---
 
@@ -172,7 +172,7 @@ OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa
+github.com/dblohm7/wingoes v0.0.0-20260526185140-fb298caac7ca
 
 --- LICENSE ---
 
@@ -207,7 +207,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-github.com/fxamacker/cbor/v2 v2.9.0
+github.com/fxamacker/cbor/v2 v2.9.6
 
 --- LICENSE ---
 
@@ -234,13 +234,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-github.com/gaissmai/bart v0.26.1
+github.com/gaissmai/bart v0.30.0
 
 --- LICENSE ---
 
 MIT License
 
-Copyright (c) 2024 Karl Gaissmaier
+Copyright (c) 2026 Karl Gaissmaier
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -261,7 +261,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68
+github.com/go-json-experiment/json v0.0.0-20260820222146-c27c302e5fc3
 
 --- LICENSE ---
 
@@ -321,7 +321,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-github.com/godbus/dbus/v5 v5.2.2
+github.com/godbus/dbus/v5 v5.2.4
 
 --- LICENSE ---
 
@@ -790,7 +790,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-github.com/jsimonetti/rtnetlink v1.4.1
+github.com/jsimonetti/rtnetlink v1.4.2
 
 --- LICENSE.md ---
 
@@ -806,7 +806,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-github.com/klauspost/compress v1.19.1
+github.com/klauspost/compress v1.20.3
 
 --- LICENSE ---
 
@@ -1149,7 +1149,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-github.com/mattn/go-colorable v0.1.15
+github.com/mattn/go-colorable v0.1.16
 
 --- LICENSE ---
 
@@ -1176,7 +1176,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-github.com/mattn/go-isatty v0.0.23
+github.com/mattn/go-isatty v0.0.24
 
 --- LICENSE ---
 
@@ -1191,13 +1191,13 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42
+github.com/mdlayher/netlink v1.11.2
 
 --- LICENSE.md ---
 
 # MIT License
 
-Copyright (C) 2016-2022 Matt Layher
+Copyright (C) 2016-2026 Matt Layher
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
@@ -1206,7 +1206,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-github.com/mdlayher/socket v0.5.1
+github.com/mdlayher/socket v0.8.0
 
 --- LICENSE.md ---
 
@@ -1248,7 +1248,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ==============================================================================
-github.com/pires/go-proxyproto v0.8.1
+github.com/pires/go-proxyproto v0.15.0
 
 --- LICENSE ---
 
@@ -1455,7 +1455,7 @@ Apache License
    limitations under the License.
 
 ==============================================================================
-github.com/pkg/sftp v1.13.6
+github.com/pkg/sftp v1.13.11
 
 --- LICENSE ---
 
@@ -1470,7 +1470,7 @@ Redistribution and use in source and binary forms, with or without modification,
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-github.com/safchain/ethtool v0.3.0
+github.com/safchain/ethtool v0.7.0
 
 --- LICENSE ---
 
@@ -1662,7 +1662,7 @@ Apache License
       same "printed page" as the copyright notice for easier
       identification within third-party archives.
 
-   Copyright {yyyy} {name of copyright owner}
+   Copyright (c) 2015 The Ethtool Authors
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -1764,7 +1764,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd
+github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 
 --- LICENSE ---
 
@@ -1832,7 +1832,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-github.com/tailscale/tailcat v0.6.0
+github.com/tailscale/tailcat v0.7.0
 
 --- LICENSE ---
 
@@ -1866,7 +1866,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-github.com/tailscale/web-client-prebuilt v0.0.0-20250124233751-d4cd19a26976
+github.com/tailscale/web-client-prebuilt v0.0.0-20260917222731-e0ed2d0d0fea
 
 --- LICENSE ---
 
@@ -1900,7 +1900,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-github.com/tailscale/wireguard-go v0.0.0-20260904023712-e855235c55a2
+github.com/tailscale/wireguard-go v0.0.0-20260928213032-417aef361226
 
 --- LICENSE ---
 
@@ -1923,7 +1923,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-github.com/u-root/u-root v0.14.0
+github.com/u-root/u-root v0.16.0
 
 --- LICENSE ---
 
@@ -1958,7 +1958,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-github.com/wailsapp/wails/v3 v3.0.0-beta.23
+github.com/wailsapp/wails/v3 v3.0.0-beta.29
 
 --- LICENSE ---
 
@@ -2252,7 +2252,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-golang.org/x/crypto v0.55.0
+golang.org/x/crypto v0.58.0
 
 --- LICENSE ---
 
@@ -2310,7 +2310,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 
 ==============================================================================
-golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
+golang.org/x/exp v0.0.0-20261013213113-2ab7f3cbc5fb
 
 --- LICENSE ---
 
@@ -2368,7 +2368,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 
 ==============================================================================
-golang.org/x/net v0.58.0
+golang.org/x/net v0.61.0
 
 --- LICENSE ---
 
@@ -2426,7 +2426,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 
 ==============================================================================
-golang.org/x/sync v0.22.0
+golang.org/x/sync v0.24.0
 
 --- LICENSE ---
 
@@ -2484,7 +2484,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 
 ==============================================================================
-golang.org/x/sys v0.47.0
+golang.org/x/sys v0.49.0
 
 --- LICENSE ---
 
@@ -2542,7 +2542,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 
 ==============================================================================
-golang.org/x/term v0.45.0
+golang.org/x/term v0.47.0
 
 --- LICENSE ---
 
@@ -2600,7 +2600,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 
 ==============================================================================
-golang.org/x/text v0.41.0
+golang.org/x/text v0.43.0
 
 --- LICENSE ---
 
@@ -2658,7 +2658,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 
 ==============================================================================
-golang.org/x/time v0.15.0
+golang.org/x/time v0.16.0
 
 --- LICENSE ---
 
@@ -2739,11 +2739,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-golang.zx2c4.com/wireguard/windows v0.5.3
+golang.zx2c4.com/wireguard/windows v1.1.1
 
 --- COPYING ---
 
-Copyright (C) 2018-2021 WireGuard LLC. All Rights Reserved.
+Copyright (C) 2018-2026 WireGuard LLC. All Rights Reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the "Software"),
@@ -2764,7 +2764,7 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8
+gvisor.dev/gvisor v0.0.0-20260915211658-a6f909f08a72
 
 --- LICENSE ---
 
@@ -3023,7 +3023,7 @@ Some files carry the "BSD" license, noted at the top of each file:
    POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-tailscale.com v1.103.0-pre.0.20260904030409-31d8badb3bfb
+tailscale.com v1.104.1
 
 --- LICENSE ---
 
