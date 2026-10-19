@@ -24,6 +24,11 @@ import (
 
 const requestTimeout = 3 * time.Second
 
+// wedgedWriteTimeout retires a player whose control channel has stopped
+// accepting writes for this long: mpv reads its IPC socket on its own
+// thread, so a write that cannot complete means the player is gone or hung.
+const wedgedWriteTimeout = 10 * time.Second
+
 type response struct {
 	Data      json.RawMessage `json:"data"`
 	Error     string          `json:"error"`
@@ -61,7 +66,8 @@ type MPV struct {
 	stream    io.ReadWriteCloser
 	cleanup   func()
 	killTree  func()
-	writeMu   sync.Mutex
+	writes    chan write
+	wedged    time.Duration
 	pendingMu sync.Mutex
 	pending   map[int64]chan response
 	requestID atomic.Int64
@@ -71,9 +77,27 @@ type MPV struct {
 
 	stateMu sync.RWMutex
 	state   player.State
-	events  chan player.Event
+	events  *player.EventQueue
 	done    chan struct{}
 	once    sync.Once
+}
+
+// write is one line for the control channel; writeLoop owns all writes.
+type write struct {
+	data    []byte
+	written chan error
+}
+
+// newMPV wraps an established control channel. Start launches the process
+// and connects first; tests use it directly with an in-memory stream.
+func newMPV(stream io.ReadWriteCloser, wedged time.Duration) *MPV {
+	m := &MPV{
+		stream: stream, cleanup: func() {}, killTree: func() {}, wedged: wedged,
+		writes: make(chan write), pending: make(map[int64]chan response), events: player.NewEventQueue(),
+		done: make(chan struct{}), state: player.State{Paused: true, Rate: 1, ObservedAt: time.Now()},
+	}
+	go m.writeLoop()
+	return m
 }
 
 func Start(ctx context.Context, cfg Config, initialSource string) (*MPV, error) {
@@ -120,14 +144,11 @@ func Start(ctx context.Context, cfg Config, initialSource string) (*MPV, error) 
 		cleanup()
 		return nil, fmt.Errorf("start %s control channel: %w", cfg.Profile, err)
 	}
-	instance := &MPV{
-		process: command, stream: stream, cleanup: cleanup, killTree: killTree,
-		pending: make(map[int64]chan response), events: make(chan player.Event, 64),
-		done: make(chan struct{}), state: player.State{Paused: true, Rate: 1, ObservedAt: time.Now()},
-	}
+	instance := newMPV(stream, wedgedWriteTimeout)
+	instance.process, instance.cleanup, instance.killTree = command, cleanup, killTree
 	go instance.readLoop()
 	go instance.waitLoop(processDone, output)
-	for _, property := range []string{"pause", "time-pos", "speed", "duration", "media-title", "path", "chapter-list", "paused-for-cache"} {
+	for _, property := range []string{"pause", "time-pos", "speed", "duration", "media-title", "path", "chapter-list", "paused-for-cache", "idle-active"} {
 		if err := instance.command(ctx, []any{"observe_property", instance.requestID.Add(1), property}, nil); err != nil {
 			instance.Close()
 			return nil, fmt.Errorf("observe mpv property %s: %w", property, err)
@@ -330,18 +351,27 @@ func (m *MPV) clearLoad(target chan error) {
 	m.loadMu.Unlock()
 }
 
-func (m *MPV) completeLoad(err error) {
+// completeLoad answers the pending Open, if there is one, and reports
+// whether there was.
+func (m *MPV) completeLoad(err error) bool {
 	m.loadMu.Lock()
+	defer m.loadMu.Unlock()
 	loaded := m.loaded
 	m.loaded = nil
 	if loaded != nil {
 		loaded <- err
 	}
-	m.loadMu.Unlock()
+	return loaded != nil
 }
-func (m *MPV) Events() <-chan player.Event { return m.events }
+func (m *MPV) Events() <-chan player.Event { return m.events.Events() }
 
+// command sends one IPC request and waits for its reply. The whole exchange,
+// including waiting for the control channel to accept the write, is bounded
+// by ctx and requestTimeout; a cancelled operation never reaches the player.
 func (m *MPV) command(ctx context.Context, command []any, result any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	id := m.requestID.Add(1)
 	request := map[string]any{"command": command, "request_id": id}
 	data, err := json.Marshal(request)
@@ -353,14 +383,11 @@ func (m *MPV) command(ctx context.Context, command []any, result any) error {
 	m.pending[id] = responseChannel
 	m.pendingMu.Unlock()
 	defer func() { m.pendingMu.Lock(); delete(m.pending, id); m.pendingMu.Unlock() }()
-	m.writeMu.Lock()
-	_, err = m.stream.Write(append(data, '\n'))
-	m.writeMu.Unlock()
-	if err != nil {
-		return err
-	}
 	timer := time.NewTimer(requestTimeout)
 	defer timer.Stop()
+	if err := m.send(ctx, append(data, '\n'), timer.C); err != nil {
+		return err
+	}
 	select {
 	case reply := <-responseChannel:
 		if reply.Error != "" && reply.Error != "success" {
@@ -378,6 +405,55 @@ func (m *MPV) command(ctx context.Context, command []any, result any) error {
 		return errors.New("mpv request timed out")
 	case <-m.done:
 		return errors.New("mpv is closed")
+	}
+}
+
+// send hands data to writeLoop. It gives up when ctx ends or timeout fires
+// before the control channel accepts the write.
+func (m *MPV) send(ctx context.Context, data []byte, timeout <-chan time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	request := write{data: data, written: make(chan error, 1)}
+	select {
+	case m.writes <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timeout:
+		return errors.New("mpv is not accepting commands")
+	case <-m.done:
+		return errors.New("mpv is closed")
+	}
+	select {
+	case err := <-request.written:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timeout:
+		return errors.New("mpv is not accepting commands")
+	case <-m.done:
+		return errors.New("mpv is closed")
+	}
+}
+
+// writeLoop performs every write to the control channel, one at a time. A
+// write that cannot complete for m.wedged retires the player:
+// closing it unblocks the write and every command waiting behind it.
+func (m *MPV) writeLoop() {
+	for {
+		select {
+		case request := <-m.writes:
+			watchdog := time.AfterFunc(m.wedged, func() { m.Close() })
+			_, err := m.stream.Write(request.data)
+			watchdog.Stop()
+			request.written <- err
+			if err != nil {
+				m.Close()
+				return
+			}
+		case <-m.done:
+			return
+		}
 	}
 }
 
@@ -407,23 +483,33 @@ func (m *MPV) readLoop() {
 }
 
 func (m *MPV) handleEvent(message response) {
-	if message.Event == "property-change" {
+	switch message.Event {
+	case "property-change":
 		m.applyProperty(message.Name, message.Data)
-	} else if message.Event == "file-loaded" {
+	case "file-loaded":
 		m.completeLoad(nil)
-	} else if message.Event == "end-file" && message.Reason == "error" {
+	case "end-file":
+		if message.Reason != "error" {
+			return
+		}
 		detail := strings.TrimSpace(message.FileError)
 		if detail == "" {
 			detail = "unknown playback error"
 		}
-		m.completeLoad(fmt.Errorf("player could not load media: %s", detail))
+		// A failure while loading answers the pending Open. One after the
+		// file loaded (a network source that broke off mid-playback) has no
+		// caller waiting, so it is reported as an event.
+		if !m.completeLoad(fmt.Errorf("player could not load media: %s", detail)) {
+			state, _ := m.State(context.Background())
+			m.emit(player.Event{Kind: player.EventFailed, State: state, Err: fmt.Errorf("playback failed: %s", detail)})
+		}
 	}
 }
 
 func (m *MPV) applyProperty(name string, raw any) {
 	state := m.updateProperty(name, raw)
 	kind := player.EventState
-	if name == "media-title" || name == "path" || name == "duration" || name == "chapter-list" {
+	if name == "media-title" || name == "path" || name == "duration" || name == "chapter-list" || name == "idle-active" {
 		kind = player.EventMedia
 	}
 	m.emit(player.Event{Kind: kind, State: state})
@@ -442,23 +528,41 @@ func (m *MPV) updateProperty(name string, raw any) player.State {
 		}
 		m.state.ObservedAt = now
 	}
+	// mpv reports a property that became unavailable (nothing is loaded any
+	// more) without data. Media fields are reset before decoding, so an old
+	// value cannot linger.
 	switch name {
 	case "paused-for-cache":
+		m.state.Buffering = false
 		_ = json.Unmarshal(data, &m.state.Buffering)
 	case "pause":
 		_ = json.Unmarshal(data, &m.state.Paused)
 	case "time-pos":
+		m.state.PositionSeconds = 0
 		_ = json.Unmarshal(data, &m.state.PositionSeconds)
 	case "speed":
 		_ = json.Unmarshal(data, &m.state.Rate)
 	case "duration":
+		m.state.DurationSeconds = 0
 		_ = json.Unmarshal(data, &m.state.DurationSeconds)
 	case "media-title":
+		m.state.Title = ""
 		_ = json.Unmarshal(data, &m.state.Title)
 	case "path":
+		m.state.Source = ""
 		_ = json.Unmarshal(data, &m.state.Source)
 	case "chapter-list":
+		m.state.Chapters = nil
 		_ = json.Unmarshal(data, &m.state.Chapters)
+	case "idle-active":
+		// Idle means nothing is loaded: the file ended, failed or was
+		// stopped. Nothing advances until the next file loads.
+		var idle bool
+		if json.Unmarshal(data, &idle) == nil && idle {
+			m.state.Source, m.state.Title, m.state.Chapters = "", "", nil
+			m.state.PositionSeconds, m.state.DurationSeconds = 0, 0
+			m.state.Buffering = false
+		}
 	}
 	if name == "time-pos" || m.state.ObservedAt.IsZero() {
 		m.state.ObservedAt = time.Now()
@@ -486,13 +590,7 @@ func withPlayerOutput(err error, output *boundedOutput) error {
 	return fmt.Errorf("%w: %s", err, detail)
 }
 
-func (m *MPV) emit(event player.Event) {
-	select {
-	case m.events <- event:
-	case <-m.done:
-	default:
-	}
-}
+func (m *MPV) emit(event player.Event) { m.events.Push(event) }
 
 func (m *MPV) Close() error {
 	var result error
@@ -503,6 +601,7 @@ func (m *MPV) Close() error {
 		result = m.stream.Close()
 		m.killTree()
 		m.cleanup()
+		m.events.Close()
 	})
 	return result
 }
@@ -512,17 +611,9 @@ func (m *MPV) Close() error {
 // so a signal alone would leave IINA's window open; the quit command reaches
 // IINA's own mpv core. The reply is not awaited.
 func (m *MPV) requestQuit() {
-	sent := make(chan struct{})
-	go func() {
-		defer close(sent)
-		m.writeMu.Lock()
-		defer m.writeMu.Unlock()
-		_, _ = m.stream.Write([]byte(`{"command":["quit"]}` + "\n"))
-	}()
-	select {
-	case <-sent:
-	case <-time.After(300 * time.Millisecond):
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_ = m.send(ctx, []byte(`{"command":["quit"]}`+"\n"), nil)
 }
 
 func (m *MPV) Done() <-chan struct{} { return m.done }

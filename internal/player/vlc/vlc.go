@@ -27,17 +27,34 @@ type Config struct {
 	ExtraArgs  []string
 }
 
+// commandTimeout bounds one remote-control exchange.
+const commandTimeout = 3 * time.Second
+
+// maxOwedReplies is how many abandoned commands may still owe a reply
+// before the remote-control session counts as unresponsive.
+const maxOwedReplies = 3
+
 type VLC struct {
 	process *exec.Cmd
 	conn    net.Conn
 	reader  *bufio.Reader
 	rate    bool
-	mu      sync.Mutex
+	// turn admits one command at a time; it is a channel so that waiting
+	// for it honours cancellation. owed counts replies of commands that
+	// were abandoned after being sent, which the next command reads first
+	// so that it never takes another command's reply for its own. Both
+	// owed and the reader belong to whoever holds turn.
+	turn    chan struct{}
+	owed    int
 	stateMu sync.RWMutex
 	state   player.State
-	events  chan player.Event
-	done    chan struct{}
-	once    sync.Once
+	// opened is the MRL Faro last opened and source what it was opened
+	// from, to tell Faro's own media from a file chosen in VLC itself.
+	opened string
+	source string
+	events *player.EventQueue
+	done   chan struct{}
+	once   sync.Once
 }
 
 func Start(ctx context.Context, cfg Config, initialSource string) (*VLC, error) {
@@ -69,10 +86,11 @@ func Start(ctx context.Context, cfg Config, initialSource string) (*VLC, error) 
 		initialState.Source = initialSource
 		initialState.Title = filepath.Base(initialSource)
 	}
-	instance := &VLC{
-		process: command, conn: connection, reader: bufio.NewReaderSize(connection, 32*1024),
-		state:  initialState,
-		events: make(chan player.Event, 64), done: make(chan struct{}),
+	instance := newVLC(connection)
+	instance.process, instance.state = command, initialState
+	if initialSource != "" {
+		instance.opened, _ = vlcMRL(initialSource)
+		instance.source = initialSource
 	}
 	_ = connection.SetReadDeadline(time.Now().Add(3 * time.Second))
 	_, _ = instance.reader.ReadString('>')
@@ -83,6 +101,13 @@ func Start(ctx context.Context, cfg Config, initialSource string) (*VLC, error) 
 	go instance.pollLoop()
 	go instance.waitLoop()
 	return instance, nil
+}
+
+func newVLC(connection net.Conn) *VLC {
+	return &VLC{
+		conn: connection, reader: bufio.NewReaderSize(connection, 32*1024), turn: make(chan struct{}, 1),
+		state: player.State{Paused: true, Rate: 1, ObservedAt: time.Now()}, events: player.NewEventQueue(), done: make(chan struct{}),
+	}
 }
 
 func launchArguments(operatingSystem string, address string, extra []string, initialSource string) []string {
@@ -172,6 +197,10 @@ func (v *VLC) Capabilities() player.Capabilities {
 	return player.Capabilities{PositionResolution: time.Second, PlaybackRate: v.rate, URLs: true}
 }
 
+// State polls VLC. The remote-control interface reports the playback state,
+// the current input, position and length; it cannot report the playback
+// rate or buffering, so Rate is the last rate Faro set and Buffering is
+// always false.
 func (v *VLC) State(ctx context.Context) (player.State, error) {
 	status, err := v.command(ctx, "status")
 	if err != nil {
@@ -181,19 +210,33 @@ func (v *VLC) State(ctx context.Context) (player.State, error) {
 	if err != nil {
 		return player.State{}, err
 	}
-	duration, _ := v.number(ctx, "get_length")
-	position := float64(0)
-	if playback == playbackStopped {
-		// VLC often returns an empty get_time response after end-of-file.
-		position = duration
-	} else {
-		// VLC 3's documented RC surface only exposes whole-second get_time.
-		position, err = v.number(ctx, "get_time")
-		if err != nil {
-			return player.State{}, err
+	input := parseInput(status)
+	duration, position := float64(0), float64(0)
+	if input != "" {
+		duration, _ = v.number(ctx, "get_length")
+		if playback == playbackStopped {
+			// VLC often returns an empty get_time response once stopped.
+			position = duration
+		} else {
+			// VLC 3's documented RC surface only exposes whole-second get_time.
+			position, err = v.number(ctx, "get_time")
+			if err != nil {
+				return player.State{}, err
+			}
 		}
 	}
 	v.stateMu.Lock()
+	switch {
+	case input == "":
+		// Nothing is loaded: the file ended or was stopped.
+		v.state.Source, v.state.Title = "", ""
+	case input == v.opened:
+		v.state.Source = v.source
+	default:
+		// Someone opened another file in VLC itself.
+		v.opened, v.source = input, sourceOfMRL(input)
+		v.state.Source, v.state.Title = v.source, filepath.Base(v.source)
+	}
 	v.state.PositionSeconds = position
 	v.state.DurationSeconds = duration
 	v.state.Paused = playback != playbackPlaying
@@ -201,6 +244,34 @@ func (v *VLC) State(ctx context.Context) (player.State, error) {
 	state := v.state
 	v.stateMu.Unlock()
 	return state, nil
+}
+
+// parseInput returns the MRL of VLC's current input from a status reply, or
+// "" when nothing is loaded.
+func parseInput(response string) string {
+	for _, line := range strings.Split(response, "\n") {
+		line = strings.TrimSpace(line)
+		if value, ok := strings.CutPrefix(line, "( new input: "); ok {
+			return strings.TrimSpace(strings.TrimSuffix(value, ")"))
+		}
+	}
+	return ""
+}
+
+// sourceOfMRL turns a file MRL back into a local path; other MRLs are kept.
+func sourceOfMRL(mrl string) string {
+	parsed, err := url.Parse(mrl)
+	if err != nil || parsed.Scheme != "file" {
+		return mrl
+	}
+	path := parsed.Path
+	if parsed.Host != "" {
+		path = "//" + parsed.Host + path
+	}
+	if runtime.GOOS == "windows" {
+		path = strings.TrimPrefix(path, "/")
+	}
+	return filepath.FromSlash(path)
 }
 
 func (v *VLC) SetPaused(ctx context.Context, paused bool) error {
@@ -274,6 +345,9 @@ func (v *VLC) Open(ctx context.Context, source string) error {
 	if err := validateLocalSource(source); err != nil {
 		return err
 	}
+	v.stateMu.Lock()
+	v.opened, v.source = mrl, source
+	v.stateMu.Unlock()
 	if _, err := v.command(ctx, "add "+mrl); err != nil {
 		return err
 	}
@@ -364,7 +438,7 @@ func localVLCMRL(absolute, operatingSystem string) string {
 	return (&url.URL{Scheme: "file", Path: slashed}).String()
 }
 
-func (v *VLC) Events() <-chan player.Event { return v.events }
+func (v *VLC) Events() <-chan player.Event { return v.events.Events() }
 
 func (v *VLC) number(ctx context.Context, command string) (float64, error) {
 	response, err := v.command(ctx, command)
@@ -389,27 +463,87 @@ func parseNumberResponse(response string) (float64, error) {
 	return 0, errors.New("response did not contain a numeric result line")
 }
 
+// command sends one remote-control command and returns its reply. Waiting
+// for the channel, writing and reading are all bounded by ctx and
+// commandTimeout, and cancelling ctx interrupts I/O in progress, so a
+// retired operation never issues a stale command. A reply that was not
+// waited for is skipped by the next command; a session that keeps failing
+// to reply, or whose input was cut mid-command, retires the player.
 func (v *VLC) command(ctx context.Context, command string) (string, error) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	deadline := time.Now().Add(3 * time.Second)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	deadline := time.Now().Add(commandTimeout)
 	if value, ok := ctx.Deadline(); ok && value.Before(deadline) {
 		deadline = value
 	}
+	wait := time.NewTimer(time.Until(deadline))
+	defer wait.Stop()
+	select {
+	case v.turn <- struct{}{}:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-wait.C:
+		return "", errors.New("VLC is not accepting commands")
+	case <-v.done:
+		return "", errors.New("VLC is closed")
+	}
+	defer func() { <-v.turn }()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	_ = v.conn.SetDeadline(deadline)
-	if _, err := io.WriteString(v.conn, command+"\n"); err != nil {
+	interrupted := make(chan struct{})
+	stopInterrupt := context.AfterFunc(ctx, func() {
+		defer close(interrupted)
+		_ = v.conn.SetDeadline(time.Now())
+	})
+	defer func() {
+		// An interruption already under way must finish first, or it would
+		// cut short the next command.
+		if !stopInterrupt() {
+			<-interrupted
+		}
+		_ = v.conn.SetDeadline(time.Time{})
+	}()
+	for v.owed > 0 {
+		if _, err := v.reader.ReadString('>'); err != nil {
+			return "", v.unanswered(ctx, err)
+		}
+		v.owed--
+	}
+	line := command + "\n"
+	if written, err := io.WriteString(v.conn, line); err != nil {
+		if written > 0 {
+			// VLC received part of a command; nothing it says can be
+			// matched to a command any more.
+			go v.Close()
+		}
 		return "", err
 	}
 	response, err := v.reader.ReadString('>')
-	_ = v.conn.SetDeadline(time.Time{})
 	if err != nil {
-		return "", err
+		v.owed++
+		return "", v.unanswered(ctx, err)
 	}
 	response = strings.TrimSpace(strings.TrimSuffix(response, ">"))
 	if err := responseError(command, response); err != nil {
 		return response, err
 	}
 	return response, nil
+}
+
+// unanswered handles a reply that did not arrive in time. The caller holds
+// turn.
+func (v *VLC) unanswered(ctx context.Context, err error) error {
+	if v.owed > maxOwedReplies {
+		go v.Close()
+		return fmt.Errorf("VLC stopped answering commands: %w", err)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
 }
 
 type playbackState uint8
@@ -483,10 +617,13 @@ func (v *VLC) pollLoop() {
 			if err != nil {
 				continue
 			}
-			if state.PositionSeconds != previous.PositionSeconds || state.Paused != previous.Paused || state.Source != previous.Source {
+			switch {
+			case state.Source != previous.Source || state.DurationSeconds != previous.DurationSeconds:
+				v.emit(player.Event{Kind: player.EventMedia, State: state})
+			case state.PositionSeconds != previous.PositionSeconds || state.Paused != previous.Paused:
 				v.emit(player.Event{Kind: player.EventState, State: state})
-				previous = state
 			}
+			previous = state
 		case <-v.done:
 			return
 		}
@@ -499,25 +636,27 @@ func (v *VLC) waitLoop() {
 	v.Close()
 }
 
-func (v *VLC) emit(event player.Event) {
-	select {
-	case v.events <- event:
-	case <-v.done:
-	default:
-	}
-}
+func (v *VLC) emit(event player.Event) { v.events.Push(event) }
 
+// Close asks VLC to quit when the control channel is free, without ever
+// waiting on it, then closes the channel (ending any command in progress)
+// and terminates the process.
 func (v *VLC) Close() error {
 	var result error
 	v.once.Do(func() {
 		close(v.done)
-		v.mu.Lock()
-		_, _ = io.WriteString(v.conn, "quit\n")
+		select {
+		case v.turn <- struct{}{}:
+			_ = v.conn.SetWriteDeadline(time.Now().Add(300 * time.Millisecond))
+			_, _ = io.WriteString(v.conn, "quit\n")
+			<-v.turn
+		default:
+		}
 		result = v.conn.Close()
-		v.mu.Unlock()
-		if v.process.Process != nil {
+		if v.process != nil && v.process.Process != nil {
 			_ = v.process.Process.Kill()
 		}
+		v.events.Close()
 	})
 	return result
 }

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Pouya-Amiri/Faro/internal/player"
 )
@@ -65,12 +66,12 @@ func TestIsolateMPVNetReplacesUserConfigEnvironmentAndCleansUp(t *testing.T) {
 }
 
 func TestStateRefreshDoesNotEmitSyntheticPlayerEvent(t *testing.T) {
-	instance := &MPV{events: make(chan player.Event, 1)}
+	instance := &MPV{events: player.NewEventQueue()}
 	instance.updateProperty("path", json.RawMessage(`"movie.mkv"`))
 	select {
-	case event := <-instance.events:
+	case event := <-instance.Events():
 		t.Fatalf("state refresh emitted a synthetic event: %#v", event)
-	default:
+	case <-time.After(50 * time.Millisecond):
 	}
 	if instance.state.Source != "movie.mkv" {
 		t.Fatalf("state was not updated: %#v", instance.state)
@@ -103,7 +104,8 @@ func TestVerifyLoadedSourceAllowsRedirectedNetworkURL(t *testing.T) {
 func TestSeekUsesMPVAbsoluteExactCommand(t *testing.T) {
 	client, server := net.Pipe()
 	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
-	instance := &MPV{stream: client, pending: make(map[int64]chan response), done: make(chan struct{})}
+	instance := newMPV(client, wedgedWriteTimeout)
+	t.Cleanup(func() { instance.Close() })
 	commandSeen := make(chan []any, 1)
 	go func() {
 		line, _ := bufio.NewReader(server).ReadBytes('\n')
@@ -128,14 +130,14 @@ func TestSeekUsesMPVAbsoluteExactCommand(t *testing.T) {
 }
 
 func TestObservedPropertyStillEmitsPlayerEvent(t *testing.T) {
-	instance := &MPV{events: make(chan player.Event, 1), done: make(chan struct{})}
+	instance := &MPV{events: player.NewEventQueue(), done: make(chan struct{})}
 	instance.applyProperty("path", json.RawMessage(`"movie.mkv"`))
 	select {
-	case event := <-instance.events:
+	case event := <-instance.Events():
 		if event.Kind != player.EventMedia || event.State.Source != "movie.mkv" {
 			t.Fatalf("unexpected observed event: %#v", event)
 		}
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("observed property did not emit an event")
 	}
 }
@@ -154,5 +156,91 @@ func TestStateRejectsClosedPlayer(t *testing.T) {
 	m := &MPV{done: done}
 	if _, err := m.State(context.Background()); err == nil {
 		t.Fatal("closed player reported a healthy cached state")
+	}
+}
+
+func TestCommandGivesUpOnAControlChannelThatStoppedReading(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	instance := newMPV(client, time.Minute)
+	t.Cleanup(func() { instance.Close() })
+	// Nothing reads the other end, so the first write never completes.
+	go func() { _ = instance.SetPaused(context.Background(), true) }()
+	time.Sleep(50 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	finished := make(chan error, 1)
+	go func() { finished <- instance.Seek(ctx, 1) }()
+	select {
+	case err := <-finished:
+		if err == nil {
+			t.Fatal("a cancelled command reported success")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a cancelled command waited for a wedged control channel")
+	}
+	finished = make(chan error, 1)
+	go func() { finished <- instance.Seek(context.Background(), 1) }()
+	select {
+	case err := <-finished:
+		if err == nil {
+			t.Fatal("a command on a wedged control channel reported success")
+		}
+	case <-time.After(requestTimeout + time.Second):
+		t.Fatal("a command on a wedged control channel outlived its timeout")
+	}
+}
+
+func TestWedgedControlChannelRetiresThePlayer(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = server.Close() })
+	instance := newMPV(client, 100*time.Millisecond)
+	go func() { _ = instance.SetPaused(context.Background(), true) }()
+	select {
+	case <-instance.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("a player whose control channel stopped reading was not retired")
+	}
+}
+
+func TestUnavailablePropertiesClearTheOldMedia(t *testing.T) {
+	instance := &MPV{}
+	instance.updateProperty("path", json.RawMessage(`"old.mkv"`))
+	instance.updateProperty("duration", json.RawMessage(`120`))
+	instance.updateProperty("media-title", json.RawMessage(`"Old"`))
+	instance.updateProperty("path", json.RawMessage(nil))
+	instance.updateProperty("media-title", json.RawMessage(`null`))
+	state := instance.updateProperty("duration", json.RawMessage(nil))
+	if state.Source != "" || state.DurationSeconds != 0 || state.Title != "" {
+		t.Fatalf("unavailable properties kept the old media: %#v", state)
+	}
+}
+
+func TestIdlePlayerReportsNothingLoaded(t *testing.T) {
+	instance := &MPV{events: player.NewEventQueue(), done: make(chan struct{})}
+	instance.updateProperty("path", json.RawMessage(`"movie.mkv"`))
+	instance.updateProperty("duration", json.RawMessage(`120`))
+	instance.updateProperty("time-pos", json.RawMessage(`119.5`))
+	instance.applyProperty("idle-active", json.RawMessage(`true`))
+	select {
+	case event := <-instance.Events():
+		if event.Kind != player.EventMedia || event.State.Source != "" || event.State.DurationSeconds != 0 || event.State.PositionSeconds != 0 {
+			t.Fatalf("an idle player still reports media: %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("going idle was not reported")
+	}
+}
+
+func TestPlaybackFailureAfterLoadingIsReported(t *testing.T) {
+	instance := &MPV{events: player.NewEventQueue(), done: make(chan struct{})}
+	instance.handleEvent(response{Event: "end-file", Reason: "error", FileError: "network connection lost"})
+	select {
+	case event := <-instance.Events():
+		if event.Kind != player.EventFailed || event.Err == nil || !strings.Contains(event.Err.Error(), "network connection lost") {
+			t.Fatalf("unexpected failure event: %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a playback failure after loading was not reported")
 	}
 }

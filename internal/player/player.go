@@ -31,8 +31,14 @@ type State struct {
 type EventKind string
 
 const (
-	EventState  EventKind = "state"
-	EventMedia  EventKind = "media"
+	EventState EventKind = "state"
+	// EventMedia reports a change of the loaded media: another source, its
+	// duration or chapters becoming known, or nothing being loaded any more
+	// (State.Source is empty once a file ended or failed).
+	EventMedia EventKind = "media"
+	// EventFailed reports that media which had loaded failed during
+	// playback; Err explains why.
+	EventFailed EventKind = "failed"
 	EventClosed EventKind = "closed"
 )
 

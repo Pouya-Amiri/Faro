@@ -1,9 +1,16 @@
 package vlc
 
 import (
+	"bufio"
+	"context"
+	"io"
+	"net"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestLaunchArgumentsTargetTheLuaCliInterface(t *testing.T) {
@@ -183,5 +190,103 @@ func TestLocalVLCMRLHandlesWindowsDriveAndUNCPaths(t *testing.T) {
 	}
 	if got := localVLCMRL(`\\server\media\My Movie.mkv`, "windows"); got != "file://server/media/My%20Movie.mkv" {
 		t.Fatalf("Windows UNC MRL = %q", got)
+	}
+}
+
+// fakeRC answers each command line with reply and a prompt, after delay.
+func fakeRC(t *testing.T, server net.Conn, delay time.Duration, reply func(string) string) {
+	t.Helper()
+	go func() {
+		reader := bufio.NewReader(server)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			time.Sleep(delay)
+			if _, err := io.WriteString(server, reply(strings.TrimSpace(line))+"\n> "); err != nil {
+				return
+			}
+		}
+	}()
+}
+
+func TestCloseDoesNotWaitForAControlChannelThatStoppedReading(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = server.Close() })
+	instance := newVLC(client)
+	// A command blocks writing because nothing reads the other end.
+	go func() { _, _ = instance.command(context.Background(), "status") }()
+	time.Sleep(50 * time.Millisecond)
+	closed := make(chan struct{})
+	go func() { instance.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close waited for a control channel that stopped reading")
+	}
+}
+
+func TestCancelledCommandIsNeverSent(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	instance := newVLC(client)
+	received := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(server).ReadString('\n')
+		received <- line
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := instance.command(ctx, "seek 10"); err == nil {
+		t.Fatal("a cancelled command succeeded")
+	}
+	select {
+	case line := <-received:
+		t.Fatalf("a cancelled command reached VLC: %q", line)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestLateReplyIsNotMistakenForTheNextCommandsReply(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	instance := newVLC(client)
+	var calls atomic.Int32
+	fakeRC(t, server, 0, func(line string) string {
+		if calls.Add(1) == 1 {
+			time.Sleep(300 * time.Millisecond)
+		}
+		return "reply to " + line
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := instance.command(ctx, "get_time"); err == nil {
+		t.Fatal("a command that timed out succeeded")
+	}
+	response, err := instance.command(context.Background(), "get_length")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response != "reply to get_length" {
+		t.Fatalf("the next command received %q", response)
+	}
+}
+
+func TestStatusReportsTheCurrentInput(t *testing.T) {
+	playing := "( new input: file:///media/Movie%20Night.mkv )\n( audio volume: 256 )\n( state playing )"
+	if input := parseInput(playing); input != "file:///media/Movie%20Night.mkv" {
+		t.Fatalf("unexpected input %q", input)
+	}
+	if input := parseInput("( audio volume: 256 )\n( state stopped )"); input != "" {
+		t.Fatalf("an idle player reported input %q", input)
+	}
+	if runtime.GOOS != "windows" {
+		if source := sourceOfMRL("file:///media/Movie%20Night.mkv"); source != "/media/Movie Night.mkv" {
+			t.Fatalf("unexpected source %q", source)
+		}
+	}
+	if source := sourceOfMRL("http://127.0.0.1:1234/token/Movie.mkv"); source != "http://127.0.0.1:1234/token/Movie.mkv" {
+		t.Fatalf("a network MRL changed to %q", source)
 	}
 }
