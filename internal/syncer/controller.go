@@ -40,7 +40,10 @@ type Controller struct {
 // Status is how closely the local player followed the room at the last
 // check, before any correction that check applied.
 type Status struct {
-	Buffering    bool
+	Buffering bool
+	// Live means only playing and pausing are followed: the media is a live
+	// broadcast, whose positions differ between viewers.
+	Live         bool
 	DriftSeconds float64 // room position minus local position
 	// ToleranceSeconds is the drift still perceived as in sync: half a
 	// second, or two position steps for players that only report seconds.
@@ -50,7 +53,7 @@ type Status struct {
 
 // InSync reports whether the last check found the player following the room.
 func (s Status) InSync() bool {
-	return !s.MeasuredAt.IsZero() && !s.Buffering && math.Abs(s.DriftSeconds) <= s.ToleranceSeconds
+	return !s.MeasuredAt.IsZero() && !s.Buffering && !s.Live && math.Abs(s.DriftSeconds) <= s.ToleranceSeconds
 }
 
 // Status returns the result of the last ApplyRemote check.
@@ -116,6 +119,33 @@ func (c *Controller) ApplyRemote(ctx context.Context, remote protocol.Playback, 
 			if err == nil {
 				c.correctionRate, c.nominalRate = targetRate, remote.Rate
 			}
+		}
+	}
+	return errors.Join(nonNil(failures)...)
+}
+
+// FollowLive applies only the room's pause state, for a live broadcast. Each
+// viewer's player numbers positions from where it joined the broadcast, so
+// equal numbers are not the same moment and positions are never corrected.
+// The player plays at normal speed, since a faster one would run into the
+// live edge.
+func (c *Controller) FollowLive(ctx context.Context, remote protocol.Playback) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	local, err := c.player.State(ctx)
+	if err != nil {
+		return err
+	}
+	c.status = Status{Live: true, Buffering: local.Buffering, MeasuredAt: time.Now()}
+	var failures []error
+	if local.Paused != remote.Paused {
+		failures = append(failures, c.player.SetPaused(ctx, remote.Paused))
+	}
+	if c.player.Capabilities().PlaybackRate && math.Abs(local.Rate-1) > 0.001 {
+		err := c.player.SetRate(ctx, 1)
+		failures = append(failures, err)
+		if err == nil {
+			c.correctionRate, c.nominalRate = 1, 1
 		}
 	}
 	return errors.Join(nonNil(failures)...)

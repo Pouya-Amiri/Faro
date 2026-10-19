@@ -191,3 +191,26 @@ func TestStatusReportsMeasuredDrift(t *testing.T) {
 		}
 	}
 }
+
+func TestFollowLiveSharesOnlyPlayingAndPausing(t *testing.T) {
+	now := time.Unix(100, 0)
+	mediaPlayer := &fakePlayer{state: player.State{PositionSeconds: 17.9, Paused: true, Rate: 1.03, ObservedAt: time.Now()}}
+	controller := New(mediaPlayer, &fakeSender{}, func() time.Time { return now })
+	for range 3 {
+		err := controller.FollowLive(context.Background(), protocol.Playback{
+			PositionSeconds: 400, Paused: false, Rate: 2, UpdatedAtUnixMs: now.UnixMilli(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(mediaPlayer.seeks) != 0 {
+		t.Fatalf("a live broadcast was seeked to another viewer's position: %v", mediaPlayer.seeks)
+	}
+	if len(mediaPlayer.pauses) != 1 || mediaPlayer.pauses[0] || mediaPlayer.state.Rate != 1 {
+		t.Fatalf("live playback did not follow the room's play state at normal speed: pauses %v, rate %v", mediaPlayer.pauses, mediaPlayer.state.Rate)
+	}
+	if status := controller.Status(); !status.Live || status.InSync() {
+		t.Fatalf("unexpected live status %#v", status)
+	}
+}
