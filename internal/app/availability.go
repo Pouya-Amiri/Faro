@@ -38,9 +38,7 @@ func (s *Service) OfferPlaylistStream(itemID string) error {
 		if item.ID != itemID || item.Media == nil {
 			continue
 		}
-		s.mu.RLock()
-		path := s.sources[item.Media.Fingerprint]
-		s.mu.RUnlock()
+		path := s.localSource(item.Media.Fingerprint)
 		if path == "" {
 			return errors.New("locate your copy before sharing it")
 		}

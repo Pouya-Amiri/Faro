@@ -13,13 +13,6 @@ import (
 	"github.com/Pouya-Amiri/Faro/internal/protocol"
 )
 
-type pendingStream struct {
-	viewer         *mediastream.PreparedViewer
-	media          protocol.Media
-	requestID      string
-	playlistItemID string
-}
-
 // StreamingAvailable reports whether the connected server negotiated the
 // extension and supplied the operator-controlled Tailcat bootstrap policy.
 func (s *Service) StreamingAvailable() bool {
@@ -86,8 +79,29 @@ func (s *Service) offerStreamLocked(path string, maxViewers int, itemID string, 
 			break
 		}
 	}
-	publisher, err := mediastream.StartHostedPublisher(ctx, s.streamFactory, mediastream.HostedPublisherConfig{
-		Source: mediastream.SourceConfig{Path: identity.Path, Media: identity.Media}, DERPMapURL: policy.DERPMapURL,
+	// Starting the transport can take a while; stopping the offer or
+	// leaving the room cancels it rather than waiting for it.
+	startCtx, cancel := context.WithCancel(ctx)
+	start := &cancelHandle{cancel: cancel}
+	s.mu.Lock()
+	s.offerStart = start
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.offerStart == start {
+			s.offerStart = nil
+		}
+		s.mu.Unlock()
+		cancel()
+	}()
+	var publisher *mediastream.HostedPublisher
+	fingerprint := identity.Media.Fingerprint
+	publisher, err = mediastream.StartHostedPublisher(startCtx, s.streamFactory, mediastream.HostedPublisherConfig{
+		Source: mediastream.SourceConfig{
+			Path: identity.Path, Media: identity.Media,
+			OnChanged: func() { s.sharedFileChanged(client, publisher, fingerprint) },
+		},
+		DERPMapURL: policy.DERPMapURL,
 	})
 	if err != nil {
 		return fmt.Errorf("start media stream publisher: %w", err)
@@ -124,7 +138,16 @@ func (s *Service) offerStreamLocked(path string, maxViewers int, itemID string, 
 	return nil
 }
 
+// cancelHandle identifies one cancellable operation, so that only its owner
+// clears it.
+type cancelHandle struct{ cancel context.CancelFunc }
+
 func (s *Service) StopOfferingStream() error {
+	s.mu.Lock()
+	if s.offerStart != nil {
+		s.offerStart.cancel()
+	}
+	s.mu.Unlock()
 	s.streamOfferMu.Lock()
 	defer s.streamOfferMu.Unlock()
 	client, err := s.connected()
@@ -176,6 +199,24 @@ func (s *Service) stopOfferingStream(client *faroclient.Client) error {
 	return withdrawErr
 }
 
+// sharedFileChanged withdraws an offer whose file was modified in place: its
+// bytes no longer match what the room was told. The changed file is no
+// longer a copy of that media either.
+func (s *Service) sharedFileChanged(client *faroclient.Client, publisher *mediastream.HostedPublisher, fingerprint string) {
+	s.forgetSource(fingerprint)
+	s.streamOfferMu.Lock()
+	defer s.streamOfferMu.Unlock()
+	s.mu.RLock()
+	current := publisher != nil && s.streamPublisher == publisher && s.client == client
+	s.mu.RUnlock()
+	if !current {
+		return
+	}
+	s.log("offer: the shared file changed; withdrawing it")
+	_ = s.stopOfferingStream(client)
+	s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "stream_source_changed", Message: "The shared file changed on this device, so sharing it stopped."}})
+}
+
 func (s *Service) offeredItemMissing(items []protocol.PlaylistItem) bool {
 	s.mu.RLock()
 	offerID, itemID, media := s.streamOfferID, s.streamOfferItemID, cloneStreamMedia(s.streamOfferMedia)
@@ -198,199 +239,6 @@ func (s *Service) withdrawMissingOffer(client *faroclient.Client, items []protoc
 		return nil
 	}
 	return s.stopOfferingStream(client)
-}
-
-// StreamFromOffer prepares an ephemeral Tailcat identity before requesting the
-// provider's connection blob. A known local copy always wins.
-func (s *Service) StreamFromOffer(offerID string) error {
-	client, err := s.connected()
-	if err != nil {
-		return err
-	}
-	snapshot := client.Snapshot()
-	var offer *protocol.MediaStreamOffer
-	for index := range snapshot.StreamOffers {
-		candidate := snapshot.StreamOffers[index]
-		if candidate.ID == offerID {
-			offer = &candidate
-			break
-		}
-	}
-	if offer == nil {
-		return errors.New("media stream offer is no longer available")
-	}
-	playlistItemID := ""
-	if selected := snapshot.Playlist.Selected; selected >= 0 && selected < len(snapshot.Playlist.Items) {
-		item := snapshot.Playlist.Items[selected]
-		if item.Media != nil && item.Media.Fingerprint == offer.Media.Fingerprint {
-			playlistItemID = item.ID
-		}
-	}
-	s.mu.Lock()
-	if s.sources[offer.Media.Fingerprint] != "" {
-		s.mu.Unlock()
-		return errors.New("a matching local copy is already available and remains preferred")
-	}
-	if s.pendingStreams[offerID] != nil {
-		s.mu.Unlock()
-		return errors.New("this media stream is already being requested")
-	}
-	factory := s.streamFactory
-	s.mu.Unlock()
-	viewer, err := mediastream.PrepareViewer(factory)
-	if err != nil {
-		return err
-	}
-	pending := &pendingStream{viewer: viewer, media: offer.Media, playlistItemID: playlistItemID}
-	s.mu.Lock()
-	// Reconciliation runs concurrently: another call may have claimed this
-	// offer while the viewer was being prepared. Overwriting its entry would
-	// leak that viewer and orphan its request.
-	if s.pendingStreams[offerID] != nil {
-		s.mu.Unlock()
-		viewer.Close()
-		return errors.New("this media stream is already being requested")
-	}
-	s.pendingStreams[offerID] = pending
-	s.mu.Unlock()
-	accepted, err := client.RequestStream(protocol.MediaStreamRequest{OfferID: offerID, ClientPublicKey: viewer.PublicKey()})
-	if err != nil {
-		s.mu.Lock()
-		if s.pendingStreams[offerID] == pending {
-			delete(s.pendingStreams, offerID)
-		}
-		s.mu.Unlock()
-		viewer.Close()
-		return err
-	}
-	s.mu.Lock()
-	if s.pendingStreams[offerID] == pending {
-		pending.requestID = accepted.RequestID
-		s.pendingRequestOffers[accepted.RequestID] = offerID
-	}
-	s.mu.Unlock()
-	s.sink(Event{Kind: "stream", Stream: &StreamStatus{State: "requesting", OfferID: offerID}})
-	return nil
-}
-
-// reconcilePlaylistStreams makes shared playback automatic: when the selected
-// queue item has no local copy, the first available room offer is accepted.
-// It also tears down transfers that no longer belong to the selected queue
-// item, including a file removed from the queue while it is being streamed.
-func (s *Service) reconcilePlaylistStreams(ctx context.Context, client *faroclient.Client) {
-	if ctx.Err() != nil {
-		return
-	}
-	snapshot := client.Snapshot()
-	var selectedFingerprint, selectedItemID string
-	if snapshot.Playlist.Selected >= 0 && snapshot.Playlist.Selected < len(snapshot.Playlist.Items) {
-		selected := snapshot.Playlist.Items[snapshot.Playlist.Selected]
-		selectedItemID = selected.ID
-		if media := selected.Media; media != nil {
-			selectedFingerprint = media.Fingerprint
-		}
-	}
-
-	s.mu.RLock()
-	if s.client != client {
-		s.mu.RUnlock()
-		return
-	}
-	receiving := cloneStreamMedia(s.streamIdentity)
-	receivingItemID := s.streamReceiveItemID
-	activation := s.streamActivation
-	playerDismissed := s.playerDismissed
-	pendingCount := len(s.pendingStreams)
-	hasPending := pendingCount != 0 || s.streamActivationCancel != nil
-	pendingSelectionInvalid := false
-	for _, pending := range s.pendingStreams {
-		// Requests made outside playlist playback are intentionally unbound and
-		// retain the explicit StreamFromOffer/StopStreaming API semantics.
-		if pending.playlistItemID != "" && (pending.playlistItemID != selectedItemID || pending.media.Fingerprint != selectedFingerprint) {
-			pendingSelectionInvalid = true
-		}
-	}
-	if activation != nil && activation.playlistItemID != "" && (activation.playlistItemID != selectedItemID || activation.media.Fingerprint != selectedFingerprint) {
-		pendingSelectionInvalid = true
-	}
-	localSource := s.sources[selectedFingerprint]
-	s.mu.RUnlock()
-
-	if err := s.withdrawMissingOffer(client, snapshot.Playlist.Items); err != nil {
-		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "stream_offer_withdraw", Message: err.Error()}})
-	}
-	if receiving != nil && receivingItemID != "" && (receivingItemID != selectedItemID || receiving.Fingerprint != selectedFingerprint) {
-		_ = s.StopStreaming()
-		receiving = nil
-		hasPending = false
-	}
-	if pendingSelectionInvalid {
-		_ = s.StopStreaming()
-		hasPending = false
-	}
-	// Closing the player suppresses automatic playback, but it must not suppress
-	// lifecycle cleanup. Otherwise a removed queue item keeps its offer and any
-	// active transfer alive indefinitely, preventing a replacement offer.
-	if playerDismissed {
-		return
-	}
-	if selectedFingerprint == "" || localSource != "" || receiving != nil || hasPending {
-		return
-	}
-	for _, offer := range snapshot.StreamOffers {
-		if offer.ProviderID != snapshot.SelfID && offer.Media.Fingerprint == selectedFingerprint && offer.ViewerCount < offer.MaxViewers {
-			_ = s.StreamFromOffer(offer.ID)
-			return
-		}
-	}
-}
-
-func (s *Service) StopStreaming() error {
-	client, err := s.connected()
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	gateway, requestID := s.streamGateway, s.streamRequestID
-	receiveItemID := s.streamReceiveItemID
-	activationCancel := s.streamActivationCancel
-	s.streamActivationCancel = nil
-	s.streamActivation = nil
-	pending := make([]*pendingStream, 0, len(s.pendingStreams))
-	for offerID, stream := range s.pendingStreams {
-		pending = append(pending, stream)
-		delete(s.pendingStreams, offerID)
-		if stream.requestID != "" {
-			delete(s.pendingRequestOffers, stream.requestID)
-		}
-	}
-	s.streamGateway, s.streamRequestID, s.streamReceiveItemID, s.streamIdentity = nil, "", "", nil
-	if gateway != nil && s.currentSource == gateway.URL() {
-		s.currentSource, s.currentPlayerSource = "", ""
-	}
-	if receiveItemID != "" && s.selectedItem == receiveItemID {
-		s.selectedItem, s.selectedItemIdentity = "", ""
-	}
-	s.mu.Unlock()
-	if activationCancel != nil {
-		activationCancel()
-	}
-	if gateway == nil && len(pending) == 0 && activationCancel == nil {
-		return errors.New("no media stream is active")
-	}
-	for _, stream := range pending {
-		_ = stream.viewer.Close()
-		if stream.requestID != "" {
-			_ = client.RevokeStream(protocol.MediaStreamRevoke{RequestID: stream.requestID, Reason: "viewer cancelled stream request"})
-		}
-	}
-	if gateway != nil {
-		_ = client.RevokeStream(protocol.MediaStreamRevoke{RequestID: requestID, Reason: "viewer stopped streaming"})
-		_ = gateway.Close()
-		s.pauseUnavailableStream(client, "Streaming stopped. Locate a local copy to continue.")
-	}
-	s.sink(Event{Kind: "stream", Stream: &StreamStatus{State: "idle"}})
-	return nil
 }
 
 func (s *Service) handleStreamRequest(ctx context.Context, client *faroclient.Client, request protocol.MediaStreamRequested) {
@@ -432,285 +280,44 @@ func (s *Service) handleStreamRequest(ctx context.Context, client *faroclient.Cl
 	}
 }
 
-func (s *Service) activateStream(ctx context.Context, client *faroclient.Client, grant protocol.MediaStreamGranted) {
-	s.mediaLoadMu.Lock()
-	defer s.mediaLoadMu.Unlock()
-	if ctx.Err() != nil {
-		return
-	}
-	s.mu.Lock()
-	pending := s.pendingStreams[grant.OfferID]
-	if pending == nil || pending.requestID != "" && pending.requestID != grant.RequestID {
-		s.mu.Unlock()
-		_ = client.RevokeStream(protocol.MediaStreamRevoke{RequestID: grant.RequestID, Reason: "viewer no longer wants the stream"})
-		return
-	}
-	delete(s.pendingStreams, grant.OfferID)
-	delete(s.pendingRequestOffers, grant.RequestID)
-	activationCtx, activationCancel := context.WithCancel(ctx)
-	s.streamActivationCancel = activationCancel
-	s.streamActivation = pending
-	s.mu.Unlock()
-	ctx = activationCtx
-	defer func() {
-		activationCancel()
-		s.mu.Lock()
-		if s.streamActivation == pending {
-			s.streamActivationCancel = nil
-			s.streamActivation = nil
-		}
-		s.mu.Unlock()
-	}()
-	s.mu.RLock()
-	cache := s.streamCache
-	s.mu.RUnlock()
-	gateway, err := pending.viewer.StartGateway(ctx, grant, pending.media, mediastream.GatewayOptions{Cache: cache})
-	if err != nil {
-		s.failStreamActivation(client, grant, pending, nil, "stream_connect", err)
-		return
-	}
-	currentClient, mediaPlayer, err := s.ensurePlayer(playerStartAutomatic)
-	if err != nil || currentClient != client {
-		if err == nil {
-			err = errors.New("connection changed while starting stream")
-		}
-		if errors.Is(err, errPlayerDismissed) {
-			if gateway != nil {
-				_ = gateway.Close()
-			} else {
-				_ = pending.viewer.Close()
-			}
-			_ = client.RevokeStream(protocol.MediaStreamRevoke{RequestID: grant.RequestID, Reason: "viewer closed the media player"})
-			s.sink(Event{Kind: "stream", Stream: &StreamStatus{State: "idle"}})
-			return
-		}
-		s.failStreamActivation(client, grant, pending, gateway, "stream_player", err)
-		return
-	}
-	openCtx, cancel := s.mediaOperationContext(ctx)
-	defer cancel()
-	s.beginMediaTransition()
-	finished := false
-	defer func() {
-		if !finished {
-			s.endMediaTransition()
-		}
-	}()
-	if _, err := s.openPlayerSource(openCtx, mediaPlayer, gateway.URL()); err != nil {
-		s.failStreamActivation(client, grant, pending, gateway, "stream_open", err)
-		return
-	}
-	state := s.waitForPlayerMedia(openCtx, mediaPlayer, pending.media.DurationSeconds)
-	// An offer made before the sharer's player probed the file carries no
-	// duration; the viewer's player knows it once the stream opens, and the
-	// seek bar needs it.
-	if pending.media.DurationSeconds <= 0 && state.DurationSeconds > 0 {
-		pending.media.DurationSeconds = state.DurationSeconds
-	}
-	playback := localClockSnapshot(client).Playback
-	_ = mediaPlayer.Seek(openCtx, playback.PositionSeconds)
-	_ = mediaPlayer.SetRate(openCtx, normalizedRate(playback.Rate))
-	if err := client.SetMedia(protocol.MediaSet{Media: &pending.media}); err != nil {
-		s.failStreamActivation(client, grant, pending, gateway, "stream_identity", err)
-		return
-	}
-	s.mu.Lock()
-	if ctx.Err() != nil || s.client != client || s.player != mediaPlayer {
-		s.mu.Unlock()
-		s.failStreamActivation(client, grant, pending, gateway, "stream_cancelled", errors.New("stream was cancelled while loading"))
-		return
-	}
-	s.streamActivationCancel = nil
-	s.streamActivation = nil
-	previous := s.streamGateway
-	identity := pending.media
-	s.streamGateway, s.streamRequestID, s.streamReceiveItemID, s.streamIdentity = gateway, grant.RequestID, pending.playlistItemID, &identity
-	s.manualSource = ""
-	playlist := client.Snapshot().Playlist
-	if playlist.Selected >= 0 && playlist.Selected < len(playlist.Items) {
-		item := playlist.Items[playlist.Selected]
-		if item.Media != nil && item.Media.Fingerprint == identity.Fingerprint {
-			s.selectedItem = item.ID
-			s.selectedItemIdentity = playlistItemIdentity(item)
-		}
-	}
-	s.mu.Unlock()
-	if previous != nil {
-		previous.Close()
-	}
-	s.sink(Event{Kind: "stream", Stream: &StreamStatus{State: "active", OfferID: grant.OfferID, Route: "direct"}})
-	go s.reportStreamProgress(gateway, grant.OfferID)
-	if _, err := s.finishMediaTransition(openCtx, mediaPlayer, localClockSnapshot(client).Playback.Paused, nil); err != nil {
-		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "stream_sync", Message: err.Error()}})
-	}
-	finished = true
-}
-
-// streamCacheRanges bounds the cached ranges sent to the seek bar each second.
-const streamCacheRanges = 48
-
-// SetStreamCacheLimit chooses how later streams are cached on this device: a
-// positive limit caps the disk cache, 0 caches whole files and a negative
-// value keeps streams in memory only. A running stream keeps its cache.
-func (s *Service) SetStreamCacheLimit(limitBytes int64) {
-	s.mu.Lock()
-	s.streamCache = mediastream.CacheOptions{DiskLimit: max(limitBytes, 0), MemoryOnly: limitBytes < 0}
-	s.mu.Unlock()
-}
-
-// reportStreamProgress emits the active gateway's cache progress about once a
-// second, until the stream ends or the whole file is cached.
-func (s *Service) reportStreamProgress(gateway *mediastream.Gateway, offerID string) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	last, lastAt := gateway.Progress().ReceivedBytes, time.Now()
-	for {
-		select {
-		case <-s.root.Done():
-			return
-		case <-ticker.C:
-		}
-		s.mu.Lock()
-		current := s.streamGateway == gateway
-		s.mu.Unlock()
-		if !current {
-			return
-		}
-		progress, now := gateway.Progress(), time.Now()
-		rate := float64(progress.ReceivedBytes-last) / now.Sub(lastAt).Seconds()
-		last, lastAt = progress.ReceivedBytes, now
-		complete := progress.TotalBytes > 0 && progress.CachedBytes >= progress.TotalBytes
-		if complete {
-			rate = 0
-		}
-		s.sink(Event{Kind: "stream", Stream: &StreamStatus{
-			State: "active", OfferID: offerID, Route: "direct",
-			CachedBytes: progress.CachedBytes, TotalBytes: progress.TotalBytes, BytesPerSecond: rate,
-			CachedRanges: gateway.CachedRanges(streamCacheRanges),
-		}})
-		if complete {
-			return
-		}
-	}
-}
-
-func (s *Service) failStreamActivation(client *faroclient.Client, grant protocol.MediaStreamGranted, pending *pendingStream, gateway *mediastream.Gateway, code string, cause error) {
-	if gateway != nil {
-		_ = gateway.Close()
-	} else if pending != nil {
-		_ = pending.viewer.Close()
-	}
-	_ = client.RevokeStream(protocol.MediaStreamRevoke{RequestID: grant.RequestID, Reason: "viewer could not activate the stream"})
-	s.sink(Event{Kind: "stream", Stream: &StreamStatus{State: "idle"}})
-	s.sink(Event{Kind: "error", Error: &protocol.Error{Code: code, Message: cause.Error()}})
-}
-
+// handleStreamRevoked ends whatever a revocation names: a grant this
+// participant issued as a provider, or the request or grant of the stream
+// it receives.
 func (s *Service) handleStreamRevoked(client *faroclient.Client, revoked protocol.MediaStreamRevoked) {
 	s.mu.Lock()
-	pendingClosed := false
-	var capability string
-	var publisher *mediastream.HostedPublisher
-	var pendingViewer *mediastream.PreparedViewer
-	capability = s.streamCapabilities[revoked.RequestID]
-	if capability != "" {
-		publisher = s.streamPublisher
-		delete(s.streamCapabilities, revoked.RequestID)
-	}
-	if offerID := s.pendingRequestOffers[revoked.RequestID]; offerID != "" {
-		if pending := s.pendingStreams[offerID]; pending != nil {
-			pendingViewer = pending.viewer
-			delete(s.pendingStreams, offerID)
-			pendingClosed = true
-		}
-		delete(s.pendingRequestOffers, revoked.RequestID)
-	}
-	var gateway *mediastream.Gateway
-	if s.streamRequestID == revoked.RequestID {
-		gateway = s.streamGateway
-		receiveItemID := s.streamReceiveItemID
-		s.streamGateway, s.streamRequestID, s.streamReceiveItemID, s.streamIdentity = nil, "", "", nil
-		if gateway != nil && s.currentSource == gateway.URL() {
-			s.currentSource, s.currentPlayerSource = "", ""
-		}
-		if receiveItemID != "" && s.selectedItem == receiveItemID {
-			s.selectedItem, s.selectedItemIdentity = "", ""
-		}
-	}
+	capability := s.streamCapabilities[revoked.RequestID]
+	publisher := s.streamPublisher
+	delete(s.streamCapabilities, revoked.RequestID)
 	s.mu.Unlock()
-	if publisher != nil && capability != "" {
+	if capability != "" && publisher != nil {
 		publisher.Revoke(capability)
 	}
-	if pendingViewer != nil {
-		pendingViewer.Close()
-	}
-	if pendingClosed {
-		s.sink(Event{Kind: "stream", Stream: &StreamStatus{State: "idle"}})
-	}
-	if gateway != nil {
-		gateway.Close()
-		s.sink(Event{Kind: "stream", Stream: &StreamStatus{State: "idle"}})
-		s.pauseUnavailableStream(client, "The media provider stopped streaming. Locate a local copy or choose another provider.")
-	}
+	s.handleViewerRevocation(client, revoked)
 }
 
-func (s *Service) pauseUnavailableStream(client *faroclient.Client, message string) {
-	s.mu.RLock()
-	mediaPlayer := s.player
-	s.mu.RUnlock()
-	if mediaPlayer != nil {
-		ctx, cancel := context.WithTimeout(s.root, 3*time.Second)
-		_ = mediaPlayer.SetPaused(ctx, true)
-		cancel()
+// detachStreamingLocked clears session-bound transfer state when the session
+// ends. The caller holds s.mu and calls the returned function after
+// releasing it to close the resources.
+func (s *Service) detachStreamingLocked() func() {
+	if s.offerStart != nil {
+		s.offerStart.cancel()
+		s.offerStart = nil
 	}
-	_ = client.SetMedia(protocol.MediaSet{Media: nil})
-	s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "stream_unavailable", Message: message}})
-}
-
-type streamingResources struct {
-	publisher *mediastream.HostedPublisher
-	gateway   *mediastream.Gateway
-	viewers   []*mediastream.PreparedViewer
-}
-
-// detachStreamingLocked clears session-bound transfer state. The caller must
-// hold s.mu and close the returned resources after releasing it.
-func (s *Service) detachStreamingLocked() streamingResources {
-	if s.streamActivationCancel != nil {
-		s.streamActivationCancel()
-		s.streamActivationCancel = nil
-	}
-	s.streamActivation = nil
-	resources := streamingResources{publisher: s.streamPublisher, gateway: s.streamGateway}
-	for _, pending := range s.pendingStreams {
-		resources.viewers = append(resources.viewers, pending.viewer)
-	}
-	s.streamPublisher, s.streamGateway = nil, nil
-	s.streamOfferID, s.streamOfferItemID, s.streamRequestID, s.streamReceiveItemID = "", "", "", ""
-	s.streamOfferMedia, s.streamIdentity = nil, nil
+	publisher := s.streamPublisher
+	s.streamPublisher = nil
+	s.streamOfferID, s.streamOfferItemID, s.streamOfferMedia = "", "", nil
 	s.streamOfferAuto = false
 	if s.autoOfferTimer != nil {
 		s.autoOfferTimer.Stop()
 		s.autoOfferTimer, s.autoOfferKey = nil, ""
 	}
 	s.streamCapabilities = make(map[string]string)
-	s.pendingStreams = make(map[string]*pendingStream)
-	s.pendingRequestOffers = make(map[string]string)
-	if resources.gateway != nil {
-		s.currentSource, s.currentPlayerSource = "", ""
-		s.selectedItem, s.selectedItemIdentity = "", ""
-	}
-	return resources
-}
-
-func (r streamingResources) close() {
-	if r.publisher != nil {
-		r.publisher.Close()
-	}
-	if r.gateway != nil {
-		r.gateway.Close()
-	}
-	for _, viewer := range r.viewers {
-		viewer.Close()
+	closeStream := s.detachStreamLocked()
+	return func() {
+		if publisher != nil {
+			publisher.Close()
+		}
+		closeStream()
 	}
 }
 

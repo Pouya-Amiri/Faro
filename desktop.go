@@ -12,6 +12,7 @@ import (
 
 	"github.com/Pouya-Amiri/Faro/internal/app"
 	"github.com/Pouya-Amiri/Faro/internal/buildinfo"
+	"github.com/Pouya-Amiri/Faro/internal/diag"
 	"github.com/Pouya-Amiri/Faro/internal/legal"
 	"github.com/Pouya-Amiri/Faro/internal/protocol"
 	"github.com/Pouya-Amiri/Faro/internal/updater"
@@ -34,6 +35,7 @@ type Desktop struct {
 
 	updates           *updater.Manager
 	pauseBeforeUpdate atomic.Bool
+	diagnostics       *diag.Log
 }
 
 func NewDesktop(wailsApp *application.App, background application.RGBA) *Desktop {
@@ -46,6 +48,12 @@ func (d *Desktop) ServiceStartup(ctx context.Context, _ application.ServiceOptio
 	d.service = app.New(ctx, func(event app.Event) {
 		d.app.Event.Emit("faro:event", event)
 	})
+	// Diagnostics are best effort: Faro works the same without them.
+	if log, err := diag.Open(diag.DefaultDir()); err == nil {
+		d.diagnostics = log
+		log.Printf("Faro %s started", buildinfo.EffectiveVersion())
+		d.service.SetDiagnostics(log.Printf)
+	}
 	d.startUpdates()
 	return nil
 }
@@ -57,6 +65,7 @@ func (d *Desktop) ServiceShutdown() error {
 	if d.service != nil {
 		d.service.Shutdown()
 	}
+	d.diagnostics.Close()
 	return nil
 }
 

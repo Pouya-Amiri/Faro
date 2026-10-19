@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -65,10 +64,8 @@ func (s *Service) planAutoOffer(client *faroclient.Client) (autoOfferPlan, bool)
 			return autoOfferPlan{}, false
 		}
 	}
-	s.mu.RLock()
-	path := s.sources[fingerprint]
-	s.mu.RUnlock()
-	if info, err := os.Stat(path); path == "" || err != nil || !info.Mode().IsRegular() {
+	path := s.localSource(fingerprint)
+	if path == "" {
 		return autoOfferPlan{}, false
 	}
 	holders := []string{snapshot.SelfID}

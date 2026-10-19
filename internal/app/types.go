@@ -29,6 +29,19 @@ type ConnectionRequest struct {
 	Executable    string   `json:"executable,omitempty"`
 	PlayerArgs    []string `json:"playerArgs,omitempty"`
 	ClientVersion string   `json:"clientVersion"`
+	// Preferences, when given, are applied before anything in the room can
+	// start automatically, so the first stream already uses the saved cache
+	// policy and the first file is shared only if sharing is enabled.
+	Preferences *Preferences `json:"preferences,omitempty"`
+}
+
+// Preferences are this device's settings for automatic behavior in a room.
+type Preferences struct {
+	SponsorBlock bool `json:"sponsorBlock"`
+	AutoOffer    bool `json:"autoOffer"`
+	ChatOverlay  bool `json:"chatOverlay"`
+	// StreamCacheLimit is passed to SetStreamCacheLimit.
+	StreamCacheLimit int64 `json:"streamCacheLimit"`
 }
 
 type Event struct {
@@ -48,9 +61,16 @@ type Event struct {
 // of the room snapshot or wire protocol: only the viewer needs to know whether
 // its loopback gateway is being prepared or is active.
 type StreamStatus struct {
+	// State is "requesting", "active" or "idle".
 	State   string `json:"state"`
 	OfferID string `json:"offerId,omitempty"`
-	Route   string `json:"route,omitempty"`
+	// Route describes an active stream's connection to its provider:
+	// "direct", "unavailable" (no direct path right now), "reconnecting"
+	// (the grant ended and a new one is being requested) or "cached" (the
+	// whole file is on this device and no provider is needed).
+	Route string `json:"route,omitempty"`
+	// Error is the latest transfer problem of an active stream.
+	Error string `json:"error,omitempty"`
 	// Cache progress of an active stream, reported about once a second.
 	CachedBytes    int64   `json:"cachedBytes,omitempty"`
 	TotalBytes     int64   `json:"totalBytes,omitempty"`
@@ -121,14 +141,18 @@ type Service struct {
 	streamOfferMu      sync.Mutex
 	mediaTransitionMu  sync.Mutex
 	mediaLoadMu        sync.Mutex
+	selectionMu        sync.Mutex
+	mediaPublishMu     sync.Mutex
 	availabilityMu     sync.Mutex
 	availabilityClient *faroclient.Client
 	availabilitySent   []string
 	syncApplyMu        sync.Mutex
+	log                func(format string, args ...any)
 
 	mu                      sync.RWMutex
 	sessionCtx              context.Context
 	connectCancel           context.CancelFunc
+	connectAttempt          uint64
 	cancel                  context.CancelFunc
 	client                  *faroclient.Client
 	player                  player.Player
@@ -152,6 +176,8 @@ type Service struct {
 	transitionPaused        *bool
 	selectedItem            string
 	selectedItemIdentity    string
+	load                    *mediaLoad
+	mediaGen                uint64
 	lastRemoteRevision      uint64
 	currentSource           string
 	manualSource            string
@@ -163,7 +189,7 @@ type Service struct {
 	request                 ConnectionRequest
 	startPlayer             func(context.Context, ConnectionRequest) (player.Player, error)
 	youtube                 youtubeResolver
-	sources                 map[string]string
+	sources                 map[string]localCopy
 	localServer             *faroserver.Server
 	serverStarting          bool
 	serverCancel            context.CancelFunc
@@ -178,15 +204,13 @@ type Service struct {
 	autoOfferTimer          *time.Timer
 	autoOfferKey            string
 	autoOfferSuppressedItem string
+	offerStart              *cancelHandle
 	streamCapabilities      map[string]string
-	pendingStreams          map[string]*pendingStream
-	pendingRequestOffers    map[string]string
-	streamGateway           *mediastream.Gateway
-	streamActivationCancel  context.CancelFunc
-	streamActivation        *pendingStream
-	streamRequestID         string
-	streamReceiveItemID     string
-	streamIdentity          *protocol.Media
+	stream                  *viewerStream
+	streamSeq               uint64
+	streamFailures          map[failureKey]*streamFailure
+	streamSuppressedItem    string
+	streamRetry             *time.Timer
 	chat                    chatOverlay
 	streamCache             mediastream.CacheOptions
 	syncState               string
@@ -201,9 +225,17 @@ func New(root context.Context, sink EventSink) *Service {
 		sink = func(Event) {}
 	}
 	return &Service{
-		root: root, sink: sink, sources: make(map[string]string), startPlayer: startPlayer,
+		root: root, sink: sink, sources: make(map[string]localCopy), startPlayer: startPlayer, log: func(string, ...any) {},
 		youtube: youtube.NewResolver(), youtubeQualities: make(map[string]int), sponsorBlock: true, autoOffer: true,
 		streamFactory: tailcattransport.Factory{}, streamCapabilities: make(map[string]string),
-		pendingStreams: make(map[string]*pendingStream), pendingRequestOffers: make(map[string]string),
+		streamFailures: make(map[failureKey]*streamFailure),
+	}
+}
+
+// SetDiagnostics directs diagnostic messages, for example about stream
+// transfers, to logf. It must be called before the service is used.
+func (s *Service) SetDiagnostics(logf func(format string, args ...any)) {
+	if logf != nil {
+		s.log = logf
 	}
 }

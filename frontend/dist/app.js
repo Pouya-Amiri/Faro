@@ -36,6 +36,11 @@ let addingPlaylistURL = false;
 let youtubeSupport = { ytDlp: "", runtime: "", problem: "" };
 let streamingAvailable = false;
 let streamState = { state: "idle", offerId: "", route: "" };
+// roomEpoch changes whenever a room is entered or left; asynchronous results
+// check it so a reply meant for a room that was left is not applied.
+// roomOpen is false outside a room, where late room events are ignored.
+let roomEpoch = 0;
+let roomOpen = false;
 // How closely this participant's own player follows the room (from the backend).
 let syncStatus = { state: "idle", driftSeconds: 0 };
 let legalInfoLoaded = false;
@@ -725,13 +730,23 @@ async function indexSavedDirectories() {
 
 async function refreshAvailability() {
   if (!snapshot || !hasBackend) return;
-  try { availability = await invoke("PlaylistAvailability"); renderPlaylist(); } catch (_) {}
+  const epoch = roomEpoch;
+  try {
+    const result = await invoke("PlaylistAvailability");
+    // A reply for a room that was left meanwhile describes the wrong queue.
+    if (epoch !== roomEpoch) return;
+    availability = result;
+    renderPlaylist();
+  } catch (_) {}
 }
 
 async function refreshStreamingSupport() {
   if (!snapshot || !hasBackend) return;
-  try { streamingAvailable = Boolean(await invoke("StreamingAvailable")); }
-  catch (_) { streamingAvailable = false; }
+  const epoch = roomEpoch;
+  let available = false;
+  try { available = Boolean(await invoke("StreamingAvailable")); } catch (_) {}
+  if (epoch !== roomEpoch) return;
+  streamingAvailable = available;
   if (snapshot) render();
 }
 
@@ -1466,7 +1481,7 @@ function renderMediaKind(media) {
   }
   const parts = media.sizeBytes ? [formatBytes(media.sizeBytes)] : [];
   if (streamState.state === "active") {
-    parts.push("Direct P2P");
+    parts.push({ unavailable: "No direct path", reconnecting: "Reconnecting", cached: "Cached locally" }[streamState.route] || "Direct P2P");
     const { cachedBytes = 0, totalBytes = 0, bytesPerSecond = 0 } = streamState;
     if (totalBytes > 0) {
       const percent = Math.floor(cachedBytes / totalBytes * 100);
@@ -1478,7 +1493,7 @@ function renderMediaKind(media) {
   }
   badge.textContent = parts.join(" · ");
   badge.title = streamState.state === "active" && streamState.totalBytes > 0
-    ? `${formatBytes(streamState.cachedBytes) || "0 B"} of ${formatBytes(streamState.totalBytes)} cached on this device`
+    ? `${formatBytes(streamState.cachedBytes) || "0 B"} of ${formatBytes(streamState.totalBytes)} cached on this device${streamState.error ? `\nLast transfer problem: ${streamState.error}` : ""}`
     : "";
 }
 
@@ -1724,15 +1739,23 @@ async function prepareYouTubeSource(source) {
   return info;
 }
 
+// Each Play click supersedes the previous one: a slow first click that
+// finishes preparing after a second click must not select its item.
+let playGeneration = 0;
 async function playPlaylist(index) {
   const item = snapshot?.playlist?.items?.[index];
   if (!item || !canControl()) return;
+  const generation = ++playGeneration;
+  const epoch = roomEpoch;
+  const current = () => generation === playGeneration && epoch === roomEpoch;
   try {
     if (item.url) await prepareYouTubeSource(item.url);
+    if (!current()) return;
     // The ID picks the right item even if the queue moved meanwhile.
     await invoke("SelectPlaylist", index, item.id);
+    if (!current()) return;
     await invoke("SetPaused", false);
-  } catch (error) { showError(error); }
+  } catch (error) { if (current()) showError(error); }
 }
 
 function friendsMissing(media) {
@@ -1937,15 +1960,26 @@ function setConnection(status) {
 
 async function enterRoom(request) {
   lastConnectionRequest = request;
-  await invoke("Connect", request);
-  snapshot = normalizeSnapshot(await invoke("Snapshot"));
-  hosted = await invoke("ServerStatus");
+  const epoch = ++roomEpoch;
+  roomOpen = true;
+  // The saved settings travel with the connection, so the room's first
+  // automatic stream or share already follows them.
+  try {
+    await invoke("Connect", { ...request, preferences: {
+      sponsorBlock: preferences.sponsorBlock !== false, autoOffer: preferences.autoOffer !== false,
+      chatOverlay: preferences.chatOverlay !== false, streamCacheLimit: streamCacheLimit(),
+    } });
+  } catch (error) {
+    if (epoch === roomEpoch) roomOpen = false;
+    throw error;
+  }
+  const roomSnapshot = normalizeSnapshot(await invoke("Snapshot"));
+  const status = await invoke("ServerStatus");
+  if (epoch !== roomEpoch) return;
+  snapshot = roomSnapshot;
+  hosted = status;
   setConnection({ state: "connected" });
   render();
-  await invoke("SetSponsorBlockEnabled", preferences.sponsorBlock !== false);
-  await invoke("SetAutoOfferEnabled", preferences.autoOffer !== false);
-  await invoke("SetChatOverlayEnabled", preferences.chatOverlay !== false);
-  await invoke("SetStreamCacheLimit", streamCacheLimit());
   // Indexing can hash thousands of files. The room is already usable, so keep
   // discovery in the background and refresh availability as results arrive.
   void indexSavedDirectories();
@@ -2197,6 +2231,9 @@ async function leaveRoomAfterKick(message) {
 }
 
 function closeRoomView() {
+  roomEpoch++;
+  roomOpen = false;
+  playGeneration++;
   hosted = { running: false };
   snapshot = null; timeline = []; playlistHistory = [];
   playlistRenderKey = ""; participantsRenderKey = ""; availabilityKey = "";
@@ -3331,6 +3368,9 @@ let connectionEpoch = 0;
 let availabilityKey = "";
 let streamingCheckEpoch = -1;
 function receive(event) {
+  // Outside a room only connection changes and the hosted server's failures
+  // matter; anything else is a late event from the room that was left.
+  if (!roomOpen && !event.connection && event.error?.code !== "local_server") return;
   if (event.connection) {
     setConnection(event.connection);
     if (event.connection.state === "connected") {
@@ -3364,7 +3404,7 @@ function receive(event) {
       if (streamState.state === "active" && streamState.offerId === next.offerId) {
         Object.assign(streamState, {
           cachedBytes: next.cachedBytes || 0, totalBytes: next.totalBytes, bytesPerSecond: next.bytesPerSecond || 0,
-          cachedRanges: next.cachedRanges || [],
+          cachedRanges: next.cachedRanges || [], route: next.route || streamState.route, error: next.error || "",
         });
         if (snapshot) renderMediaKind(referenceMedia());
         renderStreamCache();

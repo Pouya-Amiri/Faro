@@ -151,8 +151,8 @@ func TestAppStreamsOfferedFileThroughFakeTransport(t *testing.T) {
 	var gatewayURL string
 	for gatewayURL == "" {
 		viewer.mu.RLock()
-		if viewer.streamGateway != nil {
-			gatewayURL = viewer.streamGateway.URL()
+		if viewer.streamGatewayLocked() != nil {
+			gatewayURL = viewer.streamGatewayLocked().URL()
 		}
 		viewer.mu.RUnlock()
 		if gatewayURL != "" {
@@ -181,7 +181,7 @@ func TestAppStreamsOfferedFileThroughFakeTransport(t *testing.T) {
 		t.Fatalf("unexpected streamed response: status=%d bytes=%d", response.StatusCode, len(body))
 	}
 	viewer.mu.RLock()
-	identity := cloneStreamMedia(viewer.streamIdentity)
+	identity := viewer.streamMediaLocked()
 	viewer.mu.RUnlock()
 	if identity == nil || !strings.HasPrefix(identity.Fingerprint, "file-v1:") {
 		t.Fatalf("viewer did not preserve file identity: %#v", identity)
@@ -247,10 +247,10 @@ func TestStreamInterruptedReconnectRestoresSyncWithoutPublishingDeadGateway(t *t
 	wait("viewer did not start initial stream", func() bool {
 		viewer.mu.RLock()
 		defer viewer.mu.RUnlock()
-		if viewer.streamGateway == nil {
+		if viewer.streamGatewayLocked() == nil {
 			return false
 		}
-		deadGatewayURL = viewer.streamGateway.URL()
+		deadGatewayURL = viewer.streamGatewayLocked().URL()
 		return viewer.sync != nil
 	})
 	viewer.mu.RLock()
@@ -262,7 +262,7 @@ func TestStreamInterruptedReconnectRestoresSyncWithoutPublishingDeadGateway(t *t
 	wait("viewer did not detach interrupted stream", func() bool {
 		viewer.mu.RLock()
 		defer viewer.mu.RUnlock()
-		return viewer.client == nil && viewer.streamGateway == nil
+		return viewer.client == nil && viewer.streamGatewayLocked() == nil
 	})
 	if err := host.StopOfferingStream(); err != nil {
 		t.Fatal(err)
@@ -305,7 +305,7 @@ func TestStreamInterruptedReconnectRestoresSyncWithoutPublishingDeadGateway(t *t
 	wait("viewer did not reacquire stream after reconnect", func() bool {
 		viewer.mu.RLock()
 		defer viewer.mu.RUnlock()
-		return viewer.streamGateway != nil
+		return viewer.streamGatewayLocked() != nil
 	})
 	if err := host.Seek(37); err != nil {
 		t.Fatal(err)
@@ -463,7 +463,7 @@ func TestPlayAfterRemovingClosedPlayerSourceOpensSelectedItem(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	service.releasePlayer(first, "")
+	service.releasePlayer(first, "", true)
 	if err := service.SetPlaylist([]PlaylistInput{{Label: "Winner", Source: winner}}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -767,7 +767,7 @@ func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	s.releasePlayer(selectedPlayer, "")
+	s.releasePlayer(selectedPlayer, "", true)
 	if err := s.SetPaused(false); err != nil {
 		t.Fatal(err)
 	}
@@ -855,7 +855,7 @@ func TestExplicitPlayRequestsAvailableStreamForDismissedViewer(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	viewer.mu.RLock()
-	activeBeforePlay := viewer.streamGateway != nil || viewer.player != nil
+	activeBeforePlay := viewer.streamGatewayLocked() != nil || viewer.player != nil
 	viewer.mu.RUnlock()
 	if activeBeforePlay {
 		t.Fatal("dismissed viewer started streaming before explicit Play")
@@ -865,7 +865,7 @@ func TestExplicitPlayRequestsAvailableStreamForDismissedViewer(t *testing.T) {
 	}
 	for {
 		viewer.mu.RLock()
-		active := viewer.streamGateway != nil && viewer.player != nil
+		active := viewer.streamGatewayLocked() != nil && viewer.player != nil
 		viewer.mu.RUnlock()
 		if active {
 			break
@@ -934,7 +934,7 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 	waitForState("viewer did not connect to the offered stream automatically", func() bool {
 		viewer.mu.RLock()
 		defer viewer.mu.RUnlock()
-		return viewer.streamGateway != nil
+		return viewer.streamGatewayLocked() != nil
 	})
 	if err := host.SetPlaylist([]PlaylistInput{{
 		ID: snapshot.Playlist.Items[1].ID, Label: snapshot.Playlist.Items[1].Label,
@@ -947,7 +947,7 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 		hostStopped := host.streamPublisher == nil
 		host.mu.RUnlock()
 		viewer.mu.RLock()
-		viewerStopped := viewer.streamGateway == nil
+		viewerStopped := viewer.streamGatewayLocked() == nil
 		viewer.mu.RUnlock()
 		return hostStopped && viewerStopped
 	})
@@ -973,18 +973,21 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 	if err := host.OfferPlaylistStream(snapshot.Playlist.Items[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	waitForState("viewer did not reconnect after the file was added back", func() bool {
+	waitForState("viewer did not reconnect and cache the file after it was added back", func() bool {
 		viewer.mu.RLock()
 		defer viewer.mu.RUnlock()
-		return viewer.streamGateway != nil
+		gateway := viewer.streamGatewayLocked()
+		return gateway != nil && gateway.Complete()
 	})
 	if err := host.StopOfferingStream(); err != nil {
 		t.Fatal(err)
 	}
-	waitForState("viewer retained the explicitly stopped stream", func() bool {
+	// The whole file is already cached, so the viewer keeps playing it
+	// without a provider instead of stopping.
+	waitForState("viewer did not keep playing the fully cached stream after the offer ended", func() bool {
 		viewer.mu.RLock()
 		defer viewer.mu.RUnlock()
-		return viewer.streamGateway == nil && viewer.currentSource == "" && viewer.selectedItem == ""
+		return viewer.stream != nil && viewer.stream.cached && viewer.streamGatewayLocked() != nil
 	})
 	if err := host.SelectPlaylist(0, ""); err != nil {
 		t.Fatal(err)
@@ -999,6 +1002,12 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 		state, stateErr := mediaPlayer.State(context.Background())
 		return stateErr == nil && state.Source == nextURL
 	})
+	viewer.mu.RLock()
+	retired := viewer.stream == nil
+	viewer.mu.RUnlock()
+	if !retired {
+		t.Fatal("the cached stream outlived its queue selection")
+	}
 }
 
 func TestRemovedPlaylistOfferIsWithdrawnAfterPlayerWasClosed(t *testing.T) {
@@ -1333,7 +1342,7 @@ func TestPlaylistAvailabilitySharedAndClosedSelectionWaitsForExplicitPlay(t *tes
 	host.mu.RLock()
 	first := host.player
 	host.mu.RUnlock()
-	host.releasePlayer(first, "")
+	host.releasePlayer(first, "", true)
 	// Room reconciliation must respect the user's decision to close the player.
 	client, _ := host.connected()
 	host.applySelectedPlaylist(context.Background(), client)
@@ -1555,7 +1564,7 @@ func TestSelectedFileIsSharedAutomaticallyWithParticipantsWithoutIt(t *testing.T
 	receiving := func() bool {
 		viewer.mu.RLock()
 		defer viewer.mu.RUnlock()
-		return viewer.streamGateway != nil
+		return viewer.streamGatewayLocked() != nil
 	}
 
 	// Selecting the file (as clicking it or a wheel win does) shares it
@@ -1723,7 +1732,7 @@ func TestConcurrentStreamRequestsClaimTheOfferOnce(t *testing.T) {
 	waitFor(t, "the claimed stream never started", func() bool {
 		viewer.mu.RLock()
 		defer viewer.mu.RUnlock()
-		return viewer.streamGateway != nil
+		return viewer.streamGatewayLocked() != nil
 	})
 }
 

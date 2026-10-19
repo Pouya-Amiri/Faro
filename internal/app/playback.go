@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	faroclient "github.com/Pouya-Amiri/Faro/internal/client"
 	"github.com/Pouya-Amiri/Faro/internal/player"
 	"github.com/Pouya-Amiri/Faro/internal/player/discovery"
 	"github.com/Pouya-Amiri/Faro/internal/player/mpv"
@@ -93,12 +94,12 @@ func (s *Service) consumePlayer(ctx context.Context, mediaPlayer player.Player) 
 		select {
 		case <-playerDone:
 			if ctx.Err() == nil {
-				s.releasePlayer(mediaPlayer, "Player closed. Play an item to reopen it.")
+				s.releasePlayer(mediaPlayer, "Player closed. Play an item to reopen it.", true)
 			}
 			return
 		case event, ok := <-mediaPlayer.Events():
 			if !ok {
-				s.releasePlayer(mediaPlayer, "Player closed. Play an item to reopen it.")
+				s.releasePlayer(mediaPlayer, "Player closed. Play an item to reopen it.", true)
 				return
 			}
 			if event.Kind == player.EventClosed {
@@ -109,41 +110,22 @@ func (s *Service) consumePlayer(ctx context.Context, mediaPlayer player.Player) 
 				if event.Err != nil {
 					message = "Player closed: " + event.Err.Error() + ". Faro is still connected."
 				}
-				s.releasePlayer(mediaPlayer, message)
+				s.releasePlayer(mediaPlayer, message, true)
 				return
 			}
 			client, _ := s.currentConnection()
 			if client == nil {
 				continue
 			}
+			if event.Kind == player.EventFailed && event.Err != nil {
+				s.log("player: %v", event.Err)
+				s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "player_failed", Message: event.Err.Error()}})
+			}
 			s.mu.RLock()
 			openingMedia := s.openingMedia
 			s.mu.RUnlock()
 			if event.Kind == player.EventMedia && !openingMedia {
-				s.mu.Lock()
-				streamIdentity := cloneStreamMedia(s.streamIdentity)
-				if s.streamGateway == nil || event.State.Source != s.streamGateway.URL() {
-					streamIdentity = nil
-				} else if streamIdentity != nil && streamIdentity.DurationSeconds <= 0 && event.State.DurationSeconds > 0 {
-					// The stream opened without a known duration and the
-					// player has just found it.
-					streamIdentity.DurationSeconds = event.State.DurationSeconds
-					s.streamIdentity.DurationSeconds = event.State.DurationSeconds
-				}
-				s.mu.Unlock()
-				media := streamIdentity
-				var err error
-				if media == nil {
-					identitySource := s.logicalSourceForPlayerEvent(event.State.Source)
-					media, err = s.identifyAndRemember(identitySource, event.State.Title, event.State.DurationSeconds)
-				}
-				if err == nil {
-					if err := client.SetMedia(protocol.MediaSet{Media: media}); err != nil {
-						s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "media_publish", Message: err.Error()}})
-					}
-				} else if event.State.Source != "" {
-					s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "media_identity", Message: err.Error()}})
-				}
+				s.publishPlayerMedia(ctx, client, mediaPlayer, event.State)
 			}
 			if !canControlPlayback(client.Snapshot()) {
 				s.observeLocalChange(event.State)
@@ -189,6 +171,59 @@ func (s *Service) consumePlayer(ctx context.Context, mediaPlayer player.Player) 
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// publishPlayerMedia announces a media change the player reported outside
+// Faro's own loads: the duration becoming known, a file opened in the
+// player itself, or the file ending. The information belongs to the media
+// generation current when it arrived, so it is dropped if a load starts
+// meanwhile.
+func (s *Service) publishPlayerMedia(ctx context.Context, client *faroclient.Client, mediaPlayer player.Player, state player.State) {
+	if state.Source == "" {
+		// Nothing is loaded any more. Events are delivered asynchronously, so
+		// make sure that is still true before letting go of the media.
+		stateCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		current, err := mediaPlayer.State(stateCtx)
+		cancel()
+		if err != nil || current.Source != "" {
+			return
+		}
+		s.mu.Lock()
+		if s.player != mediaPlayer || s.openingMedia || s.currentSource == "" {
+			s.mu.Unlock()
+			return
+		}
+		gen := s.invalidateMediaLocked()
+		s.mu.Unlock()
+		s.log("player: the media ended")
+		_ = s.publishMedia(client, gen, nil)
+		return
+	}
+	s.mu.Lock()
+	gen := s.mediaGen
+	var media *protocol.Media
+	if stream := s.stream; stream != nil && stream.gateway != nil && state.Source == stream.gateway.URL() {
+		if stream.media.DurationSeconds <= 0 && state.DurationSeconds > 0 {
+			// The stream opened without a known duration and the player has
+			// just found it.
+			stream.media.DurationSeconds = state.DurationSeconds
+		}
+		identity := stream.media
+		media = &identity
+	}
+	s.mu.Unlock()
+	var err error
+	if media == nil {
+		identitySource := s.logicalSourceForPlayerEvent(state.Source)
+		media, err = s.identifyAndRemember(identitySource, state.Title, state.DurationSeconds)
+	}
+	if err != nil {
+		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "media_identity", Message: err.Error()}})
+		return
+	}
+	if err := s.publishMedia(client, gen, media); err != nil {
+		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "media_publish", Message: err.Error()}})
 	}
 }
 
@@ -293,7 +328,9 @@ func (s *Service) observeLocalChange(current player.State) (bool, bool) {
 	previous := s.lastPlayer
 	s.lastPlayer = current
 	defer s.mu.Unlock()
-	if s.openingMedia || time.Now().Before(s.suppressUntil) || previous.ObservedAt.IsZero() {
+	// A change of media is not a playback action: the jump to zero and the
+	// stop when a file ends must not seek or pause everyone else.
+	if s.openingMedia || time.Now().Before(s.suppressUntil) || previous.ObservedAt.IsZero() || current.Source != previous.Source {
 		return false, false
 	}
 	threshold := .75

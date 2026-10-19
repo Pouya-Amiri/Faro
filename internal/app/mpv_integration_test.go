@@ -81,7 +81,7 @@ func testMPVRoom(t *testing.T, streamed bool) {
 		deadline := time.Now().Add(15 * time.Second)
 		for {
 			guest.mu.RLock()
-			active := guest.streamGateway != nil
+			active := guest.streamGatewayLocked() != nil
 			guest.mu.RUnlock()
 			if active {
 				break

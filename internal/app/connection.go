@@ -32,9 +32,13 @@ func (s *Service) Connect(request ConnectionRequest) error {
 	if request.ClientVersion == "" {
 		request.ClientVersion = buildinfo.EffectiveVersion()
 	}
+	// Leaving the current room also cancels an attempt still in progress:
+	// the newest Connect is the one that counts.
 	s.Disconnect()
 	ctx, cancel := context.WithCancel(s.root)
 	s.mu.Lock()
+	s.connectAttempt++
+	attempt := s.connectAttempt
 	s.connectCancel = cancel
 	s.mu.Unlock()
 	client, err := faroclient.Connect(ctx, faroclient.Config{
@@ -45,21 +49,26 @@ func (s *Service) Connect(request ConnectionRequest) error {
 		Capabilities: []protocol.Capability{protocol.CapabilityMediaStreamV1, protocol.CapabilityMediaAvailabilityV1},
 	})
 	s.mu.Lock()
-	s.connectCancel = nil
-	s.mu.Unlock()
-	if ctx.Err() != nil {
+	current := s.connectAttempt == attempt && ctx.Err() == nil
+	if s.connectAttempt == attempt {
+		s.connectCancel = nil
+	}
+	if !current || err != nil {
+		s.mu.Unlock()
 		if client != nil {
 			_ = client.Close()
 		}
 		cancel()
-		return ErrConnectCancelled
-	}
-	if err != nil {
-		cancel()
+		if !current {
+			return ErrConnectCancelled
+		}
 		return err
 	}
+	if preferences := request.Preferences; preferences != nil {
+		s.sponsorBlock, s.autoOffer = preferences.SponsorBlock, preferences.AutoOffer
+		s.streamCache = cacheOptions(preferences.StreamCacheLimit)
+	}
 	welcome := client.Welcome()
-	s.mu.Lock()
 	s.sessionCtx, s.cancel, s.client, s.player, s.sync = ctx, cancel, client, nil, nil
 	s.playerCancel = nil
 	s.playerContext = nil
@@ -84,6 +93,10 @@ func (s *Service) Connect(request ConnectionRequest) error {
 	s.localPlaybackPending = false
 	s.request = request
 	s.mu.Unlock()
+	if request.Preferences != nil {
+		s.SetChatOverlayEnabled(request.Preferences.ChatOverlay)
+	}
+	s.log("room: connected")
 	go s.consumeClient(ctx, client)
 	go s.applySelectedPlaylist(ctx, client)
 	go s.reconcilePlaylistStreams(ctx, client)
@@ -120,7 +133,7 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 		for {
 			select {
 			case <-playlistUpdates:
-				s.applySelectedPlaylist(ctx, client)
+				s.startSelectedPlaylist(ctx, client)
 			case <-client.Done():
 				return
 			case <-ctx.Done():
@@ -143,7 +156,7 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 				go s.activateStream(ctx, client, *event.StreamGrant)
 			}
 			if event.StreamRevoked != nil {
-				s.handleStreamRevoked(client, *event.StreamRevoked)
+				go s.handleStreamRevoked(client, *event.StreamRevoked)
 			}
 			if event.Type == protocol.TypePlaybackUpdated {
 				snapshot := client.Snapshot()
@@ -177,6 +190,9 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 				// The activity arrives after the playlist and playback updates
 				// it describes, so the selected item is applied again once the
 				// dismissal is lifted.
+				if event.Activity.Action == protocol.ActivityPlaylistPlayed || event.Activity.Action == protocol.ActivityPlaybackResumed {
+					s.resumeStreamingIntent()
+				}
 				if s.applyActivityPlaybackIntent(client, *event.Activity) {
 					select {
 					case playlistUpdates <- struct{}{}:
@@ -289,8 +305,8 @@ func (s *Service) reconnect(ctx context.Context, failed *faroclient.Client) {
 		s.mu.Unlock()
 		return
 	}
-	streams := s.detachStreamingLocked()
-	streamInterrupted := streams.gateway != nil
+	streamInterrupted := s.stream != nil && s.stream.gateway != nil && s.currentSource == s.stream.gateway.URL()
+	closeStreams := s.detachStreamingLocked()
 	mediaPlayer := s.player
 	// A failed client is no longer an authoritative snapshot source. Clear both
 	// pointers before backoff so the player loop cannot repeatedly apply the
@@ -299,7 +315,8 @@ func (s *Service) reconnect(ctx context.Context, failed *faroclient.Client) {
 	s.sync = nil
 	s.localPlaybackPending = false
 	s.mu.Unlock()
-	streams.close()
+	s.log("room: connection lost; reconnecting")
+	closeStreams()
 	if streamInterrupted && mediaPlayer != nil {
 		pauseCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		_ = mediaPlayer.SetPaused(pauseCtx, true)
@@ -362,13 +379,13 @@ func (s *Service) reconnect(ctx context.Context, failed *faroclient.Client) {
 			cancel()
 			if stateErr == nil && state.Source != "" {
 				s.mu.RLock()
-				source := s.currentSource
+				source, gen := s.currentSource, s.mediaGen
 				s.mu.RUnlock()
 				if source == "" {
 					source = state.Source
 				}
 				if media, identityErr := s.identifyAndRemember(source, state.Title, state.DurationSeconds); identityErr == nil {
-					_ = client.SetMedia(protocol.MediaSet{Media: media})
+					_ = s.publishMedia(client, gen, media)
 				}
 			}
 		}
@@ -401,15 +418,6 @@ func (s *Service) connected() (*faroclient.Client, error) {
 		return nil, errors.New("not connected")
 	}
 	return s.client, nil
-}
-
-func (s *Service) connectedPlayer() (*faroclient.Client, player.Player, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.client == nil || s.player == nil {
-		return nil, nil, errors.New("no media player is open")
-	}
-	return s.client, s.player, nil
 }
 
 type playerStartIntent uint8
@@ -485,7 +493,8 @@ func (s *Service) ensurePlayer(intent playerStartIntent) (*faroclient.Client, pl
 		s.player, s.playerCancel, s.sync = nil, nil, nil
 		s.playerContext = nil
 		s.playerDismissed = intent == playerStartAutomatic
-		s.selectedItem, s.selectedItemIdentity = "", ""
+		s.cancelLoadLocked()
+		s.invalidateMediaLocked()
 		s.mu.Unlock()
 		if oldCancel != nil {
 			oldCancel()
@@ -523,30 +532,31 @@ func (s *Service) ensurePlayer(intent playerStartIntent) (*faroclient.Client, pl
 	return client, started, nil
 }
 
-func (s *Service) releasePlayer(target player.Player, message string) {
-	s.releasePlayerWithDismissal(target, message, true)
-}
-
-func (s *Service) releasePlayerWithDismissal(target player.Player, message string, dismissed bool) {
+// releasePlayer closes target if it is still the player. closedByUser means
+// the player went away on its own (its window was closed or it exited):
+// automatic playback stays off until someone plays something, and the room
+// is paused, since this participant stopped watching. Otherwise an obsolete
+// player is being retired automatically, which must not touch the room's
+// playback that the current selection now owns.
+func (s *Service) releasePlayer(target player.Player, message string, closedByUser bool) {
 	s.playerLifecycleMu.Lock()
+	defer s.playerLifecycleMu.Unlock()
 	s.mu.Lock()
 	if s.player != target {
 		s.mu.Unlock()
-		s.playerLifecycleMu.Unlock()
 		return
 	}
 	client, cancel := s.client, s.playerCancel
 	s.player, s.playerCancel, s.sync = nil, nil, nil
 	s.playerContext = nil
-	s.playerDismissed = dismissed
-	if dismissed {
+	s.playerDismissed = closedByUser
+	if closedByUser {
 		s.playerCloseGeneration++
-	}
-	s.selectedItem, s.selectedItemIdentity = "", ""
-	if !dismissed {
-		s.currentSource, s.currentPlayerSource = "", ""
+	} else {
 		s.manualSource = ""
 	}
+	s.cancelLoadLocked()
+	gen := s.invalidateMediaLocked()
 	s.localPlaybackPending = false
 	s.lastPlayer = player.State{}
 	s.lastRemoteRevision = 0
@@ -558,16 +568,17 @@ func (s *Service) releasePlayerWithDismissal(target player.Player, message strin
 		cancel()
 	}
 	_ = target.Close()
-	defer s.playerLifecycleMu.Unlock()
 	if client != nil {
-		snapshot := localClockSnapshot(client)
-		if canControlPlayback(snapshot) && !snapshot.Playback.Paused {
-			_ = client.SetPlayback(protocol.PlaybackSet{
-				PositionSeconds: snapshot.Playback.PositionSeconds, Paused: true,
-				Rate: normalizedRate(snapshot.Playback.Rate),
-			})
+		if closedByUser {
+			snapshot := localClockSnapshot(client)
+			if canControlPlayback(snapshot) && !snapshot.Playback.Paused {
+				_ = client.SetPlayback(protocol.PlaybackSet{
+					PositionSeconds: snapshot.Playback.PositionSeconds, Paused: true,
+					Rate: normalizedRate(snapshot.Playback.Rate),
+				})
+			}
 		}
-		_ = client.SetMedia(protocol.MediaSet{Media: nil})
+		_ = s.publishMedia(client, gen, nil)
 	}
 	if message != "" {
 		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "player_closed", Message: message}})
@@ -601,18 +612,29 @@ func localClockSnapshot(client *faroclient.Client) protocol.Snapshot {
 	return snapshot
 }
 
+// Disconnect leaves the room, cancelling a connection attempt in progress.
 func (s *Service) Disconnect() {
 	s.playerLifecycleMu.Lock()
 	s.mu.Lock()
 	cancel, playerCancel, client, mediaPlayer := s.cancel, s.playerCancel, s.client, s.player
-	streams := s.detachStreamingLocked()
+	connectCancel := s.connectCancel
+	s.connectAttempt++
+	s.connectCancel = nil
+	closeStreams := s.detachStreamingLocked()
+	s.cancelLoadLocked()
+	s.invalidateMediaLocked()
 	s.sessionCtx, s.cancel, s.playerCancel, s.client, s.player, s.sync = nil, nil, nil, nil, nil, nil
+	s.playerContext = nil
 	s.playerDismissed = false
 	s.syncState, s.syncDrift = "", 0
 	s.mu.Unlock()
 	s.playerLifecycleMu.Unlock()
+	if connectCancel != nil {
+		connectCancel()
+	}
 	if cancel != nil {
 		cancel()
+		s.log("room: left")
 	}
 	if playerCancel != nil {
 		playerCancel()
@@ -623,7 +645,7 @@ func (s *Service) Disconnect() {
 	if mediaPlayer != nil {
 		_ = mediaPlayer.Close()
 	}
-	streams.close()
+	closeStreams()
 }
 
 // InRoom reports whether this participant is in a room, including while it

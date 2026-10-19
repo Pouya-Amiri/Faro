@@ -8,6 +8,7 @@ import (
 
 	faroclient "github.com/Pouya-Amiri/Faro/internal/client"
 	"github.com/Pouya-Amiri/Faro/internal/invite"
+	"github.com/Pouya-Amiri/Faro/internal/player"
 	"github.com/Pouya-Amiri/Faro/internal/protocol"
 )
 
@@ -55,7 +56,10 @@ func (s *Service) KickParticipant(participantID string) error {
 }
 
 func (s *Service) SetPaused(paused bool) error {
-	client, mediaPlayer, err := s.connectedPlayer()
+	if !paused {
+		s.resumeStreamingIntent()
+	}
+	client, mediaPlayer, err := s.playerWithMedia()
 	if err != nil {
 		client, err = s.connected()
 		if err != nil {
@@ -78,7 +82,7 @@ func (s *Service) SetPaused(paused bool) error {
 				s.mu.Unlock()
 				s.reconcilePlaylistStreams(s.root, client)
 				s.mu.RLock()
-				requesting := len(s.pendingStreams) != 0 || s.streamActivation != nil || s.streamActivationCancel != nil
+				requesting := s.stream != nil
 				s.mu.RUnlock()
 				if !requesting {
 					return errors.New("locate a local copy or ask someone to offer the selected item")
@@ -92,7 +96,7 @@ func (s *Service) SetPaused(paused bool) error {
 			if err := s.reopenMediaAtRoomClock(source, paused); err != nil {
 				return err
 			}
-			client, mediaPlayer, err = s.connectedPlayer()
+			client, mediaPlayer, err = s.playerWithMedia()
 			if err != nil {
 				return err
 			}
@@ -133,25 +137,37 @@ func (s *Service) SetPaused(paused bool) error {
 // sourceForPlayback resolves only the room's current queue selection. Explicit
 // media opened outside the queue is tracked separately by manualSource.
 func (s *Service) sourceForPlayback(client *faroclient.Client) string {
-	playlist := client.Snapshot().Playlist
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if playlist.Selected >= 0 && playlist.Selected < len(playlist.Items) {
-		item := playlist.Items[playlist.Selected]
-		if item.URL != "" {
-			return item.URL
-		}
-		if item.Media != nil {
-			if source := s.sources[item.Media.Fingerprint]; source != "" {
-				return source
-			}
-			if s.streamGateway != nil && s.streamIdentity != nil && s.streamIdentity.Fingerprint == item.Media.Fingerprint {
-				return s.streamGateway.URL()
-			}
-		}
+	item, ok := selectedPlaylistItem(client.Snapshot().Playlist)
+	if !ok {
 		return ""
 	}
+	if item.URL != "" {
+		return item.URL
+	}
+	if item.Media == nil {
+		return ""
+	}
+	if source := s.localSource(item.Media.Fingerprint); source != "" {
+		return source
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if stream := s.stream; stream != nil && stream.gateway != nil && (stream.phase == streamActive || stream.phase == streamResuming) && stream.media.Fingerprint == item.Media.Fingerprint {
+		return stream.gateway.URL()
+	}
 	return ""
+}
+
+// playerWithMedia returns the player when it shows media or is loading it.
+// A player with nothing loaded, such as after the file ended, is treated
+// like no player: room controls are published, and Play opens the media.
+func (s *Service) playerWithMedia() (*faroclient.Client, player.Player, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.client == nil || s.player == nil || s.currentSource == "" && !s.openingMedia {
+		return nil, nil, errors.New("no media is loaded")
+	}
+	return s.client, s.player, nil
 }
 
 func (s *Service) Seek(seconds float64) error {
@@ -159,7 +175,7 @@ func (s *Service) Seek(seconds float64) error {
 		return errors.New("seek position must be a number")
 	}
 	seconds = max(seconds, 0)
-	client, mediaPlayer, err := s.connectedPlayer()
+	client, mediaPlayer, err := s.playerWithMedia()
 	if err != nil {
 		// Like pause and speed, the position is room state: with no local
 		// player it is still published, and players follow it when opened.
@@ -193,7 +209,7 @@ func (s *Service) SetRate(rate float64) error {
 		return errors.New("playback rate must be between 0.25 and 4")
 	}
 	rate = math.Round(rate*100) / 100
-	client, mediaPlayer, err := s.connectedPlayer()
+	client, mediaPlayer, err := s.playerWithMedia()
 	if err != nil {
 		// Speed is room state: with no local player it is still published, and
 		// every player (including this one, once opened) follows it.

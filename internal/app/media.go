@@ -21,37 +21,230 @@ import (
 	"github.com/Pouya-Amiri/Faro/internal/youtube"
 )
 
+// mediaOperationTimeout bounds one attempt to load media into the player,
+// including resolving a URL.
+const mediaOperationTimeout = 90 * time.Second
+
+// mediaLoad is one attempt to put a source in the player. Starting a load
+// supersedes the previous one: its context is cancelled, so it stops at its
+// next step, and it can no longer commit. Loads run one at a time under
+// mediaLoadMu, but a superseded one gives way promptly instead of making the
+// next selection wait for it.
+//
+// What the player shows is versioned separately by Service.mediaGen, which
+// advances whenever a load commits or the shown media goes away (the player
+// closed, the file ended, the stream it played was retired). Media is
+// published under the generation it belongs to, so only the latest change
+// reaches the room.
+type mediaLoad struct {
+	key    string // what it loads, to recognize a duplicate request
+	ctx    context.Context
+	cancel context.CancelFunc
+	// done is guarded by Service.mu; transition belongs to the goroutine
+	// running the load.
+	done       bool
+	transition bool
+}
+
+// beginLoad starts a load for key, superseding the load in progress. It
+// returns nil when a load for the same key is already in progress, so a
+// repeated room event does not restart it.
+func (s *Service) beginLoad(parent context.Context, key string) *mediaLoad {
+	ctx, cancel := context.WithTimeout(parent, mediaOperationTimeout)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.load != nil && !s.load.done && s.load.key == key && s.load.ctx.Err() == nil {
+		cancel()
+		return nil
+	}
+	if s.load != nil {
+		s.load.cancel()
+	}
+	s.load = &mediaLoad{key: key, ctx: ctx, cancel: cancel}
+	return s.load
+}
+
+// cancelLoadLocked stops the load in progress, for a player that went away.
+func (s *Service) cancelLoadLocked() {
+	if s.load != nil {
+		s.load.cancel()
+	}
+}
+
+// endLoad releases a load. The caller still holds mediaLoadMu, so an
+// unfinished media transition is ended before the next load can start one.
+func (s *Service) endLoad(load *mediaLoad) {
+	load.cancel()
+	if load.transition {
+		load.transition = false
+		s.endMediaTransition()
+	}
+	s.mu.Lock()
+	load.done = true
+	s.mu.Unlock()
+}
+
+// loadOwnsPlayerLocked reports whether load may still commit: no newer load
+// superseded it, and the session and player it loaded into are current.
+func (s *Service) loadOwnsPlayerLocked(load *mediaLoad, client *faroclient.Client, mediaPlayer player.Player) bool {
+	return load.ctx.Err() == nil && s.load == load && s.client == client && s.player == mediaPlayer
+}
+
+// invalidateMediaLocked records that the player no longer shows what was
+// last committed: the player closed, the file ended, or the stream it
+// played was retired. The selection is cleared so that playing the item
+// again reloads it. A load in progress is newer than what went away and is
+// left alone. It returns the new media generation.
+func (s *Service) invalidateMediaLocked() uint64 {
+	s.mediaGen++
+	s.selectedItem, s.selectedItemIdentity = "", ""
+	s.currentSource, s.currentPlayerSource = "", ""
+	s.sponsorSegments, s.lastSponsorEnd = nil, 0
+	return s.mediaGen
+}
+
+// publishMedia tells the room what this participant's player shows. gen is
+// the media generation the information belongs to: once anything newer has
+// been loaded or the player's media was invalidated, it is dropped, so an
+// abandoned load can never overwrite newer state. Publications are
+// serialized, so the room receives them in generation order.
+func (s *Service) publishMedia(client *faroclient.Client, gen uint64, media *protocol.Media) error {
+	s.mediaPublishMu.Lock()
+	defer s.mediaPublishMu.Unlock()
+	s.mu.RLock()
+	current := s.client == client && s.mediaGen == gen
+	s.mu.RUnlock()
+	if !current {
+		return nil
+	}
+	return client.SetMedia(protocol.MediaSet{Media: media})
+}
+
+// loadResult is what loadSource put in the player.
+type loadResult struct {
+	source       string // the logical source: a path, gateway URL or video page URL
+	playerSource string // what the player reports, such as a resolved CDN URL
+	info         youtube.Info
+	state        player.State
+}
+
+// loadSource opens source in mediaPlayer for load and moves it to the room's
+// position and rate. It starts the media transition that finishLoad ends.
+// If the load fails while it is still the newest, the selection is cleared:
+// opening may already have unloaded what was playing, so playing that again
+// must reload it.
+func (s *Service) loadSource(load *mediaLoad, client *faroclient.Client, mediaPlayer player.Player, source string) (loadResult, error) {
+	s.beginMediaTransition()
+	load.transition = true
+	result, err := s.openSource(load, client, mediaPlayer, source)
+	if err != nil {
+		s.mu.Lock()
+		if s.load == load && s.player == mediaPlayer {
+			s.selectedItem, s.selectedItemIdentity = "", ""
+			s.currentSource, s.currentPlayerSource = "", ""
+		}
+		s.mu.Unlock()
+	}
+	return result, err
+}
+
+func (s *Service) openSource(load *mediaLoad, client *faroclient.Client, mediaPlayer player.Player, source string) (loadResult, error) {
+	info, playerSource, err := s.openPlayerSource(load.ctx, mediaPlayer, source)
+	if err != nil {
+		return loadResult{}, err
+	}
+	state, err := s.waitForPlayerMedia(load.ctx, mediaPlayer, info.Duration)
+	if err != nil {
+		return loadResult{}, err
+	}
+	playback := localClockSnapshot(client).Playback
+	_ = mediaPlayer.Seek(load.ctx, playback.PositionSeconds)
+	_ = mediaPlayer.SetRate(load.ctx, normalizedRate(playback.Rate))
+	if err := load.ctx.Err(); err != nil {
+		return loadResult{}, err
+	}
+	if playerSource == "" {
+		playerSource = source
+	}
+	return loadResult{source: source, playerSource: playerSource, info: info, state: state}, nil
+}
+
+// commitSourceLocked records a committed load's source as what the player
+// shows and returns the media generation to publish it under.
+func (s *Service) commitSourceLocked(result loadResult) uint64 {
+	s.currentSource, s.currentPlayerSource = result.source, result.playerSource
+	s.sponsorSegments = append([]youtube.Segment(nil), result.info.Segments...)
+	s.lastSponsorEnd = 0
+	s.mediaGen++
+	return s.mediaGen
+}
+
+// finishLoad ends a committed load's media transition: the player takes the
+// newest pause state and publish, if given, announces it atomically with
+// queued local controls.
+func (s *Service) finishLoad(load *mediaLoad, mediaPlayer player.Player, fallbackPaused bool, publish func(bool) error) (bool, error) {
+	load.transition = false
+	return s.finishMediaTransition(load.ctx, mediaPlayer, fallbackPaused, publish)
+}
+
+// applySelectedPlaylist makes the player show the room's selected queue item
+// and returns once it is loaded (or nothing needs loading).
 func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.Client) {
-	s.mediaLoadMu.Lock()
-	defer s.mediaLoadMu.Unlock()
+	if plan, ok := s.planSelectedLoad(ctx, client); ok {
+		s.loadSelectedItem(client, plan)
+	}
+}
+
+// startSelectedPlaylist is applySelectedPlaylist for room events: the load
+// runs in the background, so the next event can supersede a slow one.
+func (s *Service) startSelectedPlaylist(ctx context.Context, client *faroclient.Client) {
+	if plan, ok := s.planSelectedLoad(ctx, client); ok {
+		go s.loadSelectedItem(client, plan)
+	}
+}
+
+// selectedLoad is a decision to load a queue item.
+type selectedLoad struct {
+	load     *mediaLoad
+	item     protocol.PlaylistItem
+	identity string
+	source   string
+}
+
+// planSelectedLoad decides what the selection needs and, when that is a
+// load, starts it, superseding any other. Decisions are serialized and each
+// reads the latest selection, so an older decision can never supersede a
+// newer one.
+func (s *Service) planSelectedLoad(ctx context.Context, client *faroclient.Client) (selectedLoad, bool) {
+	s.selectionMu.Lock()
+	defer s.selectionMu.Unlock()
 	if ctx.Err() != nil {
-		return
+		return selectedLoad{}, false
 	}
 	s.mu.RLock()
 	current := s.client == client
 	s.mu.RUnlock()
 	if !current {
-		return
+		return selectedLoad{}, false
 	}
-	playlist := client.Snapshot().Playlist
-	if playlist.Selected < 0 || playlist.Selected >= len(playlist.Items) {
+	item, ok := selectedPlaylistItem(client.Snapshot().Playlist)
+	if !ok {
 		s.stopSelectedPlayback(client, "")
-		return
+		return selectedLoad{}, false
 	}
-	item := playlist.Items[playlist.Selected]
 	identity := playlistItemIdentity(item)
-	s.mu.Lock()
-	if item.ID == s.selectedItem && identity == s.selectedItemIdentity {
-		s.mu.Unlock()
-		return
+	s.mu.RLock()
+	selected := item.ID == s.selectedItem && identity == s.selectedItemIdentity
+	s.mu.RUnlock()
+	if selected {
+		return selectedLoad{}, false
 	}
 	source := item.URL
 	if source == "" && item.Media != nil {
-		source = s.sources[item.Media.Fingerprint]
+		source = s.localSource(item.Media.Fingerprint)
 	}
-	s.mu.Unlock()
 	if source == "" {
-		s.stopSelectedPlayback(client, "")
+		s.stopSelectedPlayback(client, item.ID)
 		// Someone who has the file shares it (or is about to), and the stream
 		// starts on its own; only a file nobody can provide is an error.
 		fingerprint := ""
@@ -63,75 +256,97 @@ func (s *Service) applySelectedPlaylist(ctx context.Context, client *faroclient.
 				Code: "media_missing", Message: fmt.Sprintf("Locate a local copy of %q before playing it", item.Label),
 			}})
 		}
+		return selectedLoad{}, false
+	}
+	load := s.beginLoad(ctx, "item:"+item.ID+"|"+identity)
+	if load == nil {
+		return selectedLoad{}, false
+	}
+	return selectedLoad{load: load, item: item, identity: identity, source: source}, true
+}
+
+func (s *Service) loadSelectedItem(client *faroclient.Client, plan selectedLoad) {
+	load, item, identity, source := plan.load, plan.item, plan.identity, plan.source
+	s.mediaLoadMu.Lock()
+	defer s.mediaLoadMu.Unlock()
+	defer s.endLoad(load)
+	if load.ctx.Err() != nil {
 		return
 	}
-	currentClient, mediaPlayer, err := s.ensurePlayer(playerStartAutomatic)
-	if err != nil || currentClient != client {
-		if err != nil && !errors.Is(err, errPlayerDismissed) {
+	_, mediaPlayer, err := s.ensurePlayer(playerStartAutomatic)
+	if err != nil {
+		if !errors.Is(err, errPlayerDismissed) {
 			s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "open_player", Message: err.Error()}})
 		}
 		return
 	}
-	openCtx, cancel := s.mediaOperationContext(ctx)
-	s.beginMediaTransition()
-	info, err := s.openPlayerSource(openCtx, mediaPlayer, source)
+	result, err := s.loadSource(load, client, mediaPlayer, source)
 	if err != nil {
-		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "open_media", Message: err.Error()}})
-		cancel()
-		s.endMediaTransition()
-		return
-	}
-	state := s.waitForPlayerMedia(openCtx, mediaPlayer, info.Duration)
-	latest := client.Snapshot().Playlist
-	if ctx.Err() != nil || latest.Selected < 0 || latest.Selected >= len(latest.Items) || latest.Items[latest.Selected].ID != item.ID || playlistItemIdentity(latest.Items[latest.Selected]) != identity {
-		cancel()
-		s.endMediaTransition()
-		if ctx.Err() == nil {
-			s.releasePlayerWithDismissal(mediaPlayer, "", false)
+		if load.ctx.Err() == nil {
+			s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "open_media", Message: err.Error()}})
 		}
 		return
 	}
-	playback := localClockSnapshot(client).Playback
-	_ = mediaPlayer.Seek(openCtx, playback.PositionSeconds)
-	_ = mediaPlayer.SetRate(openCtx, normalizedRate(playback.Rate))
-	media := item.Media
+	media := cloneStreamMedia(item.Media)
 	if media == nil {
-		media, _ = s.identifyAndRemember(source, item.Label, firstPositive(info.Duration, state.DurationSeconds))
+		media, _ = s.identifyAndRemember(source, item.Label, firstPositive(result.info.Duration, result.state.DurationSeconds))
 	}
 	if media != nil {
-		copy := *media
-		if info.Title != "" {
-			copy.Title = info.Title
+		if result.info.Title != "" {
+			media.Title = result.info.Title
 		}
-		if info.Duration > 0 {
-			copy.DurationSeconds = info.Duration
-		} else if state.DurationSeconds > 0 {
-			copy.DurationSeconds = state.DurationSeconds
+		if duration := firstPositive(result.info.Duration, result.state.DurationSeconds); duration > 0 {
+			media.DurationSeconds = duration
 		}
-		_ = currentClient.SetMedia(protocol.MediaSet{Media: &copy})
 	}
 	s.mu.Lock()
-	s.selectedItem = item.ID
-	s.selectedItemIdentity = identity
+	latest, ok := selectedPlaylistItem(client.Snapshot().Playlist)
+	if !s.loadOwnsPlayerLocked(load, client, mediaPlayer) || !ok || latest.ID != item.ID || playlistItemIdentity(latest) != identity {
+		// A newer selection supersedes this load and takes over the player.
+		s.mu.Unlock()
+		return
+	}
+	gen := s.commitSourceLocked(result)
+	s.selectedItem, s.selectedItemIdentity = item.ID, identity
 	s.manualSource = ""
 	s.mu.Unlock()
+	if media != nil {
+		_ = s.publishMedia(client, gen, media)
+	}
 	// Playback may have changed while loading (notably when Pause is pressed
 	// just after a wheel spin). Re-read the authoritative state at the last
 	// possible moment and finish atomically with queued local controls.
-	playback = localClockSnapshot(client).Playback
-	if _, err := s.finishMediaTransition(openCtx, mediaPlayer, playback.Paused, nil); err != nil {
+	if _, err := s.finishLoad(load, mediaPlayer, localClockSnapshot(client).Playback.Paused, nil); err != nil {
 		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "player_sync", Message: err.Error()}})
 	}
-	cancel()
 }
 
-func (s *Service) stopSelectedPlayback(client *faroclient.Client, expectedID string) {
-	s.mu.RLock()
-	selected, mediaPlayer := s.client == client && s.selectedItem != "" && (expectedID == "" || s.selectedItem == expectedID), s.player
-	s.mu.RUnlock()
-	if selected && mediaPlayer != nil {
-		// A queue item that lost selection or its source no longer owns playback.
-		s.releasePlayerWithDismissal(mediaPlayer, "", false)
+// stopSelectedPlayback retires what the player shows for a queue item other
+// than selectedID ("" when nothing is selected), which has no local copy to
+// play: a committed item, or one still loading. Media opened outside the
+// queue is left alone, and so is a stream taking over the player for the
+// selection.
+func (s *Service) stopSelectedPlayback(client *faroclient.Client, selectedID string) {
+	s.mu.Lock()
+	if s.client != client {
+		s.mu.Unlock()
+		return
+	}
+	load := s.load
+	inProgress := load != nil && !load.done && load.ctx.Err() == nil
+	if inProgress && strings.HasPrefix(load.key, "stream:") {
+		s.mu.Unlock()
+		return
+	}
+	staleLoad := inProgress && strings.HasPrefix(load.key, "item:") && !strings.HasPrefix(load.key, "item:"+selectedID+"|")
+	if staleLoad {
+		load.cancel()
+	}
+	mediaPlayer := s.player
+	release := mediaPlayer != nil && (staleLoad || s.selectedItem != "" && s.selectedItem != selectedID)
+	s.mu.Unlock()
+	if release {
+		s.releasePlayer(mediaPlayer, "", false)
 	}
 }
 
@@ -317,9 +532,7 @@ func (s *Service) resolvePlaylistInputs(inputs []PlaylistInput) ([]protocol.Play
 			if input.DurationSeconds > 0 {
 				item.Media.DurationSeconds = input.DurationSeconds
 			} else if localPath == "" && item.URL == "" {
-				s.mu.RLock()
-				localPath = s.sources[item.Media.Fingerprint]
-				s.mu.RUnlock()
+				localPath = s.localSource(item.Media.Fingerprint)
 			}
 			if item.Media.DurationSeconds <= 0 && localPath != "" {
 				probes[len(items)] = localPath
@@ -334,27 +547,14 @@ func (s *Service) resolvePlaylistInputs(inputs []PlaylistInput) ([]protocol.Play
 	return items, skipped, nil
 }
 
+// publishPlaylist sends the queue. The update it causes reaches this
+// participant like everyone else, and that is what stops playback of a
+// removed item; waiting for a load in progress here would only make the
+// edit look busy.
 func (s *Service) publishPlaylist(client *faroclient.Client, items []protocol.PlaylistItem, baseRevision *uint64) error {
 	if err := client.SetPlaylist(protocol.PlaylistSet{Items: items, BaseRevision: baseRevision}); err != nil {
 		return err
 	}
-	s.mediaLoadMu.Lock()
-	s.mu.RLock()
-	selectedID := s.selectedItem
-	s.mu.RUnlock()
-	if selectedID != "" {
-		present := false
-		for _, item := range items {
-			if item.ID == selectedID {
-				present = true
-				break
-			}
-		}
-		if !present {
-			s.stopSelectedPlayback(client, selectedID)
-		}
-	}
-	s.mediaLoadMu.Unlock()
 	if err := s.withdrawMissingOffer(client, items); err != nil {
 		return err
 	}
@@ -425,6 +625,7 @@ func (s *Service) SelectPlaylist(index int, itemID string) error {
 	if err != nil {
 		return err
 	}
+	s.resumeStreamingIntent()
 	return client.SelectPlaylist(protocol.PlaylistSelect{Index: index, ItemID: itemID})
 }
 
@@ -436,9 +637,22 @@ func (s *Service) SpinPlaylistWheel() error {
 	return client.SpinPlaylistWheel()
 }
 
+// reopenMediaAtRoomClock opens source at the room's position, for Play
+// pressed while no player shows anything.
 func (s *Service) reopenMediaAtRoomClock(source string, paused bool) error {
+	s.mu.RLock()
+	sessionCtx := s.sessionCtx
+	s.mu.RUnlock()
+	if sessionCtx == nil {
+		return errors.New("not connected")
+	}
+	load := s.beginLoad(sessionCtx, "reopen:"+source)
+	if load == nil {
+		return nil
+	}
 	s.mediaLoadMu.Lock()
 	defer s.mediaLoadMu.Unlock()
+	defer s.endLoad(load)
 	client, mediaPlayer, err := s.ensurePlayer(playerStartExplicit)
 	if err != nil {
 		return err
@@ -448,44 +662,50 @@ func (s *Service) reopenMediaAtRoomClock(source string, paused bool) error {
 		return err
 	}
 	s.mu.RLock()
-	if s.streamGateway != nil && source == s.streamGateway.URL() && s.streamIdentity != nil {
-		identity.Media = *s.streamIdentity
+	if stream := s.stream; stream != nil && stream.gateway != nil && source == stream.gateway.URL() {
+		identity.Media = stream.media
 	}
 	s.mu.RUnlock()
-	initialPlaylist := client.Snapshot().Playlist
-	queueSource := initialPlaylist.Selected >= 0 && initialPlaylist.Selected < len(initialPlaylist.Items) && s.sourceForPlayback(client) == source
-	playback := localClockSnapshot(client).Playback
-	ctx, cancel := s.mediaOperationContext(s.root)
-	defer cancel()
-	s.beginMediaTransition()
-	finished := false
-	defer func() {
-		if !finished {
-			s.endMediaTransition()
-		}
-	}()
-	info, err := s.openPlayerSource(ctx, mediaPlayer, source)
+	_, queued := selectedPlaylistItem(client.Snapshot().Playlist)
+	queueSource := queued && s.sourceForPlayback(client) == source
+	result, err := s.loadSource(load, client, mediaPlayer, source)
 	if err != nil {
+		if load.ctx.Err() != nil {
+			return errors.New("opening media was interrupted by another selection")
+		}
 		return err
 	}
-	state := s.waitForPlayerMedia(ctx, mediaPlayer, info.Duration)
-	if err := mediaPlayer.Seek(ctx, playback.PositionSeconds); err != nil {
-		return err
+	if result.info.Title != "" {
+		identity.Media.Title = result.info.Title
+	} else if result.state.Title != "" && identity.Media.Title == "" {
+		identity.Media.Title = result.state.Title
 	}
-	if err := mediaPlayer.SetRate(ctx, normalizedRate(playback.Rate)); err != nil {
-		return err
+	if duration := firstPositive(result.info.Duration, result.state.DurationSeconds); duration > 0 {
+		identity.Media.DurationSeconds = duration
 	}
-	if info.Title != "" {
-		identity.Media.Title = info.Title
-	} else if state.Title != "" {
-		identity.Media.Title = state.Title
-	}
-	identity.Media.DurationSeconds = firstPositive(info.Duration, state.DurationSeconds)
 	if identity.Path != "" {
 		s.rememberSource(identity.Media.Fingerprint, identity.Path)
 	}
-	_, err = s.finishMediaTransition(ctx, mediaPlayer, paused, func(finalPaused bool) error {
-		if err := client.SetMedia(protocol.MediaSet{Media: &identity.Media}); err != nil {
+	itemID, itemIdentity := "", ""
+	if item, ok := selectedPlaylistItem(client.Snapshot().Playlist); ok && s.sourceForPlayback(client) == source {
+		itemID, itemIdentity = item.ID, playlistItemIdentity(item)
+	}
+	s.mu.Lock()
+	if !s.loadOwnsPlayerLocked(load, client, mediaPlayer) || queueSource && itemID == "" {
+		s.mu.Unlock()
+		return errors.New("selected item changed while opening media")
+	}
+	gen := s.commitSourceLocked(result)
+	s.selectedItem, s.selectedItemIdentity = itemID, itemIdentity
+	if itemID == "" {
+		s.manualSource = source
+	} else {
+		s.manualSource = ""
+	}
+	s.mu.Unlock()
+	playback := localClockSnapshot(client).Playback
+	_, err = s.finishLoad(load, mediaPlayer, paused, func(finalPaused bool) error {
+		if err := s.publishMedia(client, gen, &identity.Media); err != nil {
 			return err
 		}
 		return client.SetPlayback(protocol.PlaybackSet{
@@ -493,27 +713,6 @@ func (s *Service) reopenMediaAtRoomClock(source string, paused bool) error {
 			Rate: normalizedRate(playback.Rate), Seek: true,
 		})
 	})
-	finished = true
-	if err == nil {
-		playlist := client.Snapshot().Playlist
-		itemID, itemIdentity := "", ""
-		if playlist.Selected >= 0 && playlist.Selected < len(playlist.Items) && s.sourceForPlayback(client) == source {
-			item := playlist.Items[playlist.Selected]
-			itemID, itemIdentity = item.ID, playlistItemIdentity(item)
-		}
-		s.mu.Lock()
-		s.selectedItem, s.selectedItemIdentity = itemID, itemIdentity
-		if itemID == "" && !queueSource {
-			s.manualSource = source
-		} else {
-			s.manualSource = ""
-		}
-		s.mu.Unlock()
-		if queueSource && itemID == "" {
-			s.releasePlayerWithDismissal(mediaPlayer, "", false)
-			return errors.New("selected item changed while opening media")
-		}
-	}
 	return err
 }
 
@@ -541,20 +740,16 @@ func (s *Service) LocatePlaylistItem(itemID, source string) error {
 		return errors.New("selected file does not match the room playlist item")
 	}
 	s.rememberSource(identity.Media.Fingerprint, identity.Path)
+	// A local copy replaces the stream of the same file, whatever stage the
+	// stream is at.
 	s.mu.RLock()
-	receivingThisFile := s.streamIdentity != nil && s.streamIdentity.Fingerprint == identity.Media.Fingerprint
-	for _, pending := range s.pendingStreams {
-		receivingThisFile = receivingThisFile || pending.media.Fingerprint == identity.Media.Fingerprint
-	}
+	stream, sessionCtx := s.stream, s.sessionCtx
 	s.mu.RUnlock()
-	if receivingThisFile {
-		_ = s.StopStreaming()
+	if stream != nil && stream.media.Fingerprint == identity.Media.Fingerprint {
+		s.retireStream(client, stream, nil)
 	}
-	if snapshot.Playlist.Selected >= 0 && snapshot.Playlist.Selected < len(snapshot.Playlist.Items) && snapshot.Playlist.Items[snapshot.Playlist.Selected].ID == itemID {
-		s.mu.Lock()
-		s.selectedItem, s.selectedItemIdentity = "", ""
-		s.mu.Unlock()
-		s.applySelectedPlaylist(s.root, client)
+	if sessionCtx != nil {
+		s.applySelectedPlaylist(sessionCtx, client)
 	}
 	return nil
 }
@@ -619,40 +814,19 @@ func (s *Service) finishMediaTransition(ctx context.Context, mediaPlayer player.
 	return paused, err
 }
 
-func (s *Service) openPlayerSource(ctx context.Context, mediaPlayer player.Player, source string) (youtube.Info, error) {
-	s.mu.Lock()
-	oldGateway, oldRequest := s.streamGateway, s.streamRequestID
-	oldClient := s.client
-	if oldGateway != nil && oldGateway.URL() != source {
-		s.streamGateway, s.streamRequestID, s.streamReceiveItemID, s.streamIdentity = nil, "", "", nil
-	} else {
-		oldGateway = nil
-	}
-	s.mu.Unlock()
-	if oldGateway != nil {
-		oldGateway.Close()
-		if oldClient != nil {
-			_ = oldClient.RevokeStream(protocol.MediaStreamRevoke{RequestID: oldRequest, Reason: "viewer selected another source"})
-		}
-		s.sink(Event{Kind: "stream", Stream: &StreamStatus{State: "idle"}})
-	}
+// openPlayerSource opens source in mediaPlayer, resolving a YouTube page to
+// its streams first. It returns what the player reports as its source when
+// that differs from source, such as a resolved CDN URL.
+func (s *Service) openPlayerSource(ctx context.Context, mediaPlayer player.Player, source string) (youtube.Info, string, error) {
 	if !youtube.IsURL(source) {
-		if err := mediaPlayer.Open(ctx, source); err != nil {
-			return youtube.Info{}, err
-		}
-		s.mu.Lock()
-		s.currentSource = source
-		s.currentPlayerSource = source
-		s.sponsorSegments = nil
-		s.mu.Unlock()
-		return youtube.Info{}, nil
+		return youtube.Info{}, "", mediaPlayer.Open(ctx, source)
 	}
 	s.mu.RLock()
 	height := s.youtubeQualities[source]
 	s.mu.RUnlock()
 	stream, err := s.youtube.Resolve(ctx, source, height)
 	if err != nil {
-		return youtube.Info{}, err
+		return youtube.Info{}, "", err
 	}
 	if resolvedPlayer, ok := mediaPlayer.(player.ResolvedStreamPlayer); ok {
 		err = resolvedPlayer.OpenResolved(ctx, player.ResolvedStream{
@@ -664,15 +838,18 @@ func (s *Service) openPlayerSource(ctx context.Context, mediaPlayer player.Playe
 		err = errors.New("this player cannot combine separate high-quality YouTube video and audio streams")
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			return youtube.Info{}, "", ctx.Err()
+		}
 		fallbackResolver, supported := s.youtube.(interface {
 			ResolveFallback(context.Context, string, int) (youtube.Stream, error)
 		})
 		if !supported {
-			return youtube.Info{}, err
+			return youtube.Info{}, "", err
 		}
 		fallback, fallbackErr := fallbackResolver.ResolveFallback(ctx, source, height)
 		if fallbackErr != nil {
-			return youtube.Info{}, fmt.Errorf("high-quality YouTube stream failed to open (%v); web_safari fallback failed: %w", err, fallbackErr)
+			return youtube.Info{}, "", fmt.Errorf("high-quality YouTube stream failed to open (%v); web_safari fallback failed: %w", err, fallbackErr)
 		}
 		if resolvedPlayer, ok := mediaPlayer.(player.ResolvedStreamPlayer); ok {
 			fallbackErr = resolvedPlayer.OpenResolved(ctx, player.ResolvedStream{CombinedURL: fallback.CombinedURL, Title: fallback.Info.Title})
@@ -680,17 +857,12 @@ func (s *Service) openPlayerSource(ctx context.Context, mediaPlayer player.Playe
 			fallbackErr = mediaPlayer.Open(ctx, fallback.CombinedURL)
 		}
 		if fallbackErr != nil {
-			return youtube.Info{}, fmt.Errorf("web_safari fallback failed to open: %w", fallbackErr)
+			return youtube.Info{}, "", fmt.Errorf("web_safari fallback failed to open: %w", fallbackErr)
 		}
 		stream = fallback
 	}
 	loadedState, _ := mediaPlayer.State(ctx)
-	s.mu.Lock()
-	s.currentSource = source
-	s.currentPlayerSource = loadedState.Source
-	s.sponsorSegments = append([]youtube.Segment(nil), stream.Info.Segments...)
-	s.mu.Unlock()
-	return stream.Info, nil
+	return stream.Info, loadedState.Source, nil
 }
 
 func (s *Service) YouTubeInfo(source string) (youtube.Info, error) {
@@ -728,58 +900,60 @@ func (s *Service) SetYouTubeQuality(source string, height int) error {
 	return nil
 }
 
+// ChangeYouTubeQuality reloads the video playing at another quality. The
+// player returns to the room's position, so the change never moves anyone
+// else; a newer selection made meanwhile supersedes it.
 func (s *Service) ChangeYouTubeQuality(source string, height int) error {
 	if err := s.SetYouTubeQuality(source, height); err != nil {
 		return err
 	}
 	s.mu.RLock()
-	client, mediaPlayer, current := s.client, s.player, s.currentSource
+	client, mediaPlayer, current, sessionCtx := s.client, s.player, s.currentSource, s.sessionCtx
 	s.mu.RUnlock()
-	if client == nil || current != source {
+	if client == nil || mediaPlayer == nil || current != source || sessionCtx == nil {
 		return nil
 	}
-	if mediaPlayer == nil {
-		return s.reopenMediaAtRoomClock(source, localClockSnapshot(client).Playback.Paused)
+	load := s.beginLoad(sessionCtx, fmt.Sprintf("quality:%s:%d", source, height))
+	if load == nil {
+		return nil
 	}
-	ctx, cancel := s.mediaOperationContext(s.root)
-	defer cancel()
-	state, err := mediaPlayer.State(ctx)
+	s.mediaLoadMu.Lock()
+	defer s.mediaLoadMu.Unlock()
+	defer s.endLoad(load)
+	s.mu.RLock()
+	still := s.currentSource == source && s.player == mediaPlayer && load.ctx.Err() == nil
+	s.mu.RUnlock()
+	if !still {
+		return nil
+	}
+	result, err := s.loadSource(load, client, mediaPlayer, source)
 	if err != nil {
-		return err
-	}
-	s.beginMediaTransition()
-	finished := false
-	defer func() {
-		if !finished {
-			s.endMediaTransition()
+		if load.ctx.Err() != nil {
+			return nil
 		}
-	}()
-	info, err := s.openPlayerSource(ctx, mediaPlayer, source)
-	if err != nil {
 		return err
 	}
-	s.waitForPlayerMedia(ctx, mediaPlayer, info.Duration)
-	if err := mediaPlayer.Seek(ctx, state.PositionSeconds); err != nil {
-		return err
+	s.mu.Lock()
+	if !s.loadOwnsPlayerLocked(load, client, mediaPlayer) {
+		s.mu.Unlock()
+		return nil
 	}
-	if err := mediaPlayer.SetRate(ctx, normalizedRate(state.Rate)); err != nil {
-		return err
+	s.commitSourceLocked(result)
+	// Reloading cleared the selection in case it failed; it succeeded.
+	if item, ok := selectedPlaylistItem(client.Snapshot().Playlist); ok && item.URL == source {
+		s.selectedItem, s.selectedItemIdentity = item.ID, playlistItemIdentity(item)
 	}
-	_, err = s.finishMediaTransition(ctx, mediaPlayer, state.Paused, func(paused bool) error {
-		return client.SetPlayback(protocol.PlaybackSet{
-			PositionSeconds: state.PositionSeconds, Paused: paused,
-			Rate: publishedRate(client, state.Rate), Seek: true,
-		})
-	})
-	finished = true
+	s.mu.Unlock()
+	_, err = s.finishLoad(load, mediaPlayer, localClockSnapshot(client).Playback.Paused, nil)
 	return err
 }
 
 // waitForPlayerMedia bridges the asynchronous load semantics of mpv-family
 // players. Open only acknowledges the load command; duration and chapters are
 // populated shortly afterwards. Publishing the first state too early leaves
-// the UI with a disabled timeline until the same file is opened again.
-func (s *Service) waitForPlayerMedia(ctx context.Context, mediaPlayer player.Player, knownDuration float64) player.State {
+// the UI with a disabled timeline until the same file is opened again. It
+// fails only if ctx ends: an abandoned load must not be committed.
+func (s *Service) waitForPlayerMedia(ctx context.Context, mediaPlayer player.Player, knownDuration float64) (player.State, error) {
 	var latest player.State
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
@@ -790,14 +964,14 @@ func (s *Service) waitForPlayerMedia(ctx context.Context, mediaPlayer player.Pla
 		if err == nil {
 			latest = state
 			if state.DurationSeconds > 0 || knownDuration > 0 && state.Source != "" {
-				return latest
+				return latest, nil
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return latest
+			return latest, ctx.Err()
 		case <-deadline.C:
-			return latest
+			return latest, nil
 		case <-ticker.C:
 		}
 	}
@@ -875,12 +1049,55 @@ func (s *Service) identifyAndRemember(source, title string, duration float64) (*
 	return &identity.Media, nil
 }
 
+// localCopy is a file known to hold a media fingerprint, with the size and
+// modification time it had when it was identified.
+type localCopy struct {
+	path     string
+	size     int64
+	modified time.Time
+}
+
 func (s *Service) rememberSource(fingerprint, source string) {
 	if fingerprint == "" || source == "" {
 		return
 	}
+	info, err := os.Stat(source)
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
 	s.mu.Lock()
-	s.sources[fingerprint] = source
+	s.sources[fingerprint] = localCopy{path: source, size: info.Size(), modified: info.ModTime()}
+	s.mu.Unlock()
+}
+
+// localSource returns the local copy of fingerprint if it is still there
+// and unchanged. A copy that was moved, deleted or modified since it was
+// identified is forgotten, so playback falls back to a stream instead of
+// failing, and the queue shows the item as missing.
+func (s *Service) localSource(fingerprint string) string {
+	if fingerprint == "" {
+		return ""
+	}
+	s.mu.RLock()
+	known, ok := s.sources[fingerprint]
+	s.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	if info, err := os.Stat(known.path); err == nil && info.Mode().IsRegular() && info.Size() == known.size && info.ModTime().Equal(known.modified) {
+		return known.path
+	}
+	s.mu.Lock()
+	if s.sources[fingerprint] == known {
+		delete(s.sources, fingerprint)
+	}
+	s.mu.Unlock()
+	return ""
+}
+
+func (s *Service) forgetSource(fingerprint string) {
+	s.mu.Lock()
+	delete(s.sources, fingerprint)
 	s.mu.Unlock()
 }
 
@@ -896,44 +1113,29 @@ func firstNonEmpty(values ...string) string {
 func (s *Service) PlaylistAvailability() map[string]bool {
 	s.mu.RLock()
 	client := s.client
-	sources := make(map[string]string, len(s.sources))
-	for fingerprint, source := range s.sources {
-		sources[fingerprint] = source
-	}
 	s.mu.RUnlock()
 	result := make(map[string]bool)
 	if client == nil {
 		return result
 	}
 	for _, item := range client.Snapshot().Playlist.Items {
-		present := false
-		if item.Media != nil && sources[item.Media.Fingerprint] != "" {
-			info, err := os.Stat(sources[item.Media.Fingerprint])
-			present = err == nil && info.Mode().IsRegular()
-		}
-		result[item.ID] = item.URL != "" || present
+		result[item.ID] = item.URL != "" || item.Media != nil && s.localSource(item.Media.Fingerprint) != ""
 	}
 	s.publishAvailability(client, result)
 	return result
 }
 
 func (s *Service) PlaylistExportLines() ([]string, error) {
-	s.mu.RLock()
-	client := s.client
-	sources := make(map[string]string, len(s.sources))
-	for fingerprint, source := range s.sources {
-		sources[fingerprint] = source
-	}
-	s.mu.RUnlock()
-	if client == nil {
-		return nil, errors.New("not connected")
+	client, err := s.connected()
+	if err != nil {
+		return nil, err
 	}
 	items := client.Snapshot().Playlist.Items
 	lines := make([]string, 0, len(items))
 	for _, item := range items {
 		source := item.URL
 		if source == "" && item.Media != nil {
-			source = sources[item.Media.Fingerprint]
+			source = s.localSource(item.Media.Fingerprint)
 		}
 		if source == "" {
 			source = item.Label
@@ -943,13 +1145,24 @@ func (s *Service) PlaylistExportLines() ([]string, error) {
 	return lines, nil
 }
 
+// IndexMediaDirectory identifies the media files in directory so queue items
+// they match play locally. Indexing in a room stops when the room is left.
 func (s *Service) IndexMediaDirectory(directory string) (int, error) {
 	directory = strings.TrimSpace(directory)
 	if directory == "" {
 		return 0, errors.New("media directory is required")
 	}
+	s.mu.RLock()
+	ctx, client := s.sessionCtx, s.client
+	s.mu.RUnlock()
+	if ctx == nil {
+		ctx = s.root
+	}
 	count := 0
 	err := filepath.WalkDir(directory, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return skipUnreadable(directory, path, entry, walkErr)
 		}
@@ -970,14 +1183,16 @@ func (s *Service) IndexMediaDirectory(directory string) (int, error) {
 	if err != nil {
 		return count, fmt.Errorf("index media directory: %w", err)
 	}
-	// A joining participant commonly has no player yet: the selected room item
-	// is what should start it. Retry from the connection after indexing rather
-	// than requiring an already-open player.
-	if client, connectionErr := s.connected(); connectionErr == nil {
-		s.mu.Lock()
-		s.selectedItem, s.selectedItemIdentity = "", ""
-		s.mu.Unlock()
-		s.applySelectedPlaylist(s.root, client)
+	// A joining participant commonly has no player yet, and the selected item
+	// may only now have a local copy: apply the selection again. The room
+	// must still be the one indexing started in.
+	if client != nil {
+		s.mu.RLock()
+		current := s.client == client
+		s.mu.RUnlock()
+		if current {
+			s.applySelectedPlaylist(ctx, client)
+		}
 	}
 	return count, nil
 }
@@ -1078,7 +1293,7 @@ func ExpandMediaPaths(paths []string, maximum int) ([]string, error) {
 // Closing the player must cancel URL resolution and loading immediately,
 // without cancelling the room connection.
 func (s *Service) mediaOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(parent, 90*time.Second)
+	ctx, cancel := context.WithTimeout(parent, mediaOperationTimeout)
 	s.mu.RLock()
 	playerContext := s.playerContext
 	s.mu.RUnlock()
