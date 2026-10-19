@@ -96,16 +96,15 @@ func (s *Service) SetPaused(paused bool) error {
 			if err := s.reopenMediaAtRoomClock(source, paused); err != nil {
 				return err
 			}
-			client, mediaPlayer, err = s.playerWithMedia()
-			if err != nil {
-				return err
+			loadedClient, loadedPlayer, loadedErr := s.playerWithMedia()
+			if loadedErr != nil {
+				// A newer load took over and has not reached the player yet;
+				// it takes the room's state when it finishes.
+				return publishPaused(client, paused)
 			}
+			client, mediaPlayer = loadedClient, loadedPlayer
 		} else {
-			snapshot := localClockSnapshot(client)
-			return client.SetPlayback(protocol.PlaybackSet{
-				PositionSeconds: snapshot.Playback.PositionSeconds, Paused: paused,
-				Rate: normalizedRate(snapshot.Playback.Rate),
-			})
+			return publishPaused(client, paused)
 		}
 	}
 	if s.queueTransitionPause(paused) {
@@ -113,11 +112,7 @@ func (s *Service) SetPaused(paused bool) error {
 		// the user's intent immediately both records the pause in room activity
 		// and lets the transition apply the newest state once loading finishes,
 		// instead of racing a stale final "resume" command.
-		snapshot := localClockSnapshot(client)
-		return client.SetPlayback(protocol.PlaybackSet{
-			PositionSeconds: snapshot.Playback.PositionSeconds, Paused: paused,
-			Rate: normalizedRate(snapshot.Playback.Rate),
-		})
+		return publishPaused(client, paused)
 	}
 	ctx, cancel := context.WithTimeout(s.root, 3*time.Second)
 	defer cancel()
@@ -132,6 +127,15 @@ func (s *Service) SetPaused(paused bool) error {
 		return err
 	}
 	return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: state.PositionSeconds, Paused: paused, Rate: publishedRate(client, state.Rate)})
+}
+
+// publishPaused tells the room to pause or resume at its current position.
+func publishPaused(client *faroclient.Client, paused bool) error {
+	snapshot := localClockSnapshot(client)
+	return client.SetPlayback(protocol.PlaybackSet{
+		PositionSeconds: snapshot.Playback.PositionSeconds, Paused: paused,
+		Rate: normalizedRate(snapshot.Playback.Rate),
+	})
 }
 
 // sourceForPlayback resolves only the room's current queue selection. Explicit

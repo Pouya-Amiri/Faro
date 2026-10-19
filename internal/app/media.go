@@ -64,6 +64,13 @@ func (s *Service) beginLoad(parent context.Context, key string) *mediaLoad {
 	return s.load
 }
 
+// superseded reports whether a newer load replaced load.
+func (s *Service) superseded(load *mediaLoad) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.load != load
+}
+
 // cancelLoadLocked stops the load in progress, for a player that went away.
 func (s *Service) cancelLoadLocked() {
 	if s.load != nil {
@@ -547,13 +554,19 @@ func (s *Service) resolvePlaylistInputs(inputs []PlaylistInput) ([]protocol.Play
 	return items, skipped, nil
 }
 
-// publishPlaylist sends the queue. The update it causes reaches this
-// participant like everyone else, and that is what stops playback of a
-// removed item; waiting for a load in progress here would only make the
-// edit look busy.
+// publishPlaylist sends the queue. The server delivers the queue update
+// before acknowledging the edit, so the selection is applied at once: a
+// removed item stops playing before this returns. A load the edit needs
+// runs in the background, so the edit never waits behind one.
 func (s *Service) publishPlaylist(client *faroclient.Client, items []protocol.PlaylistItem, baseRevision *uint64) error {
 	if err := client.SetPlaylist(protocol.PlaylistSet{Items: items, BaseRevision: baseRevision}); err != nil {
 		return err
+	}
+	s.mu.RLock()
+	sessionCtx := s.sessionCtx
+	s.mu.RUnlock()
+	if sessionCtx != nil {
+		s.startSelectedPlaylist(sessionCtx, client)
 	}
 	if err := s.withdrawMissingOffer(client, items); err != nil {
 		return err
@@ -670,8 +683,13 @@ func (s *Service) reopenMediaAtRoomClock(source string, paused bool) error {
 	queueSource := queued && s.sourceForPlayback(client) == source
 	result, err := s.loadSource(load, client, mediaPlayer, source)
 	if err != nil {
+		if s.superseded(load) {
+			// A newer load owns the player; the caller's pause or resume
+			// applies to it instead.
+			return nil
+		}
 		if load.ctx.Err() != nil {
-			return errors.New("opening media was interrupted by another selection")
+			return errors.New("opening media was interrupted")
 		}
 		return err
 	}
@@ -691,6 +709,10 @@ func (s *Service) reopenMediaAtRoomClock(source string, paused bool) error {
 		itemID, itemIdentity = item.ID, playlistItemIdentity(item)
 	}
 	s.mu.Lock()
+	if s.load != load {
+		s.mu.Unlock()
+		return nil
+	}
 	if !s.loadOwnsPlayerLocked(load, client, mediaPlayer) || queueSource && itemID == "" {
 		s.mu.Unlock()
 		return errors.New("selected item changed while opening media")
