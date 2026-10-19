@@ -203,7 +203,7 @@ func TestRejectedHandshakeReportsItsCode(t *testing.T) {
 }
 
 func TestPlaylistWheelEventTracksOnlyActiveSpinInSnapshot(t *testing.T) {
-	client := &Client{events: make(chan Event, 4), done: make(chan struct{})}
+	client := newClient(Config{}, nil)
 	wheel := protocol.PlaylistWheel{
 		ID: "wheel", Phase: protocol.PlaylistWheelStarted,
 		Items: []protocol.PlaylistWheelItem{{ID: "one", Label: "One"}, {ID: "two", Label: "Two"}}, Winner: 1,
@@ -228,7 +228,7 @@ func TestPlaylistWheelEventTracksOnlyActiveSpinInSnapshot(t *testing.T) {
 }
 
 func TestActivityMessageIsExposedAsTypedEvent(t *testing.T) {
-	client := &Client{events: make(chan Event, 1), done: make(chan struct{})}
+	client := newClient(Config{}, nil)
 	activity := protocol.ActivityMessage{
 		Action: protocol.ActivityPlaybackSeeked, ParticipantName: "Ada", PositionSeconds: 42, SentAtUnixMs: 1000,
 	}
@@ -379,5 +379,93 @@ func TestSilentServerIsDetected(t *testing.T) {
 	case <-client.Done():
 	case <-time.After(3 * time.Second):
 		t.Fatal("the client never noticed the server went silent")
+	}
+}
+
+func applyTo(t *testing.T, client *Client, messageType protocol.MessageType, payload any) {
+	t.Helper()
+	envelope, err := protocol.NewEnvelope(messageType, "", "", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.apply(envelope)
+}
+
+func TestOlderRevisionsCannotRollStateBack(t *testing.T) {
+	client := newClient(Config{}, nil)
+	defer close(client.done)
+	applyTo(t, client, protocol.TypePlaybackUpdated, protocol.Playback{Revision: 3, Rate: 1, PositionSeconds: 30})
+	applyTo(t, client, protocol.TypePlaybackUpdated, protocol.Playback{Revision: 2, Rate: 1, PositionSeconds: 20})
+	applyTo(t, client, protocol.TypePlaylistUpdated, protocol.Playlist{Revision: 5, Selected: 1})
+	applyTo(t, client, protocol.TypePlaylistUpdated, protocol.Playlist{Revision: 4, Selected: 0})
+	snapshot := client.Snapshot()
+	if snapshot.Playback.Revision != 3 || snapshot.Playlist.Revision != 5 {
+		t.Fatalf("older updates rolled state back: playback %d, playlist %d", snapshot.Playback.Revision, snapshot.Playlist.Revision)
+	}
+}
+
+func TestSlowConsumerNeverBlocksSnapshotReaders(t *testing.T) {
+	client := newClient(Config{}, nil)
+	defer close(client.done)
+	// Nobody consumes events while far more arrive than any channel holds.
+	for index := range 1000 {
+		applyTo(t, client, protocol.TypeChatMessage, protocol.ChatMessage{ID: fmt.Sprint(index), Message: "hello"})
+		applyTo(t, client, protocol.TypePlaybackUpdated, protocol.Playback{Revision: uint64(index + 1), Rate: 1})
+	}
+	read := make(chan struct{})
+	go func() { client.Snapshot(); close(read) }()
+	select {
+	case <-read:
+	case <-time.After(time.Second):
+		t.Fatal("a slow event consumer blocked snapshot readers")
+	}
+}
+
+func TestStateNotificationsAreCoalescedNotDropped(t *testing.T) {
+	client := newClient(Config{}, nil)
+	defer close(client.done)
+	applyTo(t, client, protocol.TypeChatMessage, protocol.ChatMessage{ID: "backlog", Message: "first"})
+	for revision := uint64(1); revision <= 50; revision++ {
+		applyTo(t, client, protocol.TypePlaylistUpdated, protocol.Playlist{Revision: revision, Selected: -1})
+	}
+	applyTo(t, client, protocol.TypeChatMessage, protocol.ChatMessage{ID: "after", Message: "second"})
+	var kinds []protocol.MessageType
+	for range 3 {
+		select {
+		case event := <-client.Events():
+			kinds = append(kinds, event.Type)
+		case <-time.After(time.Second):
+			t.Fatalf("events missing; received %v", kinds)
+		}
+	}
+	want := []protocol.MessageType{protocol.TypeChatMessage, protocol.TypePlaylistUpdated, protocol.TypeChatMessage}
+	if fmt.Sprint(kinds) != fmt.Sprint(want) {
+		t.Fatalf("events arrived as %v, want %v", kinds, want)
+	}
+	select {
+	case event := <-client.Events():
+		t.Fatalf("an extra event arrived: %v", event.Type)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if revision := client.Snapshot().Playlist.Revision; revision != 50 {
+		t.Fatalf("the snapshot holds playlist revision %d, want 50", revision)
+	}
+}
+
+func TestPlaylistChangeAfterDeliveryGetsItsOwnNotification(t *testing.T) {
+	client := newClient(Config{}, nil)
+	defer close(client.done)
+	applyTo(t, client, protocol.TypePlaylistUpdated, protocol.Playlist{Revision: 1, Selected: -1})
+	if event := <-client.Events(); event.Type != protocol.TypePlaylistUpdated {
+		t.Fatalf("unexpected event %v", event.Type)
+	}
+	applyTo(t, client, protocol.TypePlaylistUpdated, protocol.Playlist{Revision: 2, Selected: 0})
+	select {
+	case event := <-client.Events():
+		if event.Type != protocol.TypePlaylistUpdated {
+			t.Fatalf("unexpected event %v", event.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a change made after the previous notification was delivered was not reported")
 	}
 }

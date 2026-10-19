@@ -65,7 +65,7 @@ type Client struct {
 	cfg       Config
 	conn      net.Conn
 	codec     *protocol.Codec
-	events    chan Event
+	events    *eventQueue
 	done      chan struct{}
 	once      sync.Once
 	seq       atomic.Uint64
@@ -114,11 +114,7 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 		_ = rawConnection.Close()
 		return nil, errors.New("TLS dialer returned a non-TLS connection")
 	}
-	client := &Client{
-		cfg: cfg, conn: connection, codec: protocol.NewCodecWithLimits(connection, protocol.MaxStateFrameSize, protocol.MaxFrameSize),
-		events: make(chan Event, 128), done: make(chan struct{}),
-		pending: make(map[string]chan commandReply),
-	}
+	client := newClient(cfg, connection)
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = connection.SetDeadline(deadline)
 	} else {
@@ -149,6 +145,17 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 	go client.readLoop()
 	go client.pingLoop()
 	return client, nil
+}
+
+func newClient(cfg Config, connection net.Conn) *Client {
+	client := &Client{
+		cfg: cfg, conn: connection, done: make(chan struct{}), pending: make(map[string]chan commandReply),
+	}
+	if connection != nil {
+		client.codec = protocol.NewCodecWithLimits(connection, protocol.MaxStateFrameSize, protocol.MaxFrameSize)
+	}
+	client.events = newEventQueue(client.done, func() { client.Close() })
+	return client
 }
 
 func handshakeError(ctx context.Context, err error) error {
@@ -217,8 +224,11 @@ func (c *Client) readHandshake(helloID string) error {
 	return nil
 }
 
+// finalEventTimeout bounds how long a lost connection waits for the app to
+// take the event explaining why before it reports itself done.
+const finalEventTimeout = time.Second
+
 func (c *Client) readLoop() {
-	defer c.Close()
 	for {
 		_ = c.conn.SetReadDeadline(time.Now().Add(livenessPings * pingInterval))
 		envelope, err := c.codec.Read()
@@ -226,21 +236,40 @@ func (c *Client) readLoop() {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				err = errors.New("the server stopped responding")
 			}
+			// Everything received before the connection ended (such as the
+			// server's reason for closing it) and the failure itself reach the
+			// app before the connection reports done.
+			var lost *Event
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
-				c.emit(Event{Type: protocol.TypeError, Error: &protocol.Error{Code: "connection_lost", Message: err.Error(), Fatal: true}})
+				lost = &Event{Type: protocol.TypeError, Error: &protocol.Error{Code: "connection_lost", Message: err.Error(), Fatal: true}}
 			}
+			c.events.finish(lost, func() { c.Close() })
+			time.AfterFunc(finalEventTimeout, func() { c.Close() })
 			return
 		}
 		c.apply(envelope)
 	}
 }
 
+// apply updates the snapshot from one server message and then queues its
+// event. The state lock is never held while queueing, so readers of the
+// snapshot can never wait behind a slow consumer.
 func (c *Client) apply(envelope protocol.Envelope) {
 	if envelope.ReplyTo != "" && (envelope.Type == protocol.TypeCommandOK || envelope.Type == protocol.TypeError || envelope.Type == protocol.TypeStreamRequestAccepted) {
 		if c.deliverReply(envelope) {
 			return
 		}
 	}
+	event, ok := c.update(envelope)
+	if ok {
+		c.events.push(event)
+	}
+}
+
+// update applies envelope to the snapshot and returns the event to report.
+// Within one connection the server sends changes in order; a revision older
+// than the one held is still refused, so state can never move backwards.
+func (c *Client) update(envelope protocol.Envelope) (Event, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	event := Event{Type: envelope.Type}
@@ -248,37 +277,37 @@ func (c *Client) apply(envelope protocol.Envelope) {
 	case protocol.TypeStateSnapshot:
 		value, err := protocol.DecodePayload[protocol.Snapshot](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		c.snapshot = value
 	case protocol.TypeRoomUpdated:
 		value, err := protocol.DecodePayload[protocol.Room](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		c.snapshot.Room = value
 	case protocol.TypeParticipantsUpdated, protocol.TypeMediaUpdated:
 		value, err := protocol.DecodePayload[[]protocol.Participant](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		c.snapshot.Participants = value
 	case protocol.TypePlaybackUpdated:
 		value, err := protocol.DecodePayload[protocol.Playback](envelope)
-		if err != nil {
-			return
+		if err != nil || value.Revision < c.snapshot.Playback.Revision {
+			return Event{}, false
 		}
 		c.snapshot.Playback = value
 	case protocol.TypePlaylistUpdated:
 		value, err := protocol.DecodePayload[protocol.Playlist](envelope)
-		if err != nil {
-			return
+		if err != nil || value.Revision < c.snapshot.Playlist.Revision {
+			return Event{}, false
 		}
 		c.snapshot.Playlist = value
 	case protocol.TypePlaylistWheelUpdated:
 		value, err := protocol.DecodePayload[protocol.PlaylistWheel](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		if value.Phase == protocol.PlaylistWheelStarted {
 			c.snapshot.PlaylistWheel = cloneWheel(&value)
@@ -289,59 +318,59 @@ func (c *Client) apply(envelope protocol.Envelope) {
 	case protocol.TypeStreamOffersUpdated:
 		value, err := protocol.DecodePayload[[]protocol.MediaStreamOffer](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		c.snapshot.StreamOffers = append([]protocol.MediaStreamOffer(nil), value...)
 	case protocol.TypeStreamRequested:
 		value, err := protocol.DecodePayload[protocol.MediaStreamRequested](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		event.StreamRequest = &value
 	case protocol.TypeStreamGranted:
 		value, err := protocol.DecodePayload[protocol.MediaStreamGranted](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		event.StreamGrant = &value
 	case protocol.TypeStreamRevoked:
 		value, err := protocol.DecodePayload[protocol.MediaStreamRevoked](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		event.StreamRevoked = &value
 	case protocol.TypePong:
 		value, err := protocol.DecodePayload[protocol.Pong](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		c.clock.observe(value.ClientTimeUnixMs, value.ServerTimeUnixMs, time.Now().UnixMilli())
 	case protocol.TypeWelcome:
 		value, err := protocol.DecodePayload[protocol.Welcome](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		c.welcome = value
 	case protocol.TypeChatMessage:
 		value, err := protocol.DecodePayload[protocol.ChatMessage](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		event.Chat = &value
 	case protocol.TypeActivityMessage:
 		value, err := protocol.DecodePayload[protocol.ActivityMessage](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		event.Activity = &value
 	case protocol.TypeError:
 		value, err := protocol.DecodePayload[protocol.Error](envelope)
 		if err != nil {
-			return
+			return Event{}, false
 		}
 		event.Error = &value
 	}
-	c.emit(event)
+	return event, true
 }
 
 func (c *Client) Snapshot() protocol.Snapshot {
@@ -398,7 +427,7 @@ func (c *Client) PlaybackPosition() float64 {
 	return playback.PositionAt(c.ServerNow())
 }
 
-func (c *Client) Events() <-chan Event { return c.events }
+func (c *Client) Events() <-chan Event { return c.events.out }
 
 func (c *Client) Done() <-chan struct{} { return c.done }
 
@@ -535,25 +564,6 @@ func (c *Client) pingLoop() {
 }
 
 func (c *Client) nextID() string { return fmt.Sprintf("c-%d", c.seq.Add(1)) }
-
-// emit delivers an event to the app. State updates may be dropped when the
-// app falls behind, since the snapshot already holds the newest state; stream
-// handshakes, chat and errors exist only as events, so those wait for room
-// (until the connection closes) instead of being lost.
-func (c *Client) emit(event Event) {
-	if event.StreamRequest != nil || event.StreamGrant != nil || event.StreamRevoked != nil || event.Chat != nil || event.Error != nil {
-		select {
-		case c.events <- event:
-		case <-c.done:
-		}
-		return
-	}
-	select {
-	case c.events <- event:
-	case <-c.done:
-	default:
-	}
-}
 
 func (c *Client) Close() error {
 	var err error
