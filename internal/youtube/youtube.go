@@ -34,8 +34,11 @@ type Segment struct {
 }
 
 type Info struct {
-	Title     string    `json:"title"`
-	Duration  float64   `json:"duration"`
+	Title    string  `json:"title"`
+	Duration float64 `json:"duration"`
+	// Live is set for a broadcast that is live now. Its duration, if any,
+	// is the length of the window the provider serves, not of the video.
+	Live      bool      `json:"live,omitempty"`
 	Thumbnail string    `json:"thumbnail,omitempty"`
 	Qualities []Quality `json:"qualities"`
 	Segments  []Segment `json:"sponsorBlockSegments"`
@@ -306,6 +309,10 @@ func (r *Resolver) extractAttempts(ctx context.Context, source string, height in
 			}
 			err = errors.New("yt-dlp returned invalid metadata")
 		}
+		if rateLimited(err) {
+			// Another client would only be another request YouTube refuses.
+			return extractOutput{}, "", errRateLimited
+		}
 		failures = append(failures, conciseError(err))
 	}
 	return extractOutput{}, "", fmt.Errorf("YouTube extraction failed after all client fallbacks: %s", strings.Join(unique(failures), "; "))
@@ -367,6 +374,8 @@ type extractChapter struct {
 
 type extractOutput struct {
 	Title            string           `json:"title"`
+	IsLive           bool             `json:"is_live"`
+	LiveStatus       string           `json:"live_status"`
 	Duration         float64          `json:"duration"`
 	Thumbnail        string           `json:"thumbnail"`
 	URL              string           `json:"url"`
@@ -402,7 +411,8 @@ func infoFrom(metadata extractOutput, executable string) Info {
 		}
 		segments = append(segments, Segment{Start: chapter.Start, End: chapter.End, Category: chapter.Category, Title: firstNonEmpty(chapter.Title, "SponsorBlock segment")})
 	}
-	return Info{Title: metadata.Title, Duration: metadata.Duration, Thumbnail: metadata.Thumbnail, Qualities: qualities, Segments: segments, Backend: executable}
+	live := metadata.LiveStatus == "is_live" || metadata.LiveStatus == "" && metadata.IsLive
+	return Info{Title: metadata.Title, Duration: metadata.Duration, Live: live, Thumbnail: metadata.Thumbnail, Qualities: qualities, Segments: segments, Backend: executable}
 }
 
 func streamFrom(metadata extractOutput, height int) Stream {
@@ -447,6 +457,18 @@ func streamFrom(metadata extractOutput, height int) Stream {
 		result.CombinedURL = fallbackURL
 	}
 	return result
+}
+
+var errRateLimited = errors.New("YouTube is limiting requests from this network (HTTP 429); try again in a few minutes")
+
+// rateLimited reports whether yt-dlp failed because YouTube answered HTTP
+// 429 Too Many Requests.
+func rateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "HTTP Error 429") || strings.Contains(message, "Too Many Requests")
 }
 
 func conciseError(err error) string {
