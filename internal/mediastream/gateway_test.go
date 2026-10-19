@@ -33,6 +33,8 @@ type gatewayFixture struct {
 	capability string
 	mu         sync.Mutex
 	ranges     []string
+	// hold, when set, runs before the provider answers a request.
+	hold func(*http.Request)
 }
 
 func newGatewayFixture(t *testing.T, content []byte, maxRange int64, configure func(*GatewayConfig)) *gatewayFixture {
@@ -54,7 +56,11 @@ func newGatewayFixture(t *testing.T, content []byte, maxRange int64, configure f
 			}
 			fixture.mu.Lock()
 			fixture.ranges = append(fixture.ranges, request.Header.Get("Range"))
+			hold := fixture.hold
 			fixture.mu.Unlock()
+			if hold != nil {
+				hold(request)
+			}
 			response := source.response(request)
 			writeErr := response.Write(conn)
 			if response.Body != nil {
@@ -622,17 +628,27 @@ func TestGatewayStopsFetchingWhenTheDirectPathIsLost(t *testing.T) {
 	waitUntil(t, "the transfer never started", func() bool { return g.received.Load() > 0 })
 	lost.Store(true)
 	waitUntil(t, "a lost direct path was not reported", func() bool { return g.Progress().Route == RouteUnavailable })
+	// Cancelled fetches finish on their own goroutines; none may restart
+	// while there is no direct path.
+	waitUntil(t, "fetches kept running without a direct path", func() bool {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		for f := range g.fetches {
+			if !f.requested.IsZero() {
+				return false
+			}
+		}
+		return true
+	})
+	time.Sleep(300 * time.Millisecond)
 	g.mu.Lock()
-	running := 0
 	for f := range g.fetches {
 		if !f.requested.IsZero() {
-			running++
+			g.mu.Unlock()
+			t.Fatal("a fetch started without a direct path")
 		}
 	}
 	g.mu.Unlock()
-	if running != 0 {
-		t.Fatalf("%d fetches kept running without a direct path", running)
-	}
 	lost.Store(false)
 	if body := fixture.get(t, "bytes=0-65535"); string(body) != string(content[:65536]) {
 		t.Fatal("stream returned the wrong bytes after the direct path returned")
@@ -649,6 +665,18 @@ func TestGatewayReconnectResumesTheTransfer(t *testing.T) {
 		cfg.DisableBackgroundFill = true
 	})
 	g := fixture.gateway
+	// Read-ahead past the first two units waits until the reconnection, so
+	// the rest of the file is certainly not cached while disconnected.
+	release := make(chan struct{})
+	fixture.mu.Lock()
+	fixture.hold = func(request *http.Request) {
+		var start int64
+		fmt.Sscanf(request.Header.Get("Range"), "bytes=%d-", &start)
+		if start >= 131072 {
+			<-release
+		}
+	}
+	fixture.mu.Unlock()
 	if body := fixture.get(t, "bytes=0-131071"); string(body) != string(content[:131072]) {
 		t.Fatal("first range returned the wrong bytes")
 	}
@@ -667,6 +695,7 @@ func TestGatewayReconnectResumesTheTransfer(t *testing.T) {
 		t.Fatal("an uncached range was served without a provider")
 	case <-time.After(300 * time.Millisecond):
 	}
+	close(release)
 	if err := g.Reconnect(fixture.connectedViewer(t), fixture.capability); err != nil {
 		t.Fatal(err)
 	}

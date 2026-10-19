@@ -1154,9 +1154,12 @@ func (g *Gateway) routeLoop() {
 			return
 		}
 		if err != nil {
-			g.setRoute(up, RouteUnavailable)
 			g.mu.Lock()
 			if g.up == up {
+				if g.route != RouteUnavailable {
+					g.route = RouteUnavailable
+					g.logf("stream route is now %s", RouteUnavailable)
+				}
 				g.cancelFetchesLocked(func(f *fetch) bool { return !f.requested.IsZero() }, errNoDirectPath)
 			}
 			g.mu.Unlock()
