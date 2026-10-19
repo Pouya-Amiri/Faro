@@ -229,6 +229,11 @@ type MediaStreamPolicy struct {
 	DERPMapURL              string `json:"derpMapUrl,omitempty"`
 }
 
+// MaxStreamBytes bounds the size of a file that can be offered as a stream.
+// Viewers size their cache bookkeeping from the advertised size, so an
+// absurd value from a malformed peer must be refused rather than allocated.
+const MaxStreamBytes = int64(1) << 40
+
 // MediaStreamOffer contains only room-visible metadata. A local path,
 // connection descriptor, or bearer capability must never be added here.
 type MediaStreamOffer struct {

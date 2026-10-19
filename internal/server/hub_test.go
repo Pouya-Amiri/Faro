@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,13 +37,13 @@ func TestEmptyPlaylistSerializesAsArray(t *testing.T) {
 
 func TestHubEnforcesRoomAndParticipantLimits(t *testing.T) {
 	h := newHub(1, 1)
-	if _, err := h.join(testSession("one"), protocol.Hello{Name: "Ada", Room: "movie"}); err != nil {
+	if _, err := testJoin(h, testSession("one"), protocol.Hello{Name: "Ada", Room: "movie"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.join(testSession("two"), protocol.Hello{Name: "Grace", Room: "movie"}); err == nil || !strings.Contains(err.Error(), "participant limit") {
+	if _, err := testJoin(h, testSession("two"), protocol.Hello{Name: "Grace", Room: "movie"}); err == nil || !strings.Contains(err.Error(), "participant limit") {
 		t.Fatalf("expected room limit, got %v", err)
 	}
-	if _, err := h.join(testSession("three"), protocol.Hello{Name: "Linus", Room: "other"}); err == nil || !strings.Contains(err.Error(), "room limit") {
+	if _, err := testJoin(h, testSession("three"), protocol.Hello{Name: "Linus", Room: "other"}); err == nil || !strings.Contains(err.Error(), "room limit") {
 		t.Fatalf("expected server room limit, got %v", err)
 	}
 }
@@ -66,7 +67,7 @@ func TestRateWindowResets(t *testing.T) {
 func TestPlaybackCommandsEmitTypedActivity(t *testing.T) {
 	h := newHub(1, 2)
 	s := testSession("owner")
-	joined, err := h.join(s, protocol.Hello{Name: "Ada", Room: "movie"})
+	joined, err := testJoin(h, s, protocol.Hello{Name: "Ada", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +93,7 @@ func TestPlaybackCommandsEmitTypedActivity(t *testing.T) {
 func TestSponsorBlockSeekEmitsSystemActivity(t *testing.T) {
 	h := newHub(1, 2)
 	s := testSession("owner")
-	joined, err := h.join(s, protocol.Hello{Name: "Ada", Room: "movie"})
+	joined, err := testJoin(h, s, protocol.Hello{Name: "Ada", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,11 +118,11 @@ func TestSponsorBlockSeekEmitsSystemActivity(t *testing.T) {
 
 func TestModeratedRoomKeepsAControllerWhenOwnerLeaves(t *testing.T) {
 	h := newHub(2, 4)
-	owner, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
+	owner, err := testJoin(h, testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	member, err := h.join(testSession("member"), protocol.Hello{Name: "Grace", Room: "movie"})
+	member, err := testJoin(h, testSession("member"), protocol.Hello{Name: "Grace", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +143,7 @@ func TestKickRespectsRolesAndClosesTheRemovedSession(t *testing.T) {
 		local, remote := net.Pipe()
 		t.Cleanup(func() { _ = remote.Close() })
 		s.conn = local
-		joined, err := h.join(s, protocol.Hello{Name: name, Room: "movie"})
+		joined, err := testJoin(h, s, protocol.Hello{Name: name, Room: "movie"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -219,7 +220,7 @@ func TestKickRespectsRolesAndClosesTheRemovedSession(t *testing.T) {
 
 func TestSettingPlaylistDoesNotImplicitlyStartFirstItem(t *testing.T) {
 	h := newHub(1, 2)
-	joined, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
+	joined, err := testJoin(h, testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +234,7 @@ func TestSettingPlaylistDoesNotImplicitlyStartFirstItem(t *testing.T) {
 
 func TestSelectingPlaylistItemResetsPlaybackClock(t *testing.T) {
 	h := newHub(1, 2)
-	joined, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
+	joined, err := testJoin(h, testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +256,7 @@ func TestSelectingPlaylistItemResetsPlaybackClock(t *testing.T) {
 
 func TestPlaylistReorderKeepsSelectedItemIdentity(t *testing.T) {
 	h := newHub(1, 2)
-	joined, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
+	joined, err := testJoin(h, testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +282,7 @@ func TestPlaylistRemovalAndSourceReplacementResetPlayback(t *testing.T) {
 		{{ID: "one", Label: "Other file", Media: &protocol.Media{Title: "Other file", Fingerprint: "file-v1:new"}}},
 	} {
 		h := newHub(1, 2)
-		joined, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
+		joined, err := testJoin(h, testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -305,7 +306,7 @@ func TestPlaylistRemovalAndSourceReplacementResetPlayback(t *testing.T) {
 
 func TestPlaylistWheelUsesServerWinnerAndStartsItFromZero(t *testing.T) {
 	h := newHub(1, 2)
-	joined, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
+	joined, err := testJoin(h, testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +342,7 @@ func TestPlaylistWheelUsesServerWinnerAndStartsItFromZero(t *testing.T) {
 
 func TestPlaylistMutationCancelsActiveWheel(t *testing.T) {
 	h := newHub(1, 2)
-	joined, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
+	joined, err := testJoin(h, testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,15 +377,15 @@ func TestStreamOffersAndSecretsAreCapabilityScoped(t *testing.T) {
 	providerSession := testStreamSession("provider")
 	viewerSession := testStreamSession("viewer")
 	legacySession := testSession("legacy")
-	provider, err := h.join(providerSession, protocol.Hello{Name: "Ada", Room: "movie"})
+	provider, err := testJoin(h, providerSession, protocol.Hello{Name: "Ada", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	viewer, err := h.join(viewerSession, protocol.Hello{Name: "Grace", Room: "movie"})
+	viewer, err := testJoin(h, viewerSession, protocol.Hello{Name: "Grace", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := h.join(legacySession, protocol.Hello{Name: "Linus", Room: "movie"})
+	legacy, err := testJoin(h, legacySession, protocol.Hello{Name: "Linus", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,10 +393,10 @@ func TestStreamOffersAndSecretsAreCapabilityScoped(t *testing.T) {
 	if err := h.publishStreamOffer(provider.participant, protocol.MediaStreamOfferPublish{OfferID: "offer", Media: media}); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot, err := h.snapshot(viewer.participant); err != nil || len(snapshot.StreamOffers) != 1 {
+	if snapshot, err := testSnapshot(h, viewer.participant); err != nil || len(snapshot.StreamOffers) != 1 {
 		t.Fatalf("capable snapshot missing offer: snapshot=%#v err=%v", snapshot, err)
 	}
-	if snapshot, err := h.snapshot(legacy.participant); err != nil || snapshot.StreamOffers != nil {
+	if snapshot, err := testSnapshot(h, legacy.participant); err != nil || snapshot.StreamOffers != nil {
 		t.Fatalf("legacy snapshot exposed offer state: snapshot=%#v err=%v", snapshot, err)
 	}
 	for len(legacySession.out) > 0 {
@@ -405,7 +406,7 @@ func TestStreamOffersAndSecretsAreCapabilityScoped(t *testing.T) {
 		}
 	}
 
-	if _, err := h.requestStream(viewer.participant, protocol.MediaStreamRequest{OfferID: "offer", ClientPublicKey: "ephemeral-public-key"}); err != nil {
+	if _, err := testRequestStream(h, viewer.participant, protocol.MediaStreamRequest{OfferID: "offer", ClientPublicKey: "ephemeral-public-key"}); err != nil {
 		t.Fatal(err)
 	}
 	var requested protocol.MediaStreamRequested
@@ -454,7 +455,7 @@ func TestStreamOffersAndSecretsAreCapabilityScoped(t *testing.T) {
 	if !foundGrant {
 		t.Fatal("viewer did not receive the directed stream grant")
 	}
-	if snapshot, err := h.snapshot(viewer.participant); err != nil {
+	if snapshot, err := testSnapshot(h, viewer.participant); err != nil {
 		t.Fatal(err)
 	} else if raw, err := json.Marshal(snapshot); err != nil {
 		t.Fatal(err)
@@ -470,11 +471,11 @@ func TestUnansweredStreamRequestExpiresSoonButGrantsKeepTheirTTL(t *testing.T) {
 	policy := &protocol.MediaStreamPolicy{MaxOffersPerParticipant: 4, MaxViewersPerOffer: 5, GrantTTLSeconds: 120}
 	h := newHub(1, 4, policy)
 	providerSession, viewerSession := testStreamSession("provider"), testStreamSession("viewer")
-	provider, err := h.join(providerSession, protocol.Hello{Name: "Ada", Room: "movie"})
+	provider, err := testJoin(h, providerSession, protocol.Hello{Name: "Ada", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	viewer, err := h.join(viewerSession, protocol.Hello{Name: "Grace", Room: "movie"})
+	viewer, err := testJoin(h, viewerSession, protocol.Hello{Name: "Grace", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +484,7 @@ func TestUnansweredStreamRequestExpiresSoonButGrantsKeepTheirTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := protocol.MediaStreamRequest{OfferID: "offer", ClientPublicKey: "ephemeral-public-key"}
-	accepted, err := h.requestStream(viewer.participant, request)
+	accepted, err := testRequestStream(h, viewer.participant, request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +492,7 @@ func TestUnansweredStreamRequestExpiresSoonButGrantsKeepTheirTTL(t *testing.T) {
 	if remaining := time.Until(time.UnixMilli(accepted.ExpiresAtUnixMs)); remaining < 100*time.Second {
 		t.Fatalf("grant expiry shrank to %v", remaining)
 	}
-	if _, err := h.requestStream(viewer.participant, request); err == nil {
+	if _, err := testRequestStream(h, viewer.participant, request); err == nil {
 		t.Fatal("a second request was accepted while the first was pending")
 	}
 	// The provider never answers: the request is revoked and may be retried.
@@ -504,14 +505,14 @@ func TestUnansweredStreamRequestExpiresSoonButGrantsKeepTheirTTL(t *testing.T) {
 			t.Fatal("the unanswered request was never revoked")
 		}
 	}
-	if _, err := h.requestStream(viewer.participant, request); err != nil {
+	if _, err := testRequestStream(h, viewer.participant, request); err != nil {
 		t.Fatalf("retry after expiry failed: %v", err)
 	}
 }
 
 func TestPlaylistBaseRevisionRejectsStaleEdits(t *testing.T) {
 	h := newHub(1, 2)
-	joined, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
+	joined, err := testJoin(h, testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,7 +543,7 @@ func TestPlaylistBaseRevisionRejectsStaleEdits(t *testing.T) {
 
 func TestSelectingPlaylistItemByID(t *testing.T) {
 	h := newHub(1, 2)
-	joined, err := h.join(testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
+	joined, err := testJoin(h, testSession("owner"), protocol.Hello{Name: "Ada", Room: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,4 +566,126 @@ func TestSelectingPlaylistItemByID(t *testing.T) {
 	if !errors.As(err, &failure) || failure.code != protocol.ErrorPlaylistItemNotFound || joined.room.playlist.Selected != 1 {
 		t.Fatalf("selecting a removed item returned %v and selected %d", err, joined.room.playlist.Selected)
 	}
+}
+
+// testJoin joins like a session does and returns what the welcome saw.
+func testJoin(h *hub, s *session, hello protocol.Hello) (joinResult, error) {
+	var result joinResult
+	err := h.join(s, hello, func(joined joinResult) {
+		s.participant = joined.participant
+		result = joined
+	})
+	return result, err
+}
+
+// testRequestStream requests a stream and returns its acknowledgement.
+func testRequestStream(h *hub, p *participant, request protocol.MediaStreamRequest) (protocol.MediaStreamRequestAccepted, error) {
+	var accepted protocol.MediaStreamRequestAccepted
+	err := h.requestStream(p, request, func(reply protocol.MediaStreamRequestAccepted) { accepted = reply })
+	return accepted, err
+}
+
+func TestConcurrentChangesReachEveryoneInRevisionOrder(t *testing.T) {
+	h := newHub(1, 4)
+	sessions := []*session{testSession("one"), testSession("two"), testSession("observer")}
+	for _, s := range sessions {
+		s.out = make(chan outbound, 4096)
+		if _, err := testJoin(h, s, protocol.Hello{Name: s.id, Room: "movie"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var wait sync.WaitGroup
+	for _, s := range sessions[:2] {
+		wait.Go(func() {
+			for index := range 200 {
+				if err := h.setPlayback(s.participant, protocol.PlaybackSet{PositionSeconds: float64(index), Rate: 1}); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		})
+	}
+	wait.Wait()
+	observer := sessions[2]
+	last, updates := uint64(0), 0
+	for len(observer.out) > 0 {
+		frame := <-observer.out
+		if frame.envelope.Type != protocol.TypePlaybackUpdated {
+			continue
+		}
+		playback, err := protocol.DecodePayload[protocol.Playback](frame.envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if playback.Revision <= last {
+			t.Fatalf("playback revision %d arrived after %d", playback.Revision, last)
+		}
+		last = playback.Revision
+		updates++
+	}
+	if updates != 400 {
+		t.Fatalf("the observer saw %d of 400 playback updates", updates)
+	}
+}
+
+func TestStreamRequestIsAcknowledgedBeforeTheProviderHearsOfIt(t *testing.T) {
+	policy := &protocol.MediaStreamPolicy{MaxOffersPerParticipant: 4, MaxViewersPerOffer: 5, GrantTTLSeconds: 120}
+	h := newHub(1, 4, policy)
+	providerSession, viewerSession := testStreamSession("provider"), testStreamSession("viewer")
+	provider, err := testJoin(h, providerSession, protocol.Hello{Name: "Ada", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewer, err := testJoin(h, viewerSession, protocol.Hello{Name: "Grace", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	media := protocol.Media{Title: "Movie.mkv", SizeBytes: 1 << 30, Fingerprint: "file-v1:" + strings.Repeat("a", 64)}
+	if err := h.publishStreamOffer(provider.participant, protocol.MediaStreamOfferPublish{OfferID: "offer", Media: media}); err != nil {
+		t.Fatal(err)
+	}
+	for len(providerSession.out) > 0 {
+		<-providerSession.out
+	}
+	err = h.requestStream(viewer.participant, protocol.MediaStreamRequest{OfferID: "offer", ClientPublicKey: "key"}, func(protocol.MediaStreamRequestAccepted) {
+		for len(providerSession.out) > 0 {
+			if frame := <-providerSession.out; frame.envelope.Type == protocol.TypeStreamRequested {
+				t.Error("the provider was asked before the viewer's request was acknowledged")
+			}
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked := false
+	for len(providerSession.out) > 0 {
+		asked = asked || (<-providerSession.out).envelope.Type == protocol.TypeStreamRequested
+	}
+	if !asked {
+		t.Fatal("the provider was never asked for a grant")
+	}
+}
+
+func TestStreamOffersMustHaveAPlausibleSize(t *testing.T) {
+	policy := &protocol.MediaStreamPolicy{MaxOffersPerParticipant: 4, MaxViewersPerOffer: 5, GrantTTLSeconds: 120}
+	h := newHub(1, 4, policy)
+	provider, err := testJoin(h, testStreamSession("provider"), protocol.Hello{Name: "Ada", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	media := protocol.Media{Title: "Movie.mkv", SizeBytes: protocol.MaxStreamBytes + 1, Fingerprint: "file-v1:" + strings.Repeat("a", 64)}
+	if err := h.publishStreamOffer(provider.participant, protocol.MediaStreamOfferPublish{OfferID: "offer", Media: media}); err == nil {
+		t.Fatal("an impossibly large file was offered")
+	}
+}
+
+// testSnapshot returns the snapshot p would receive on joining now.
+func testSnapshot(h *hub, p *participant) (protocol.Snapshot, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r := h.roomForLocked(p)
+	if r == nil {
+		return protocol.Snapshot{}, errors.New("not joined")
+	}
+	return r.snapshot(p.state.ID, p.session.supports(protocol.CapabilityMediaStreamV1)), nil
 }

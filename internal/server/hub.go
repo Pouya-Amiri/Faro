@@ -62,7 +62,7 @@ type joinResult struct {
 	participant *participant
 	room        *room
 	ownerToken  string
-	existing    []*session
+	snapshot    protocol.Snapshot
 }
 
 func newHub(maxRooms, maxRoomParticipants int, streaming ...*protocol.MediaStreamPolicy) *hub {
@@ -74,14 +74,17 @@ func newHub(maxRooms, maxRoomParticipants int, streaming ...*protocol.MediaStrea
 	return &hub{rooms: make(map[string]*room), maxRooms: maxRooms, maxRoomParticipants: maxRoomParticipants, streaming: policy}
 }
 
-func (h *hub) join(s *session, hello protocol.Hello) (joinResult, error) {
+// join adds the session's participant to its room. welcome runs before the
+// room's lock is released, so the newcomer's welcome and snapshot are queued
+// ahead of any later change and nothing between them is lost.
+func (h *hub) join(s *session, hello protocol.Hello, welcome func(joinResult)) error {
 	name, err := validateText("name", hello.Name, maxNameRunes)
 	if err != nil {
-		return joinResult{}, err
+		return err
 	}
 	roomID, err := validateText("room", hello.Room, maxRoomRunes)
 	if err != nil {
-		return joinResult{}, err
+		return err
 	}
 
 	h.mu.Lock()
@@ -91,17 +94,17 @@ func (h *hub) join(s *session, hello protocol.Hello) (joinResult, error) {
 	ownerToken := ""
 	if r == nil {
 		if len(h.rooms) >= h.maxRooms {
-			return joinResult{}, invalid("server_full", "the server has reached its active room limit")
+			return invalid("server_full", "the server has reached its active room limit")
 		}
 		ownerToken, err = randomToken()
 		if err != nil {
-			return joinResult{}, fmt.Errorf("generate owner capability: %w", err)
+			return fmt.Errorf("generate owner capability: %w", err)
 		}
 		r = newRoom(roomID, sha256.Sum256([]byte(ownerToken)))
 		h.rooms[roomID] = r
 	}
 	if len(r.participants) >= h.maxRoomParticipants {
-		return joinResult{}, invalid("room_full", "the room has reached its participant limit")
+		return invalid("room_full", "the room has reached its participant limit")
 	}
 	role := protocol.RoleMember
 	if ownerToken != "" {
@@ -109,7 +112,7 @@ func (h *hub) join(s *session, hello protocol.Hello) (joinResult, error) {
 	} else if hello.OwnerToken != "" {
 		digest := sha256.Sum256([]byte(hello.OwnerToken))
 		if !hmac.Equal(digest[:], r.ownerDigest[:]) {
-			return joinResult{}, invalid("invalid_owner_token", "the room owner capability is invalid")
+			return invalid("invalid_owner_token", "the room owner capability is invalid")
 		}
 		role = protocol.RoleOwner
 	}
@@ -118,8 +121,11 @@ func (h *hub) join(s *session, hello protocol.Hello) (joinResult, error) {
 		state:   protocol.Participant{ID: s.id, Name: name, Role: role},
 		session: s,
 	}
+	existing := sessionsOf(r)
 	r.participants[p.state.ID] = p
-	return joinResult{participant: p, room: r, ownerToken: ownerToken, existing: sessionsOf(r)}, nil
+	welcome(joinResult{participant: p, room: r, ownerToken: ownerToken, snapshot: r.snapshot(p.state.ID, s.supports(protocol.CapabilityMediaStreamV1))})
+	broadcast(existing, protocol.TypeParticipantsUpdated, participantsOf(r))
+	return nil
 }
 
 func (h *hub) leave(p *participant) {
@@ -127,13 +133,13 @@ func (h *hub) leave(p *participant) {
 		return
 	}
 	h.mu.Lock()
-	notify := h.removeParticipantLocked(p)
-	h.mu.Unlock()
-	notify()
+	defer h.mu.Unlock()
+	h.removeParticipantLocked(p)()
 }
 
 // removeParticipantLocked takes p out of its room and returns what tells the
-// remaining participants, to be called once h.mu is released.
+// remaining participants. Like every room message, it must be sent before
+// h.mu is released, so participants see changes in the order they happened.
 func (h *hub) removeParticipantLocked(p *participant) func() {
 	var recipients []*session
 	var participants []protocol.Participant
@@ -194,14 +200,12 @@ func (h *hub) kick(p *participant, request protocol.RoomParticipantKick) error {
 		h.mu.Unlock()
 		return invalid("forbidden", "only the room owner can remove a moderator, and nobody can remove an owner")
 	}
-	notify := h.removeParticipantLocked(target)
-	recipients := sessionsOf(r)
+	h.removeParticipantLocked(target)()
 	activity := activityMessage(p.state.ID, p.state.Name, protocol.ActivityParticipantKick, 0, 0, "", 0)
 	activity.TargetName = target.state.Name
 	message := p.state.Name + " removed you from the room"
+	broadcast(sessionsOf(r), protocol.TypeActivityMessage, activity)
 	h.mu.Unlock()
-	notify()
-	broadcast(recipients, protocol.TypeActivityMessage, activity)
 	go func() {
 		target.session.fatal(protocol.ErrorKicked, message)
 		target.session.close()
@@ -229,26 +233,6 @@ func ensureModerator(r *room) {
 	}
 }
 
-func (h *hub) snapshot(p *participant) (protocol.Snapshot, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	r := h.roomForLocked(p)
-	if r == nil {
-		return protocol.Snapshot{}, invalid("not_joined", "the participant is not in a room")
-	}
-	return r.snapshot(p.state.ID, p.session.supports(protocol.CapabilityMediaStreamV1)), nil
-}
-
-func (h *hub) participants(p *participant) ([]protocol.Participant, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	r := h.roomForLocked(p)
-	if r == nil {
-		return nil, invalid("not_joined", "the participant is not in a room")
-	}
-	return participantsOf(r), nil
-}
-
 func (h *hub) setMode(p *participant, request protocol.RoomModeSet) error {
 	if request.Mode != protocol.RoomCollaborative && request.Mode != protocol.RoomModerated {
 		return invalid("invalid_room_mode", "room mode must be collaborative or moderated")
@@ -260,9 +244,8 @@ func (h *hub) setMode(p *participant, request protocol.RoomModeSet) error {
 		return invalid("forbidden", "only a room owner can change the room mode")
 	}
 	r.state.Mode = request.Mode
-	recipients, state := sessionsOf(r), r.state
+	broadcast(sessionsOf(r), protocol.TypeRoomUpdated, r.state)
 	h.mu.Unlock()
-	broadcast(recipients, protocol.TypeRoomUpdated, state)
 	return nil
 }
 
@@ -286,9 +269,8 @@ func (h *hub) setRole(p *participant, request protocol.RoomRoleSet) error {
 		return invalid("forbidden", "owner capabilities cannot be changed through roles")
 	}
 	target.state.Role = request.Role
-	recipients, participants := sessionsOf(r), participantsOf(r)
+	broadcast(sessionsOf(r), protocol.TypeParticipantsUpdated, participantsOf(r))
 	h.mu.Unlock()
-	broadcast(recipients, protocol.TypeParticipantsUpdated, participants)
 	return nil
 }
 
@@ -318,7 +300,7 @@ func (h *hub) setPlayback(p *participant, request protocol.PlaybackSet) error {
 	playback.Seek = request.Seek
 	recipients := sessionsOf(r)
 	participantID, participantName := p.state.ID, p.state.Name
-	h.mu.Unlock()
+	defer h.mu.Unlock()
 	broadcast(recipients, protocol.TypePlaybackUpdated, playback)
 	var action protocol.ActivityAction
 	switch {
@@ -367,9 +349,8 @@ func (h *hub) setMedia(p *participant, request protocol.MediaSet) error {
 		return invalid("not_joined", "the participant is not in a room")
 	}
 	p.state.Media = cloneMedia(request.Media)
-	recipients, participants := sessionsOf(r), participantsOf(r)
+	broadcast(sessionsOf(r), protocol.TypeMediaUpdated, participantsOf(r))
 	h.mu.Unlock()
-	broadcast(recipients, protocol.TypeMediaUpdated, participants)
 	return nil
 }
 
@@ -420,8 +401,6 @@ func (h *hub) setPlaylist(p *participant, request protocol.PlaylistSet) error {
 		playback = r.playback
 	}
 	recipients, playlist := sessionsOf(r), clonePlaylist(r.playlist)
-	participantID, participantName := p.state.ID, p.state.Name
-	h.mu.Unlock()
 	if cancelled != nil {
 		broadcast(recipients, protocol.TypePlaylistWheelUpdated, *cancelled)
 	}
@@ -429,7 +408,8 @@ func (h *hub) setPlaylist(p *participant, request protocol.PlaylistSet) error {
 	if selectionChanged {
 		broadcast(recipients, protocol.TypePlaybackUpdated, playback)
 	}
-	broadcast(recipients, protocol.TypeActivityMessage, activityMessage(participantID, participantName, protocol.ActivityPlaylistUpdated, 0, 0, "", len(playlist.Items)))
+	broadcast(recipients, protocol.TypeActivityMessage, activityMessage(p.state.ID, p.state.Name, protocol.ActivityPlaylistUpdated, 0, 0, "", len(playlist.Items)))
+	h.mu.Unlock()
 	return nil
 }
 
@@ -476,16 +456,15 @@ func (h *hub) selectPlaylist(p *participant, request protocol.PlaylistSelect) er
 	if index >= 0 {
 		selectedLabel = playlist.Items[index].Label
 	}
-	participantID, participantName := p.state.ID, p.state.Name
-	h.mu.Unlock()
 	if cancelled != nil {
 		broadcast(recipients, protocol.TypePlaylistWheelUpdated, *cancelled)
 	}
 	broadcast(recipients, protocol.TypePlaylistUpdated, playlist)
 	broadcast(recipients, protocol.TypePlaybackUpdated, playback)
 	if selectedLabel != "" {
-		broadcast(recipients, protocol.TypeActivityMessage, activityMessage(participantID, participantName, protocol.ActivityPlaylistPlayed, 0, 0, selectedLabel, 0))
+		broadcast(recipients, protocol.TypeActivityMessage, activityMessage(p.state.ID, p.state.Name, protocol.ActivityPlaylistPlayed, 0, 0, selectedLabel, 0))
 	}
+	h.mu.Unlock()
 	return nil
 }
 
@@ -539,11 +518,10 @@ func (h *hub) spinPlaylistWheel(p *participant) error {
 	r.wheel = cloneWheel(wheel)
 	recipients := sessionsOf(r)
 	roomID := r.state.ID
-	participantID, participantName := p.state.ID, p.state.Name
 	r.wheelTimer = time.AfterFunc(wheelStartDelay+wheelDuration, func() { h.finishPlaylistWheel(roomID, id) })
-	h.mu.Unlock()
 	broadcast(recipients, protocol.TypePlaylistWheelUpdated, *wheel)
-	broadcast(recipients, protocol.TypeActivityMessage, activityMessage(participantID, participantName, protocol.ActivityWheelStarted, 0, 0, "", 0))
+	broadcast(recipients, protocol.TypeActivityMessage, activityMessage(p.state.ID, p.state.Name, protocol.ActivityWheelStarted, 0, 0, "", 0))
+	h.mu.Unlock()
 	return nil
 }
 
@@ -605,9 +583,8 @@ func (h *hub) publishStreamOffer(p *participant, request protocol.MediaStreamOff
 	}
 	existing.Media = request.Media
 	existing.MaxViewers = maxViewers
-	recipients, offers := streamSessionsOf(r), streamOffersOf(r)
+	broadcast(streamSessionsOf(r), protocol.TypeStreamOffersUpdated, streamOffersOf(r))
 	h.mu.Unlock()
-	broadcast(recipients, protocol.TypeStreamOffersUpdated, offers)
 	return nil
 }
 
@@ -630,24 +607,27 @@ func (h *hub) withdrawStreamOffer(p *participant, offerID string) error {
 	}
 	revocations := removeOfferStreamsLocked(r, offerID, "provider withdrew the stream offer")
 	delete(r.streamOffers, offerID)
-	recipients, offers := streamSessionsOf(r), streamOffersOf(r)
-	h.mu.Unlock()
-	broadcast(recipients, protocol.TypeStreamOffersUpdated, offers)
+	broadcast(streamSessionsOf(r), protocol.TypeStreamOffersUpdated, streamOffersOf(r))
 	sendRevocations(revocations)
+	h.mu.Unlock()
 	return nil
 }
 
-func (h *hub) requestStream(p *participant, request protocol.MediaStreamRequest) (protocol.MediaStreamRequestAccepted, error) {
+// requestStream records a viewer's request and asks the provider for a grant.
+// reply acknowledges the request to the viewer; it is queued before the
+// provider hears of the request, so the viewer always learns the request ID
+// before a grant for it can arrive.
+func (h *hub) requestStream(p *participant, request protocol.MediaStreamRequest, reply func(protocol.MediaStreamRequestAccepted)) error {
 	if h.streaming == nil || p == nil || !p.session.supports(protocol.CapabilityMediaStreamV1) {
-		return protocol.MediaStreamRequestAccepted{}, invalid("streaming_unavailable", "media streaming is not available for this session")
+		return invalid("streaming_unavailable", "media streaming is not available for this session")
 	}
 	request.ClientPublicKey = strings.TrimSpace(request.ClientPublicKey)
 	if request.ClientPublicKey == "" || len(request.ClientPublicKey) > maxPublicKeyBytes || strings.ContainsAny(request.ClientPublicKey, "\r\n\x00") {
-		return protocol.MediaStreamRequestAccepted{}, invalid("invalid_stream_request", "Tailcat client public key is invalid")
+		return invalid("invalid_stream_request", "Tailcat client public key is invalid")
 	}
 	requestID, err := randomToken()
 	if err != nil {
-		return protocol.MediaStreamRequestAccepted{}, err
+		return err
 	}
 	now := time.Now()
 	// expiresAt bounds the grant the provider may issue; answerBy bounds how
@@ -660,21 +640,21 @@ func (h *hub) requestStream(p *participant, request protocol.MediaStreamRequest)
 	r := h.roomForLocked(p)
 	if r == nil {
 		h.mu.Unlock()
-		return protocol.MediaStreamRequestAccepted{}, invalid("not_joined", "the participant is not in a room")
+		return invalid("not_joined", "the participant is not in a room")
 	}
 	offer := r.streamOffers[request.OfferID]
 	if offer == nil {
 		h.mu.Unlock()
-		return protocol.MediaStreamRequestAccepted{}, invalid("stream_offer_not_found", "stream offer not found")
+		return invalid("stream_offer_not_found", "stream offer not found")
 	}
 	provider := r.participants[offer.ProviderID]
 	if provider == nil || !provider.session.supports(protocol.CapabilityMediaStreamV1) {
 		h.mu.Unlock()
-		return protocol.MediaStreamRequestAccepted{}, invalid("stream_provider_unavailable", "stream provider is unavailable")
+		return invalid("stream_provider_unavailable", "stream provider is unavailable")
 	}
 	if provider == p {
 		h.mu.Unlock()
-		return protocol.MediaStreamRequestAccepted{}, invalid("invalid_stream_request", "a provider cannot request its own stream")
+		return invalid("invalid_stream_request", "a provider cannot request its own stream")
 	}
 	active := 0
 	for _, pending := range r.streamRequests {
@@ -684,7 +664,7 @@ func (h *hub) requestStream(p *participant, request protocol.MediaStreamRequest)
 		pendingOffer := r.streamOffers[pending.offerID]
 		if pending.viewer == p && pendingOffer != nil && pendingOffer.Media.Fingerprint == offer.Media.Fingerprint {
 			h.mu.Unlock()
-			return protocol.MediaStreamRequestAccepted{}, invalid("stream_request_exists", "viewer already requested a provider for this media")
+			return invalid("stream_request_exists", "viewer already requested a provider for this media")
 		}
 	}
 	for _, grant := range r.streamGrants {
@@ -694,22 +674,23 @@ func (h *hub) requestStream(p *participant, request protocol.MediaStreamRequest)
 		grantedOffer := r.streamOffers[grant.offerID]
 		if grant.viewer == p && grantedOffer != nil && grantedOffer.Media.Fingerprint == offer.Media.Fingerprint {
 			h.mu.Unlock()
-			return protocol.MediaStreamRequestAccepted{}, invalid("stream_grant_exists", "viewer already selected a provider for this media")
+			return invalid("stream_grant_exists", "viewer already selected a provider for this media")
 		}
 	}
 	if active >= offer.MaxViewers {
 		h.mu.Unlock()
-		return protocol.MediaStreamRequestAccepted{}, invalid("stream_offer_full", "stream offer has reached its viewer limit")
+		return invalid("stream_offer_full", "stream offer has reached its viewer limit")
 	}
 	r.streamRequests[requestID] = &streamRequest{id: requestID, offerID: offer.ID, provider: provider, viewer: p, expiresAt: answerBy}
 	roomID := r.state.ID
-	h.mu.Unlock()
+	reply(protocol.MediaStreamRequestAccepted{RequestID: requestID, OfferID: offer.ID, ExpiresAtUnixMs: expiresAt.UnixMilli()})
 	provider.session.sendMessage(protocol.TypeStreamRequested, "", "", protocol.MediaStreamRequested{
 		RequestID: requestID, OfferID: offer.ID, ViewerID: p.state.ID, ViewerName: p.state.Name,
 		ClientPublicKey: request.ClientPublicKey, ExpiresAtUnixMs: expiresAt.UnixMilli(),
 	})
+	h.mu.Unlock()
 	time.AfterFunc(time.Until(answerBy), func() { h.expireStreamRequest(roomID, requestID) })
-	return protocol.MediaStreamRequestAccepted{RequestID: requestID, OfferID: offer.ID, ExpiresAtUnixMs: expiresAt.UnixMilli()}, nil
+	return nil
 }
 
 func (h *hub) grantStream(p *participant, grant protocol.MediaStreamGrant) error {
@@ -756,14 +737,13 @@ func (h *hub) grantStream(p *participant, grant protocol.MediaStreamGrant) error
 	delete(r.streamRequests, request.id)
 	r.streamGrants[request.id] = &streamGrant{requestID: request.id, offerID: request.offerID, provider: p, viewer: request.viewer, expiresAt: expiresAt}
 	offer.ViewerCount++
-	viewer, providerName := request.viewer.session, p.state.Name
-	recipients, offers, roomID := streamSessionsOf(r), streamOffersOf(r), r.state.ID
-	h.mu.Unlock()
-	viewer.sendMessage(protocol.TypeStreamGranted, "", "", protocol.MediaStreamGranted{
-		RequestID: request.id, OfferID: request.offerID, ProviderID: p.state.ID, ProviderName: providerName,
+	request.viewer.session.sendMessage(protocol.TypeStreamGranted, "", "", protocol.MediaStreamGranted{
+		RequestID: request.id, OfferID: request.offerID, ProviderID: p.state.ID, ProviderName: p.state.Name,
 		ConnectionBlob: grant.ConnectionBlob, TransferCapability: grant.TransferCapability, ExpiresAtUnixMs: grant.ExpiresAtUnixMs,
 	})
-	broadcast(recipients, protocol.TypeStreamOffersUpdated, offers)
+	broadcast(streamSessionsOf(r), protocol.TypeStreamOffersUpdated, streamOffersOf(r))
+	roomID := r.state.ID
+	h.mu.Unlock()
 	time.AfterFunc(time.Until(expiresAt), func() { h.expireStreamGrant(roomID, request.id) })
 	return nil
 }
@@ -802,10 +782,9 @@ func (h *hub) revokeStream(p *participant, request protocol.MediaStreamRevoke) e
 		h.mu.Unlock()
 		return invalid("stream_request_not_found", "stream request or grant not found")
 	}
-	recipients, offers := streamSessionsOf(r), streamOffersOf(r)
-	h.mu.Unlock()
-	broadcast(recipients, protocol.TypeStreamOffersUpdated, offers)
+	broadcast(streamSessionsOf(r), protocol.TypeStreamOffersUpdated, streamOffersOf(r))
 	sendRevocations(revocations)
+	h.mu.Unlock()
 	return nil
 }
 
@@ -818,9 +797,8 @@ func (h *hub) expireStreamRequest(roomID, requestID string) {
 	}
 	request := r.streamRequests[requestID]
 	delete(r.streamRequests, requestID)
-	revocations := revocationsFor(request.provider, request.viewer, request.id, request.offerID, "stream request expired")
+	sendRevocations(revocationsFor(request.provider, request.viewer, request.id, request.offerID, "stream request expired"))
 	h.mu.Unlock()
-	sendRevocations(revocations)
 }
 
 func (h *hub) expireStreamGrant(roomID, requestID string) {
@@ -833,16 +811,14 @@ func (h *hub) expireStreamGrant(roomID, requestID string) {
 	grant := r.streamGrants[requestID]
 	delete(r.streamGrants, requestID)
 	decrementOfferViewers(r, grant.offerID)
-	revocations := revocationsFor(grant.provider, grant.viewer, grant.requestID, grant.offerID, "stream grant expired")
-	recipients, offers := streamSessionsOf(r), streamOffersOf(r)
+	broadcast(streamSessionsOf(r), protocol.TypeStreamOffersUpdated, streamOffersOf(r))
+	sendRevocations(revocationsFor(grant.provider, grant.viewer, grant.requestID, grant.offerID, "stream grant expired"))
 	h.mu.Unlock()
-	broadcast(recipients, protocol.TypeStreamOffersUpdated, offers)
-	sendRevocations(revocations)
 }
 
 func validateStreamMedia(media protocol.Media) error {
 	media.Title = strings.TrimSpace(media.Title)
-	if media.Title == "" || utf8.RuneCountInString(media.Title) > maxMediaTitleRunes || media.SizeBytes <= 0 || media.DurationSeconds < 0 || math.IsNaN(media.DurationSeconds) || math.IsInf(media.DurationSeconds, 0) {
+	if media.Title == "" || utf8.RuneCountInString(media.Title) > maxMediaTitleRunes || media.SizeBytes <= 0 || media.SizeBytes > protocol.MaxStreamBytes || media.DurationSeconds < 0 || math.IsNaN(media.DurationSeconds) || math.IsInf(media.DurationSeconds, 0) {
 		return invalid("invalid_stream_offer", "stream offer media metadata is invalid")
 	}
 	const prefix = "file-v1:"
@@ -948,9 +924,8 @@ func (h *hub) finishPlaylistWheel(roomID, wheelID string) {
 	wheel := cloneWheel(r.wheel)
 	if wheel.Winner < 0 || wheel.Winner >= len(wheel.Items) || r.playlist.Revision != wheel.PlaylistRevision {
 		cancelled := cancelWheelLocked(r, "The queue changed before the spin finished")
-		recipients := sessionsOf(r)
+		broadcast(sessionsOf(r), protocol.TypePlaylistWheelUpdated, *cancelled)
 		h.mu.Unlock()
-		broadcast(recipients, protocol.TypePlaylistWheelUpdated, *cancelled)
 		return
 	}
 	winnerID := wheel.Items[wheel.Winner].ID
@@ -963,9 +938,8 @@ func (h *hub) finishPlaylistWheel(roomID, wheelID string) {
 	}
 	if selected < 0 {
 		cancelled := cancelWheelLocked(r, "The winning item is no longer in the queue")
-		recipients := sessionsOf(r)
+		broadcast(sessionsOf(r), protocol.TypePlaylistWheelUpdated, *cancelled)
 		h.mu.Unlock()
-		broadcast(recipients, protocol.TypePlaylistWheelUpdated, *cancelled)
 		return
 	}
 	r.wheel = nil
@@ -983,7 +957,6 @@ func (h *hub) finishPlaylistWheel(roomID, wheelID string) {
 	playback.Seek = true
 	recipients := sessionsOf(r)
 	playlist := clonePlaylist(r.playlist)
-	h.mu.Unlock()
 	broadcast(recipients, protocol.TypePlaylistWheelUpdated, *wheel)
 	broadcast(recipients, protocol.TypePlaylistUpdated, playlist)
 	broadcast(recipients, protocol.TypePlaybackUpdated, playback)
@@ -991,6 +964,7 @@ func (h *hub) finishPlaylistWheel(roomID, wheelID string) {
 		Action: protocol.ActivityWheelCompleted, ParticipantID: wheel.RequesterID, ParticipantName: wheel.RequesterName,
 		ItemLabel: playlist.Items[selected].Label, SentAtUnixMs: time.Now().UnixMilli(),
 	})
+	h.mu.Unlock()
 }
 
 func cancelWheelLocked(r *room, reason string) *protocol.PlaylistWheel {
@@ -1013,21 +987,18 @@ func (h *hub) chat(p *participant, request protocol.ChatSend) error {
 	if message == "" || utf8.RuneCountInString(message) > maxChatRunes {
 		return invalid("invalid_chat", "chat message is empty or too long")
 	}
-	h.mu.Lock()
-	r := h.roomForLocked(p)
-	if r == nil {
-		h.mu.Unlock()
-		return invalid("not_joined", "the participant is not in a room")
-	}
-	recipients := sessionsOf(r)
-	participantID, participantName := p.state.ID, p.state.Name
-	h.mu.Unlock()
 	id, err := randomToken()
 	if err != nil {
 		return err
 	}
-	broadcast(recipients, protocol.TypeChatMessage, protocol.ChatMessage{
-		ID: id, ParticipantID: participantID, ParticipantName: participantName,
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r := h.roomForLocked(p)
+	if r == nil {
+		return invalid("not_joined", "the participant is not in a room")
+	}
+	broadcast(sessionsOf(r), protocol.TypeChatMessage, protocol.ChatMessage{
+		ID: id, ParticipantID: p.state.ID, ParticipantName: p.state.Name,
 		Message: message, SentAtUnixMs: time.Now().UnixMilli(),
 	})
 	return nil
@@ -1097,9 +1068,16 @@ func participantsOf(r *room) []protocol.Participant {
 	return result
 }
 
+// broadcast queues one message for every recipient without blocking. Callers
+// hold h.mu, so all participants receive room changes in the order they were
+// made: a later revision can never overtake an earlier one.
 func broadcast(recipients []*session, messageType protocol.MessageType, payload any) {
+	envelope, err := protocol.NewEnvelope(messageType, "", "", payload)
+	if err != nil {
+		return
+	}
 	for _, recipient := range recipients {
-		recipient.sendMessage(messageType, "", "", payload)
+		recipient.enqueue(envelope)
 	}
 }
 
@@ -1259,8 +1237,7 @@ func (h *hub) setMediaAvailability(p *participant, request protocol.MediaAvailab
 		return invalid("not_joined", "the participant is not in a room")
 	}
 	p.state.AvailableMedia = append([]string(nil), request.Fingerprints...)
-	recipients, participants := sessionsOf(r), participantsOf(r)
+	broadcast(sessionsOf(r), protocol.TypeMediaUpdated, participantsOf(r))
 	h.mu.Unlock()
-	broadcast(recipients, protocol.TypeMediaUpdated, participants)
 	return nil
 }

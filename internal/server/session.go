@@ -55,6 +55,8 @@ type session struct {
 	out    chan outbound
 	done   chan struct{}
 	once   sync.Once
+	// slowOnce reports and disconnects a client that fell behind only once.
+	slowOnce sync.Once
 
 	participant  *participant
 	capabilities map[protocol.Capability]struct{}
@@ -136,35 +138,23 @@ func (s *session) handleHello(envelope protocol.Envelope) error {
 	if err := s.negotiateCapabilities(hello.Capabilities); err != nil {
 		return err
 	}
-	result, err := s.server.hub.join(s, hello)
-	if err != nil {
-		return err
-	}
-	s.participant = result.participant
-	welcome := protocol.Welcome{
-		ServerVersion: s.server.version,
-		SessionID:     s.id,
-		ParticipantID: result.participant.state.ID,
-		RoomID:        result.room.state.ID,
-		OwnerToken:    result.ownerToken,
-		Capabilities:  s.negotiatedCapabilities(),
-	}
-	if s.supports(protocol.CapabilityMediaStreamV1) {
-		policy := *s.server.streaming
-		welcome.Streaming = &policy
-	}
-	s.sendMessage(protocol.TypeWelcome, "", envelope.ID, welcome)
-	snapshot, err := s.server.hub.snapshot(result.participant)
-	if err != nil {
-		return err
-	}
-	participants, err := s.server.hub.participants(result.participant)
-	if err != nil {
-		return err
-	}
-	s.sendMessage(protocol.TypeStateSnapshot, "", "", snapshot)
-	broadcast(result.existing, protocol.TypeParticipantsUpdated, participants)
-	return nil
+	return s.server.hub.join(s, hello, func(result joinResult) {
+		s.participant = result.participant
+		welcome := protocol.Welcome{
+			ServerVersion: s.server.version,
+			SessionID:     s.id,
+			ParticipantID: result.participant.state.ID,
+			RoomID:        result.room.state.ID,
+			OwnerToken:    result.ownerToken,
+			Capabilities:  s.negotiatedCapabilities(),
+		}
+		if s.supports(protocol.CapabilityMediaStreamV1) {
+			policy := *s.server.streaming
+			welcome.Streaming = &policy
+		}
+		s.sendMessage(protocol.TypeWelcome, "", envelope.ID, welcome)
+		s.sendMessage(protocol.TypeStateSnapshot, "", "", result.snapshot)
+	})
 }
 
 func (s *session) handle(envelope protocol.Envelope) error {
@@ -258,12 +248,9 @@ func (s *session) handle(envelope protocol.Envelope) error {
 		if err != nil {
 			return err
 		}
-		accepted, err := s.server.hub.requestStream(s.participant, request)
-		if err != nil {
-			return err
-		}
-		s.sendMessage(protocol.TypeStreamRequestAccepted, "", envelope.ID, accepted)
-		return nil
+		return s.server.hub.requestStream(s.participant, request, func(accepted protocol.MediaStreamRequestAccepted) {
+			s.sendMessage(protocol.TypeStreamRequestAccepted, "", envelope.ID, accepted)
+		})
 	case protocol.TypeStreamGrant:
 		request, err := decode[protocol.MediaStreamGrant](envelope)
 		if err != nil {
@@ -353,12 +340,22 @@ func (s *session) sendMessage(messageType protocol.MessageType, id, replyTo stri
 		s.log.Error("could not encode protocol message", "type", messageType, "error", err)
 		return
 	}
+	s.enqueue(envelope)
+}
+
+// enqueue queues a message without ever blocking, so it is safe while the
+// hub's lock is held. A client too slow to drain its queue is disconnected;
+// closing happens in the background because closing a TLS connection can
+// wait on the network.
+func (s *session) enqueue(envelope protocol.Envelope) {
 	select {
 	case s.out <- outbound{envelope: envelope}:
 	case <-s.done:
 	default:
-		s.log.Warn("closing slow client")
-		s.close()
+		s.slowOnce.Do(func() {
+			s.log.Warn("closing slow client")
+			go s.close()
+		})
 	}
 }
 
