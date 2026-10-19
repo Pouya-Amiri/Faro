@@ -130,6 +130,10 @@ type Media struct {
 	DurationSeconds float64 `json:"durationSeconds"`
 	SizeBytes       int64   `json:"sizeBytes,omitempty"`
 	Fingerprint     string  `json:"fingerprint,omitempty"`
+	// Live marks a broadcast that is live now. Viewers who joined at
+	// different times see different positions in it, so only playing and
+	// pausing are shared; DurationSeconds, if set, is not its length.
+	Live bool `json:"live,omitempty"`
 }
 
 type Participant struct {

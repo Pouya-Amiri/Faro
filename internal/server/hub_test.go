@@ -689,3 +689,27 @@ func testSnapshot(h *hub, p *participant) (protocol.Snapshot, error) {
 	}
 	return r.snapshot(p.state.ID, p.session.supports(protocol.CapabilityMediaStreamV1)), nil
 }
+
+func TestUnchangedMediaIsNotBroadcastAgain(t *testing.T) {
+	h := newHub(1, 4)
+	publisher, observer := testSession("publisher"), testSession("observer")
+	joined, err := testJoin(h, publisher, protocol.Hello{Name: "Ada", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testJoin(h, observer, protocol.Hello{Name: "Grace", Room: "movie"}); err != nil {
+		t.Fatal(err)
+	}
+	for len(observer.out) > 0 {
+		<-observer.out
+	}
+	media := protocol.Media{Title: "Live", Fingerprint: "url-v1:" + strings.Repeat("a", 64), Live: true}
+	for range 3 {
+		if err := h.setMedia(joined.participant, protocol.MediaSet{Media: &media}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if updates := len(observer.out); updates != 1 {
+		t.Fatalf("the same media was broadcast %d times", updates)
+	}
+}

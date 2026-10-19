@@ -348,6 +348,11 @@ func (h *hub) setMedia(p *participant, request protocol.MediaSet) error {
 		h.mu.Unlock()
 		return invalid("not_joined", "the participant is not in a room")
 	}
+	if sameMedia(p.state.Media, request.Media) {
+		// Nothing changed: telling everyone again would only cost traffic.
+		h.mu.Unlock()
+		return nil
+	}
 	p.state.Media = cloneMedia(request.Media)
 	broadcast(sessionsOf(r), protocol.TypeMediaUpdated, participantsOf(r))
 	h.mu.Unlock()
@@ -1182,6 +1187,10 @@ func secureRandomUint64() (uint64, error) {
 		return 0, err
 	}
 	return uint64(binary.BigEndian.Uint32(data[:])), nil
+}
+
+func sameMedia(a, b *protocol.Media) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
 func cloneMedia(media *protocol.Media) *protocol.Media {
