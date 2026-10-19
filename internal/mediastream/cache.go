@@ -19,7 +19,12 @@ type cacheStore interface {
 	WriteAt(data []byte, offset int64) (evicted [][2]int64, err error)
 	// Complete reports whether the store can hold the whole file, which is
 	// what makes downloading the rest of it in the background worthwhile.
+	// A store that cannot evicts, and only such a store does.
 	Complete() bool
+	// Evictions counts the blocks evicted so far. A read is valid only if
+	// no eviction happened between deciding to read and reading: an evicted
+	// block can be recreated, partly filled, under the same position.
+	Evictions() uint64
 	Close() error
 }
 
@@ -72,6 +77,8 @@ func (s *diskStore) WriteAt(data []byte, offset int64) ([][2]int64, error) {
 
 func (s *diskStore) Complete() bool { return true }
 
+func (s *diskStore) Evictions() uint64 { return 0 }
+
 func (s *diskStore) Close() error {
 	var err error
 	s.once.Do(func() {
@@ -103,6 +110,7 @@ type blockStore struct {
 	limit     int
 	blocks    map[int64]*list.Element
 	order     *list.List
+	evictions uint64
 
 	// Disk-backed stores place blocks in slots of file; memory stores keep
 	// each block's bytes in the block itself.
@@ -175,6 +183,7 @@ func (s *blockStore) block(index int64, create bool, evicted *[][2]int64) *store
 		delete(s.blocks, old.index)
 		start := old.index * s.blockSize
 		*evicted = append(*evicted, [2]int64{start, start + s.blockLength(old.index)})
+		s.evictions++
 		if s.file != nil {
 			s.freeSlots = append(s.freeSlots, old.slot)
 		}
@@ -234,6 +243,12 @@ func (s *blockStore) WriteAt(data []byte, offset int64) ([][2]int64, error) {
 }
 
 func (s *blockStore) Complete() bool { return int64(s.limit)*s.blockSize >= s.size }
+
+func (s *blockStore) Evictions() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.evictions
+}
 
 // onDisk reports whether a write failure can mean the disk is full.
 func (s *blockStore) onDisk() bool { return s.file != nil }

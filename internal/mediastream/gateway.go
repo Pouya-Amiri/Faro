@@ -593,6 +593,7 @@ func (g *Gateway) serve(ctx context.Context, writer io.Writer, start, end int64)
 		}
 		g.scheduleReadAheadLocked(position)
 		store := g.store
+		evictions := store.Evictions()
 		g.mu.Unlock()
 		piece := buffer[:min(available, int64(len(buffer)))]
 		read, err := store.ReadAt(piece, position)
@@ -600,6 +601,11 @@ func (g *Gateway) serve(ctx context.Context, writer io.Writer, start, end int64)
 			// Evicted by a bounded cache, or the cache was replaced, in the
 			// meantime: fetch it again.
 			g.forget(position, position+int64(len(piece)))
+			continue
+		}
+		if store.Evictions() != evictions {
+			// The bounded cache evicted a block meanwhile; what was read may
+			// come from a block recreated since. Check again what is cached.
 			continue
 		}
 		if err := writeGatewayBytes(writer, piece[:read]); err != nil {
@@ -941,15 +947,23 @@ func (g *Gateway) download(ctx context.Context, f *fetch) error {
 		}
 		read, err := response.Body.Read(buffer[:min(int64(len(buffer)), remaining)])
 		if read > 0 {
-			evicted, writeErr := store.WriteAt(buffer[:read], f.next)
-			if writeErr != nil {
+			// A bounded cache evicts while writing. The write and recording
+			// what it evicted happen under one lock, so no reader and no other
+			// fetch can see a unit as cached after its block was dropped.
+			evicting := !store.Complete()
+			if evicting {
 				g.mu.Lock()
+			}
+			evicted, writeErr := store.WriteAt(buffer[:read], f.next)
+			if !evicting {
+				g.mu.Lock()
+			}
+			if writeErr != nil {
 				g.replaceFailedStoreLocked(store, writeErr)
 				g.mu.Unlock()
 				return writeErr
 			}
 			g.received.Add(int64(read))
-			g.mu.Lock()
 			if g.store != store {
 				g.mu.Unlock()
 				return errStoreReplaced
@@ -957,11 +971,11 @@ func (g *Gateway) download(ctx context.Context, f *fetch) error {
 			now := time.Now()
 			f.next += int64(read)
 			f.progressAt = now
-			g.markLocked(f)
-			g.observeRateLocked(now)
 			for _, span := range evicted {
 				g.clearLocked(span[0], span[1])
 			}
+			g.markLocked(f)
+			g.observeRateLocked(now)
 			g.cond.Broadcast()
 			g.mu.Unlock()
 		}
