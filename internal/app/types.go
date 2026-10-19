@@ -53,6 +53,7 @@ type Event struct {
 	Connection      *ConnectionStatus         `json:"connection,omitempty"`
 	Wheel           *protocol.PlaylistWheel   `json:"wheel,omitempty"`
 	Stream          *StreamStatus             `json:"stream,omitempty"`
+	StreamChat      *StreamChat               `json:"streamChat,omitempty"`
 	Sync            *SyncStatus               `json:"sync,omitempty"`
 	ServerNowUnixMs int64                     `json:"serverNowUnixMs,omitempty"`
 }
@@ -79,11 +80,26 @@ type StreamStatus struct {
 	CachedRanges [][2]float64 `json:"cachedRanges,omitempty"`
 }
 
+// StreamChat carries the live chat of the broadcast this participant's
+// player shows, kept apart from the room's own chat. It is read only.
+type StreamChat struct {
+	// Session increases with every broadcast whose chat is followed, so
+	// updates from a chat that was already left can be ignored.
+	Session uint64 `json:"session"`
+	// State is "active" while messages arrive, then "ended" or
+	// "unavailable" (Message says why).
+	State    string                `json:"state"`
+	Message  string                `json:"message,omitempty"`
+	Messages []youtube.ChatMessage `json:"messages,omitempty"`
+	Removed  []string              `json:"removed,omitempty"`
+}
+
 // SyncStatus is how closely this participant's own player follows the room.
 // Other participants' positions are not shared, so it cannot speak for them.
 type SyncStatus struct {
-	// State is "synced", "catching-up", "buffering" or "idle" (no player, or
-	// media still loading).
+	// State is "synced", "catching-up", "buffering", "live" (a live
+	// broadcast: only playing and pausing are followed) or "idle" (no
+	// player, or media still loading).
 	State        string  `json:"state"`
 	DriftSeconds float64 `json:"driftSeconds,omitempty"`
 }
@@ -178,6 +194,12 @@ type Service struct {
 	selectedItemIdentity    string
 	load                    *mediaLoad
 	mediaGen                uint64
+	published               publishedMedia
+	currentLive             bool
+	liveProbe               liveProbe
+	recovery                playbackRecovery
+	liveChat                *liveChatReader
+	liveChatSession         uint64
 	lastRemoteRevision      uint64
 	currentSource           string
 	manualSource            string

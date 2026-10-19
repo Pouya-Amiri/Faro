@@ -120,6 +120,7 @@ func (s *Service) consumePlayer(ctx context.Context, mediaPlayer player.Player) 
 			if event.Kind == player.EventFailed && event.Err != nil {
 				s.log("player: %v", event.Err)
 				s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "player_failed", Message: event.Err.Error()}})
+				s.recoverFailedPlayback(client)
 			}
 			s.mu.RLock()
 			openingMedia := s.openingMedia
@@ -202,7 +203,17 @@ func (s *Service) publishPlayerMedia(ctx context.Context, client *faroclient.Cli
 	}
 	s.mu.Lock()
 	gen := s.mediaGen
-	var media *protocol.Media
+	if s.observeDurationLocked(gen, state.DurationSeconds, time.Now()) {
+		s.log("player: the media is a live stream; only playing and pausing are shared")
+	}
+	media, known := s.mediaUpdateLocked(gen, state.Source, state.Title, state.DurationSeconds)
+	if known {
+		s.mu.Unlock()
+		if err := s.publishMedia(client, gen, media); err != nil {
+			s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "media_publish", Message: err.Error()}})
+		}
+		return
+	}
 	if stream := s.stream; stream != nil && stream.gateway != nil && state.Source == stream.gateway.URL() {
 		if stream.media.DurationSeconds <= 0 && state.DurationSeconds > 0 {
 			// The stream opened without a known duration and the player has
@@ -222,6 +233,9 @@ func (s *Service) publishPlayerMedia(ctx context.Context, client *faroclient.Cli
 		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "media_identity", Message: err.Error()}})
 		return
 	}
+	s.mu.RLock()
+	media.Live = media.Live || s.mediaGen == gen && s.currentLive
+	s.mu.RUnlock()
 	if err := s.publishMedia(client, gen, media); err != nil {
 		s.sink(Event{Kind: "error", Error: &protocol.Error{Code: "media_publish", Message: err.Error()}})
 	}
@@ -237,7 +251,7 @@ func (s *Service) logicalSourceForPlayerEvent(eventSource string) string {
 		return s.currentSource
 	}
 	if eventSource != "" && eventSource != s.currentSource {
-		s.currentSource = eventSource
+		s.currentSource, s.currentPlayerSource = eventSource, eventSource
 		s.sponsorSegments = nil
 		s.lastSponsorEnd = 0
 	}
@@ -340,6 +354,12 @@ func (s *Service) observeLocalChange(current player.State) (bool, bool) {
 	seek := !current.Buffering && !previous.Buffering && current.Source == previous.Source && math.Abs(current.PositionSeconds-expectedPosition(previous, current.ObservedAt)) > threshold
 	pause := previous.Paused != current.Paused
 	rate := math.Abs(previous.Rate-current.Rate) > 0.001
+	if s.currentLive {
+		// In a live broadcast a position or speed means nothing to anyone
+		// else: viewers seeking in their own player watch from there, and
+		// only playing and pausing reach the room.
+		seek, rate = false, false
+	}
 	if time.Now().Before(s.expectedUntil) {
 		if pause && s.expectedPause != nil && current.Paused == *s.expectedPause {
 			pause = false

@@ -104,6 +104,8 @@ func (s *Service) loadOwnsPlayerLocked(load *mediaLoad, client *faroclient.Clien
 // left alone. It returns the new media generation.
 func (s *Service) invalidateMediaLocked() uint64 {
 	s.mediaGen++
+	s.currentLive = false
+	s.stopLiveChatLocked()
 	s.selectedItem, s.selectedItemIdentity = "", ""
 	s.currentSource, s.currentPlayerSource = "", ""
 	s.sponsorSegments, s.lastSponsorEnd = nil, 0
@@ -114,17 +116,31 @@ func (s *Service) invalidateMediaLocked() uint64 {
 // the media generation the information belongs to: once anything newer has
 // been loaded or the player's media was invalidated, it is dropped, so an
 // abandoned load can never overwrite newer state. Publications are
-// serialized, so the room receives them in generation order.
+// serialized, so the room receives them in generation order, and repeating
+// what was already announced sends nothing.
 func (s *Service) publishMedia(client *faroclient.Client, gen uint64, media *protocol.Media) error {
 	s.mediaPublishMu.Lock()
 	defer s.mediaPublishMu.Unlock()
 	s.mu.RLock()
 	current := s.client == client && s.mediaGen == gen
+	repeated := s.published.gen == gen && sameMedia(s.published.media, media)
 	s.mu.RUnlock()
-	if !current {
+	if !current || repeated {
 		return nil
 	}
-	return client.SetMedia(protocol.MediaSet{Media: media})
+	if err := client.SetMedia(protocol.MediaSet{Media: media}); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.mediaGen == gen {
+		s.published = publishedMedia{gen: gen, media: cloneStreamMedia(media)}
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+func sameMedia(a, b *protocol.Media) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
 // loadResult is what loadSource put in the player.
@@ -160,13 +176,22 @@ func (s *Service) openSource(load *mediaLoad, client *faroclient.Client, mediaPl
 	if err != nil {
 		return loadResult{}, err
 	}
-	state, err := s.waitForPlayerMedia(load.ctx, mediaPlayer, info.Duration)
+	// A live broadcast may never report a fixed duration; once it is open
+	// there is nothing to wait for.
+	state, err := s.waitForPlayerMedia(load.ctx, mediaPlayer, info.Duration > 0 || info.Live)
 	if err != nil {
 		return loadResult{}, err
 	}
-	playback := localClockSnapshot(client).Playback
-	_ = mediaPlayer.Seek(load.ctx, playback.PositionSeconds)
-	_ = mediaPlayer.SetRate(load.ctx, normalizedRate(playback.Rate))
+	if info.Live {
+		// Positions in a live broadcast depend on when each viewer joined, so
+		// the room's position means nothing here; play at normal speed from
+		// where the player starts.
+		_ = mediaPlayer.SetRate(load.ctx, 1)
+	} else {
+		playback := localClockSnapshot(client).Playback
+		_ = mediaPlayer.Seek(load.ctx, playback.PositionSeconds)
+		_ = mediaPlayer.SetRate(load.ctx, normalizedRate(playback.Rate))
+	}
 	if err := load.ctx.Err(); err != nil {
 		return loadResult{}, err
 	}
@@ -183,6 +208,12 @@ func (s *Service) commitSourceLocked(result loadResult) uint64 {
 	s.sponsorSegments = append([]youtube.Segment(nil), result.info.Segments...)
 	s.lastSponsorEnd = 0
 	s.mediaGen++
+	s.currentLive = result.info.Live
+	if result.info.Live && youtube.IsURL(result.source) {
+		s.followLiveChatLocked(result.source)
+	} else {
+		s.stopLiveChatLocked()
+	}
 	return s.mediaGen
 }
 
@@ -305,6 +336,7 @@ func (s *Service) loadSelectedItem(client *faroclient.Client, plan selectedLoad)
 		if duration := firstPositive(result.info.Duration, result.state.DurationSeconds); duration > 0 {
 			media.DurationSeconds = duration
 		}
+		media.Live = result.info.Live
 	}
 	s.mu.Lock()
 	latest, ok := selectedPlaylistItem(client.Snapshot().Playlist)
@@ -701,6 +733,7 @@ func (s *Service) reopenMediaAtRoomClock(source string, paused bool) error {
 	if duration := firstPositive(result.info.Duration, result.state.DurationSeconds); duration > 0 {
 		identity.Media.DurationSeconds = duration
 	}
+	identity.Media.Live = identity.Media.Live || result.info.Live
 	if identity.Path != "" {
 		s.rememberSource(identity.Media.Fingerprint, identity.Path)
 	}
@@ -973,9 +1006,11 @@ func (s *Service) ChangeYouTubeQuality(source string, height int) error {
 // waitForPlayerMedia bridges the asynchronous load semantics of mpv-family
 // players. Open only acknowledges the load command; duration and chapters are
 // populated shortly afterwards. Publishing the first state too early leaves
-// the UI with a disabled timeline until the same file is opened again. It
-// fails only if ctx ends: an abandoned load must not be committed.
-func (s *Service) waitForPlayerMedia(ctx context.Context, mediaPlayer player.Player, knownDuration float64) (player.State, error) {
+// the UI with a disabled timeline until the same file is opened again. With
+// sourceEnough (the duration is known already, or there is none to wait
+// for), the player reporting its source is enough. It fails only if ctx
+// ends: an abandoned load must not be committed.
+func (s *Service) waitForPlayerMedia(ctx context.Context, mediaPlayer player.Player, sourceEnough bool) (player.State, error) {
 	var latest player.State
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
@@ -985,7 +1020,7 @@ func (s *Service) waitForPlayerMedia(ctx context.Context, mediaPlayer player.Pla
 		state, err := mediaPlayer.State(ctx)
 		if err == nil {
 			latest = state
-			if state.DurationSeconds > 0 || knownDuration > 0 && state.Source != "" {
+			if state.DurationSeconds > 0 || sourceEnough && state.Source != "" {
 				return latest, nil
 			}
 		}

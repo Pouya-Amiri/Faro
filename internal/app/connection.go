@@ -246,7 +246,15 @@ func (s *Service) applyRemote(ctx context.Context, playback protocol.Playback, f
 	}
 	applyCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	err := controller.ApplyRemote(applyCtx, playback, forceSeek)
+	s.mu.RLock()
+	live := s.currentLive
+	s.mu.RUnlock()
+	var err error
+	if live {
+		err = controller.FollowLive(applyCtx, playback)
+	} else {
+		err = controller.ApplyRemote(applyCtx, playback, forceSeek)
+	}
 	if err == nil {
 		s.mu.Lock()
 		s.lastRemoteRevision = playback.Revision
@@ -714,6 +722,8 @@ func syncStatusOf(status syncer.Status) SyncStatus {
 		return SyncStatus{State: "idle"}
 	case status.Buffering:
 		return SyncStatus{State: "buffering"}
+	case status.Live:
+		return SyncStatus{State: "live"}
 	case status.InSync():
 		return SyncStatus{State: "synced", DriftSeconds: status.DriftSeconds}
 	}

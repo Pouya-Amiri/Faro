@@ -5,6 +5,9 @@ const $ = (id) => document.getElementById(id);
 let snapshot = null;
 let timeline = [];
 let chatFilter = "all";
+// The live broadcast's own chat, shown in its own tab and never mixed with
+// the room's. A higher session replaces the chat of an earlier broadcast.
+let streamChat = { session: 0, state: "idle", message: "", entries: [] };
 let availability = {};
 let hosted = { running: false };
 let lastConnectionRequest = null;
@@ -289,9 +292,10 @@ function referenceMedia() {
 }
 
 // A copy may not know its duration yet (a stream still opening), while a
-// friend's copy or the queue entry for the same file does.
+// friend's copy or the queue entry for the same file does. A live broadcast
+// has no duration to show: each viewer's player has its own window of it.
 function mediaDuration(media) {
-  if (!media) return 0;
+  if (!media || media.live) return 0;
   const candidates = [media, ...(snapshot?.participants || []).map((person) => person.media), ...(snapshot?.playlist?.items || []).map((item) => item.media)];
   for (const candidate of candidates) {
     if (candidate !== media && candidate?.fingerprint !== media.fingerprint) continue;
@@ -786,10 +790,13 @@ function render() {
   $("owner-invite").classList.toggle("hidden", me?.role !== "owner");
   $("settings-owner-invite").classList.toggle("hidden", me?.role !== "owner");
 
+  const media = me?.media || snapshot.participants.find((person) => person.media)?.media;
+  // Position and speed are not shared in a live broadcast; only play/pause.
+  const live = Boolean(media?.live);
   for (const id of ["pause", "position", "back-ten", "forward-ten", "add-file", "empty-add-file", "add-stream-btn", "add-playlist", "shuffle-playlist", "shuffle-all", "load-playlist-file", "save-playlist-file", "clear-playlist", "spin-wheel", "wheel-spin-again", "previous-media", "next-media"]) setDisabled(id, !allowed);
   setDisabled("add-playlist", !allowed || addingPlaylistURL);
+  if (live) for (const id of ["back-ten", "forward-ten"]) setDisabled(id, true);
 
-  const media = me?.media || snapshot.participants.find((person) => person.media)?.media;
   const title = media?.title || "No media loaded";
   $("media-title").textContent = title;
   $("media-title").title = title;
@@ -811,10 +818,10 @@ function render() {
     const projected = projectedPlaybackPosition();
     const displayedPosition = hasDuration ? clamp(projected, 0, duration) : Math.max(0, projected);
     position.value = hasDuration ? String(displayedPosition) : "0";
-    $("current-time").textContent = formatTime(displayedPosition);
+    $("current-time").textContent = live ? "LIVE" : formatTime(displayedPosition);
     updateScrubberProgress(displayedPosition, duration);
   }
-  $("duration").textContent = hasDuration ? formatTime(duration) : "--:--";
+  $("duration").textContent = hasDuration ? formatTime(duration) : live ? "" : "--:--";
   refreshTimelineSegments();
 
   const pauseBtn = $("pause");
@@ -855,11 +862,12 @@ function updateRateControl(rate) {
   if (control.value !== key) control.value = key;
   control.dataset.value = key;
   for (const option of control.options) option.disabled = Number(option.value) < rateRange.min || Number(option.value) > rateRange.max;
-  const unavailable = !canControl() || !rateRange.supported;
+  const live = Boolean(referenceMedia()?.live);
+  const unavailable = !canControl() || !rateRange.supported || live;
   control.disabled = unavailable;
   $("rate-decrease").disabled = unavailable || value <= rateRange.min + 1e-9;
   $("rate-increase").disabled = unavailable || value >= rateRange.max - 1e-9;
-  const title = rateRange.supported ? "Playback speed" : "This media player cannot change playback speed";
+  const title = live ? "Speed is not shared in a live broadcast" : rateRange.supported ? "Playback speed" : "This media player cannot change playback speed";
   control.title = title;
   control.parentElement.title = title;
   control._syncCustomSelect?.();
@@ -1459,6 +1467,10 @@ function renderSyncBadge(media = referenceMedia(), mismatches = mismatchCount(me
         text = "Buffering"; tone = "badge-warning";
         title = "Your player is buffering";
         break;
+      case "live":
+        text = "Live"; tone = "badge-success";
+        title = "A live broadcast: playing and pausing are shared, and everyone watches from where they joined";
+        break;
       default:
         text = "Waiting for player";
         title = "Sync starts once your player has the media open";
@@ -1716,16 +1728,26 @@ function beginPlaylistReorder(event, sourceRow, sourceIndex, allowed) {
   document.addEventListener("pointercancel", finish, true);
 }
 
+// Video details change rarely, but a live link (a channel's /live address)
+// can point at another broadcast later, so its details expire sooner.
+const youtubeInfoLifetime = 10 * 60 * 1000;
+const liveYouTubeInfoLifetime = 60 * 1000;
 async function youtubeInfo(source) {
   if (!isYouTubeURL(source)) return null;
-  if (!youtubeInfoCache.has(source)) {
-    const request = invoke("YouTubeInfo", source).catch((error) => {
-      youtubeInfoCache.delete(source);
+  const cached = youtubeInfoCache.get(source);
+  if (!cached || Date.now() > cached.expires) {
+    const entry = { expires: Date.now() + youtubeInfoLifetime };
+    entry.request = invoke("YouTubeInfo", source).then((info) => {
+      if (info?.live) entry.expires = Date.now() + liveYouTubeInfoLifetime;
+      return info;
+    }, (error) => {
+      if (youtubeInfoCache.get(source) === entry) youtubeInfoCache.delete(source);
       throw error;
     });
-    youtubeInfoCache.set(source, request);
+    youtubeInfoCache.set(source, entry);
+    return entry.request;
   }
-  return youtubeInfoCache.get(source);
+  return cached.request;
 }
 
 function savedYouTubeQuality(source) {
@@ -2240,6 +2262,9 @@ function closeRoomView() {
   renderChat();
   streamingAvailable = false;
   streamState = { state: "idle", offerId: "", route: "" };
+  streamChat = { session: 0, state: "idle", message: "", entries: [] };
+  $("stream-chat-filter").classList.add("hidden");
+  if (chatFilter === "stream") document.querySelector('[data-chat-filter="all"]')?.click();
   syncStatus = { state: "idle", driftSeconds: 0 };
   timelineSegments = []; timelineSegmentKey = ""; timelineSegmentsRetryKey = "";
   isScrubbing = false;
@@ -2522,7 +2547,11 @@ $("chat-form").onsubmit = async (event) => {
   const button = event.submitter || $("chat-form").querySelector("[type=submit]");
   await withButtonLoading(button, async () => { await invoke("SendChat", message); input.value = ""; }).catch(showError);
 };
-$("clear-chat").onclick = () => { timeline = []; renderChat(); };
+$("clear-chat").onclick = () => {
+  if (chatFilter === "stream") streamChat.entries = [];
+  else timeline = [];
+  renderChat();
+};
 document.querySelectorAll("[data-chat-filter]").forEach((button) => {
   button.onclick = () => {
     chatFilter = button.dataset.chatFilter || "all";
@@ -2666,15 +2695,66 @@ function renderChatMessage(entry) {
 function renderChat() {
   const chatStream = $("chat");
   if (!chatStream) return;
-  const visible = timeline.filter((entry) => chatFilter === "all" || entry.kind === chatFilter);
+  // The broadcast's chat is read only; messages to the room are written in
+  // the other tabs.
+  $("chat-form").classList.toggle("hidden", chatFilter === "stream");
+  const visible = chatFilter === "stream" ? streamChat.entries : timeline.filter((entry) => chatFilter === "all" || entry.kind === chatFilter);
   if (!visible.length) {
-    const label = chatFilter === "activity" ? "No room activity yet." : chatFilter === "chat" ? "No chat messages yet." : "Chat messages and room activity will appear here.";
-    chatStream.innerHTML = `<div class="chat-empty"><span>✦</span><p>${label}</p></div>`;
+    const label = chatFilter === "stream" ? streamChatEmptyLabel() : chatFilter === "activity" ? "No room activity yet." : chatFilter === "chat" ? "No chat messages yet." : "Chat messages and room activity will appear here.";
+    chatStream.innerHTML = '<div class="chat-empty"><span>✦</span><p></p></div>';
+    chatStream.querySelector(".chat-empty p").textContent = label;
     return;
   }
-  chatStream.replaceChildren(...visible.map((entry) => entry.kind === "activity" ? renderActivity(entry) : renderChatMessage(entry)));
+  chatStream.replaceChildren(...visible.map((entry) => entry.kind === "stream" ? renderStreamChatMessage(entry) : entry.kind === "activity" ? renderActivity(entry) : renderChatMessage(entry)));
   chatStream.scrollTop = chatStream.scrollHeight;
   $("chat-new-messages")?.classList.add("hidden");
+}
+
+function streamChatEmptyLabel() {
+  if (streamChat.state === "unavailable") return streamChat.message ? `The broadcast's chat is unavailable: ${streamChat.message}` : "The broadcast's chat is unavailable.";
+  if (streamChat.state === "ended") return "The broadcast's chat has ended.";
+  return "Waiting for the broadcast's chat…";
+}
+
+function renderStreamChatMessage(entry) {
+  const message = entry.value;
+  const text = [message.amount, message.text].filter(Boolean).join(" · ");
+  const row = renderChatMessage({ value: { participantName: message.author || "?", message: text }, sentAtUnixMs: entry.sentAtUnixMs });
+  row.classList.add("stream-chat-row");
+  row.dataset.streamMessage = message.id;
+  // YouTube names are handles ("@name"); the avatar shows the name's letter.
+  row.querySelector(".chat-msg-avatar").textContent = (message.author || "?").replace(/^@/, "").slice(0, 1).toUpperCase() || "?";
+  return row;
+}
+
+// A broadcast's chat can be busy, so it keeps fewer messages than the room
+// feed and is shown only in its own tab.
+const streamChatLimit = 300;
+function receiveStreamChat(update) {
+  const session = Number(update.session) || 0;
+  if (session < streamChat.session) return;
+  if (session > streamChat.session) streamChat = { session, state: "active", message: "", entries: [] };
+  streamChat.state = update.state || streamChat.state;
+  streamChat.message = update.message || "";
+  const removed = new Set(update.removed || []);
+  if (removed.size) streamChat.entries = streamChat.entries.filter((entry) => !removed.has(entry.value.id));
+  const added = (update.messages || []).map((message) => ({ kind: "stream", value: message, sentAtUnixMs: message.sentAtUnixMs || Date.now() }));
+  streamChat.entries.push(...added);
+  if (streamChat.entries.length > streamChatLimit) streamChat.entries = streamChat.entries.slice(-streamChatLimit);
+  const available = streamChat.state === "active" || streamChat.entries.length > 0;
+  $("stream-chat-filter").classList.toggle("hidden", !available);
+  if (chatFilter !== "stream") return;
+  if (!available) {
+    document.querySelector('[data-chat-filter="all"]')?.click();
+    return;
+  }
+  const chatStream = $("chat");
+  if (removed.size || !chatStream.querySelector(".stream-chat-row")) { renderChat(); return; }
+  const following = chatStream.scrollHeight - chatStream.scrollTop - chatStream.clientHeight < 24;
+  chatStream.append(...added.map(renderStreamChatMessage));
+  while (chatStream.childElementCount > streamChatLimit) chatStream.firstElementChild.remove();
+  if (following) chatStream.scrollTop = chatStream.scrollHeight;
+  else if (added.length) $("chat-new-messages")?.classList.remove("hidden");
 }
 
 // Menus and settings dialog
@@ -3188,9 +3268,10 @@ document.addEventListener("contextmenu", (event) => {
     menuButton("Close window", act(() => wails?.Window?.Close()))
   ];
   const chatFilterItems = () => [
-    ["all", "Show everything"], ["chat", "Chat only"], ["activity", "Activity only"]
+    ["all", "Show everything"], ["chat", "Chat only"], ["activity", "Activity only"],
+    ...($("stream-chat-filter").classList.contains("hidden") ? [] : [["stream", "Broadcast chat"]]),
   ].map(([value, label]) => menuButton(label, act(() => document.querySelector(`[data-chat-filter="${value}"]`)?.click()), { checked: chatFilter === value }));
-  const clearChatItem = () => menuButton("Clear feed", act(() => $("clear-chat").click()), { disabled: !timeline.length });
+  const clearChatItem = () => menuButton("Clear feed", act(() => $("clear-chat").click()), { disabled: chatFilter === "stream" ? !streamChat.entries.length : !timeline.length });
 
   if (event.target.closest("#wheel-dialog")) {
     open([
@@ -3419,6 +3500,7 @@ function receive(event) {
     if (snapshot) renderSyncBadge();
   }
   if (event.wheel) showWheel(event.wheel, event.serverNowUnixMs);
+  if (event.streamChat) receiveStreamChat(event.streamChat);
   if (event.chat) addChat(event.chat);
   if (event.activity) addActivity(event.activity);
   if (event.error?.code === "kicked") {

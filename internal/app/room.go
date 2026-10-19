@@ -129,6 +129,15 @@ func (s *Service) SetPaused(paused bool) error {
 	return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: state.PositionSeconds, Paused: paused, Rate: publishedRate(client, state.Rate)})
 }
 
+var errLiveControl = errors.New("this is a live broadcast: everyone watches from where they joined, so position and speed are not shared; seek in your own player to watch earlier")
+
+// playingLive reports whether the player shows a live broadcast.
+func (s *Service) playingLive() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.currentLive
+}
+
 // publishPaused tells the room to pause or resume at its current position.
 func publishPaused(client *faroclient.Client, paused bool) error {
 	snapshot := localClockSnapshot(client)
@@ -193,6 +202,9 @@ func (s *Service) Seek(seconds float64) error {
 			Rate: normalizedRate(snapshot.Playback.Rate), Seek: true,
 		})
 	}
+	if s.playingLive() {
+		return errLiveControl
+	}
 	ctx, cancel := context.WithTimeout(s.root, 3*time.Second)
 	defer cancel()
 	s.syncApplyMu.Lock()
@@ -223,6 +235,9 @@ func (s *Service) SetRate(rate float64) error {
 		}
 		snapshot := localClockSnapshot(client)
 		return client.SetPlayback(protocol.PlaybackSet{PositionSeconds: snapshot.Playback.PositionSeconds, Paused: snapshot.Playback.Paused, Rate: rate})
+	}
+	if s.playingLive() {
+		return errLiveControl
 	}
 	ctx, cancel := context.WithTimeout(s.root, 3*time.Second)
 	defer cancel()

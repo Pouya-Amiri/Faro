@@ -174,7 +174,7 @@ func TestWaitForPlayerMediaWaitsForFirstDuration(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	state, err := service.waitForPlayerMedia(ctx, mediaPlayer, 0)
+	state, err := service.waitForPlayerMedia(ctx, mediaPlayer, false)
 	if err != nil || state.DurationSeconds != 123 {
 		t.Fatalf("published media before duration was ready: %#v", state)
 	}
