@@ -175,7 +175,9 @@ func (s *blockStore) block(index int64, create bool, evicted *[][2]int64) *store
 		delete(s.blocks, old.index)
 		start := old.index * s.blockSize
 		*evicted = append(*evicted, [2]int64{start, start + s.blockLength(old.index)})
-		s.freeSlots = append(s.freeSlots, old.slot)
+		if s.file != nil {
+			s.freeSlots = append(s.freeSlots, old.slot)
+		}
 	}
 	if s.file == nil {
 		block.data = make([]byte, s.blockLength(index))
@@ -240,6 +242,7 @@ func (s *blockStore) Close() error {
 	s.mu.Lock()
 	clear(s.blocks)
 	s.order.Init()
+	s.freeSlots = nil
 	s.mu.Unlock()
 	var err error
 	if s.file != nil {

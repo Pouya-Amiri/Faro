@@ -41,18 +41,25 @@ type SourceConfig struct {
 	Media              protocol.Media
 	MaxRangeBytes      int64
 	MaxConcurrentReads int
+	// OnChanged is called once if the file is modified in place while it is
+	// shared. Its bytes no longer match the advertised identity, so the
+	// source refuses every later request.
+	OnChanged func()
 }
 
 type Source struct {
 	file        *os.File
 	media       protocol.Media
+	modified    time.Time
 	contentType string
 	maxRange    int64
 	reads       chan struct{}
+	onChanged   func()
 
 	mu           sync.Mutex
 	capabilities map[[sha256.Size]byte]time.Time
 	closed       bool
+	changed      bool
 }
 
 func NewSource(cfg SourceConfig) (*Source, error) {
@@ -76,7 +83,7 @@ func NewSource(cfg SourceConfig) (*Source, error) {
 		file.Close()
 		return nil, errors.New("stream source changed while it was being opened")
 	}
-	if cfg.Media.SizeBytes != openedInfo.Size() || cfg.Media.SizeBytes <= 0 || !validFileFingerprint(cfg.Media.Fingerprint) {
+	if cfg.Media.SizeBytes != openedInfo.Size() || cfg.Media.SizeBytes <= 0 || cfg.Media.SizeBytes > protocol.MaxStreamBytes || !validFileFingerprint(cfg.Media.Fingerprint) {
 		file.Close()
 		return nil, errors.New("stream source does not match its file-v1 media metadata")
 	}
@@ -101,8 +108,8 @@ func NewSource(cfg SourceConfig) (*Source, error) {
 		contentType = "application/octet-stream"
 	}
 	return &Source{
-		file: file, media: cfg.Media, contentType: contentType, maxRange: maxRange,
-		reads: make(chan struct{}, concurrency), capabilities: make(map[[sha256.Size]byte]time.Time),
+		file: file, media: cfg.Media, modified: openedInfo.ModTime(), contentType: contentType, maxRange: maxRange,
+		reads: make(chan struct{}, concurrency), capabilities: make(map[[sha256.Size]byte]time.Time), onChanged: cfg.OnChanged,
 	}, nil
 }
 
@@ -216,6 +223,9 @@ func (s *Source) response(request *http.Request) *http.Response {
 	if !s.authorized(request.Header.Get("Authorization"), time.Now()) {
 		return errorResponse(request, http.StatusUnauthorized, "unauthorized")
 	}
+	if !s.unchanged() {
+		return errorResponse(request, http.StatusGone, "the shared file changed")
+	}
 	headers := make(http.Header)
 	headers.Set("Accept-Ranges", "bytes")
 	headers.Set("Content-Type", s.contentType)
@@ -237,6 +247,26 @@ func (s *Source) response(request *http.Request) *http.Response {
 	headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, s.media.SizeBytes))
 	body := &releaseReadCloser{Reader: io.NewSectionReader(s.file, start, length), release: func() { <-s.reads }}
 	return newResponse(request, http.StatusPartialContent, headers, body, length)
+}
+
+// unchanged reports whether the open file still has the size and
+// modification time it had when it was shared. Replacing the file by rename
+// is harmless, since the open handle keeps the original; writing to it in
+// place is not, because cached and new ranges would disagree.
+func (s *Source) unchanged() bool {
+	info, err := s.file.Stat()
+	ok := err == nil && info.Size() == s.media.SizeBytes && info.ModTime().Equal(s.modified)
+	s.mu.Lock()
+	first := !ok && !s.changed && !s.closed
+	if !ok {
+		s.changed = true
+	}
+	ok = ok && !s.changed
+	s.mu.Unlock()
+	if first && s.onChanged != nil {
+		go s.onChanged()
+	}
+	return ok
 }
 
 func (s *Source) authorized(header string, now time.Time) bool {

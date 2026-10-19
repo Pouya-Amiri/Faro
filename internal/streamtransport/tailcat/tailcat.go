@@ -48,10 +48,29 @@ func (Factory) StartPublisher(ctx context.Context, cfg streamtransport.Publisher
 			return cfg.HandleConn
 		},
 	}
-	if err := server.Start(); err != nil {
+	if err := startServer(ctx, server); err != nil {
 		return nil, err
 	}
 	return &publisher{server: server, blob: string(server.TailcatAddr())}, nil
+}
+
+// startServer starts server unless ctx ends first. Tailcat's Start does not
+// take a context, so a start abandoned by cancellation finishes in the
+// background and the server is closed as soon as it is up.
+func startServer(ctx context.Context, server *upstream.Server) error {
+	started := make(chan error, 1)
+	go func() { started <- server.Start() }()
+	select {
+	case err := <-started:
+		return err
+	case <-ctx.Done():
+		go func() {
+			if err := <-started; err == nil {
+				server.Close()
+			}
+		}()
+		return ctx.Err()
+	}
 }
 
 func (Factory) NewViewer() (streamtransport.Viewer, error) {

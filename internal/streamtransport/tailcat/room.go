@@ -40,22 +40,10 @@ func StartRoom(ctx context.Context, address string) (string, error) {
 			}
 		},
 	}
-	started := make(chan error, 1)
-	go func() { started <- server.Start() }()
 	startCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	select {
-	case err := <-started:
-		if err != nil {
-			return "", err
-		}
-	case <-startCtx.Done():
-		go func() {
-			if err := <-started; err == nil {
-				server.Close()
-			}
-		}()
-		return "", startCtx.Err()
+	if err := startServer(startCtx, server); err != nil {
+		return "", err
 	}
 	go func() { <-ctx.Done(); server.Close() }()
 	return string(server.TailcatAddr()), nil

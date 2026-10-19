@@ -25,10 +25,14 @@ import (
 // gatewayFixture streams content through the fake transport and records the
 // ranges the provider was asked for.
 type gatewayFixture struct {
-	gateway *Gateway
-	content []byte
-	mu      sync.Mutex
-	ranges  []string
+	gateway    *Gateway
+	content    []byte
+	source     *Source
+	network    *streamtransport.FakeNetwork
+	publisher  streamtransport.Publisher
+	capability string
+	mu         sync.Mutex
+	ranges     []string
 }
 
 func newGatewayFixture(t *testing.T, content []byte, maxRange int64, configure func(*GatewayConfig)) *gatewayFixture {
@@ -38,8 +42,8 @@ func newGatewayFixture(t *testing.T, content []byte, maxRange int64, configure f
 	if err := source.Authorize(capability, time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	fixture := &gatewayFixture{content: content}
 	network := streamtransport.NewFakeNetwork()
+	fixture := &gatewayFixture{content: content, source: source, network: network, capability: capability}
 	publisher, err := network.StartPublisher(context.Background(), streamtransport.PublisherConfig{HandleConn: func(conn net.Conn) {
 		defer conn.Close()
 		reader := bufio.NewReader(conn)
@@ -65,6 +69,7 @@ func newGatewayFixture(t *testing.T, content []byte, maxRange int64, configure f
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { publisher.Close() })
+	fixture.publisher = publisher
 	viewer, err := network.NewViewer()
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +146,7 @@ func TestGatewayServesRangesAcrossChunksAndCachesThem(t *testing.T) {
 	if body := fixture.get(t, "bytes=12345-156789"); string(body) != string(content[12345:156790]) {
 		t.Fatalf("gateway returned %d wrong bytes", len(body))
 	}
-	if strings.Contains(fixture.gateway.URL(), fixture.gateway.capability) {
+	if strings.Contains(fixture.gateway.URL(), fixture.gateway.up.capability) {
 		t.Fatal("gateway URL exposed the transfer capability")
 	}
 	fetched := fixture.gateway.fetchCount.Load()
@@ -403,5 +408,344 @@ func TestGatewayURLEndsWithTheFileName(t *testing.T) {
 		if response.StatusCode != http.StatusNotFound {
 			t.Fatalf("the bare token path answered %d", response.StatusCode)
 		}
+	}
+}
+
+// connectedViewer returns a new viewer the fixture's provider accepts.
+func (f *gatewayFixture) connectedViewer(t *testing.T) streamtransport.Viewer {
+	t.Helper()
+	viewer, err := f.network.NewViewer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.publisher.AllowClient(viewer.PublicKey()); err != nil {
+		t.Fatal(err)
+	}
+	if err := viewer.SetConnectionBlob(f.publisher.ConnectionBlob()); err != nil {
+		t.Fatal(err)
+	}
+	return viewer
+}
+
+// faultyViewer lets a test decide how each connection to the provider and
+// each direct-path check behaves.
+type faultyViewer struct {
+	streamtransport.Viewer
+	dials  atomic.Int32
+	checks atomic.Int32
+	dial   func(attempt int32, ctx context.Context) (net.Conn, error)
+	direct func() error
+}
+
+func (v *faultyViewer) WaitForDirect(ctx context.Context) error {
+	v.checks.Add(1)
+	if v.direct != nil {
+		if err := v.direct(); err != nil {
+			return err
+		}
+	}
+	return v.Viewer.WaitForDirect(ctx)
+}
+
+func (v *faultyViewer) Dial(ctx context.Context) (net.Conn, error) {
+	attempt := v.dials.Add(1)
+	if v.dial != nil {
+		return v.dial(attempt, ctx)
+	}
+	return v.Viewer.Dial(ctx)
+}
+
+// tricklingConn answers one range request with valid headers and then sends
+// a kilobyte of content every 250 ms, like a connection that degraded
+// mid-transfer.
+func tricklingConn(t *testing.T, content []byte) net.Conn {
+	client, server := net.Pipe()
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop); server.Close() })
+	go func() {
+		defer server.Close()
+		request, err := http.ReadRequest(bufio.NewReader(server))
+		if err != nil {
+			return
+		}
+		var start, end int64
+		fmt.Sscanf(request.Header.Get("Range"), "bytes=%d-%d", &start, &end)
+		fmt.Fprintf(server, "HTTP/1.1 206 Partial Content\r\nContent-Length: %d\r\n\r\n", end-start+1)
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for position := start; position <= end; position += 1024 {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if _, err := server.Write(content[position:min(position+1024, end+1)]); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	return client
+}
+
+func shortenHealthChecks(t *testing.T) {
+	stall, window, route, tick := stallTimeout, slowWindow, routeInterval, healthTick
+	stallTimeout, slowWindow, routeInterval, healthTick = 600*time.Millisecond, 800*time.Millisecond, 200*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { stallTimeout, slowWindow, routeInterval, healthTick = stall, window, route, tick })
+}
+
+func TestGatewayBacksOffAfterAFailedFetch(t *testing.T) {
+	content := randomContent(t, 256*1024)
+	var viewer *faultyViewer
+	fixture := newGatewayFixture(t, content, defaultMaxRange, func(cfg *GatewayConfig) {
+		cfg.DisableBackgroundFill = true
+		viewer = &faultyViewer{Viewer: cfg.Viewer}
+		viewer.dial = func(attempt int32, ctx context.Context) (net.Conn, error) {
+			if attempt <= 3 {
+				return nil, errors.New("provider is restarting")
+			}
+			return viewer.Viewer.Dial(ctx)
+		}
+		cfg.Viewer = viewer
+	})
+	began := time.Now()
+	if body := fixture.get(t, ""); string(body) != string(content) {
+		t.Fatal("stream returned the wrong bytes after transient failures")
+	}
+	// Three failures wait 250 ms, 500 ms and 1 s before the next attempt.
+	if elapsed := time.Since(began); elapsed < 1500*time.Millisecond {
+		t.Fatalf("retries were not spaced out: the read finished after %s", elapsed)
+	}
+	if progress := fixture.gateway.Progress(); progress.Error != "" {
+		t.Fatalf("a successful fetch did not clear the failure: %q", progress.Error)
+	}
+}
+
+func TestGatewayReadAheadRecoversAfterATransientFailure(t *testing.T) {
+	content := randomContent(t, 16*1024*1024)
+	fixture := newGatewayFixture(t, content, defaultMaxRange, func(cfg *GatewayConfig) {
+		cfg.CacheBytes = 8 * 1024 * 1024
+		viewer := &faultyViewer{Viewer: cfg.Viewer}
+		viewer.dial = func(attempt int32, ctx context.Context) (net.Conn, error) {
+			if attempt == 1 {
+				return nil, errors.New("one transient connection failure")
+			}
+			return viewer.Viewer.Dial(ctx)
+		}
+		cfg.Viewer = viewer
+	})
+	g := fixture.gateway
+	g.mu.Lock()
+	g.scheduleReadAheadLocked(0)
+	g.mu.Unlock()
+	// No player request is waiting: only the retry can resume read-ahead.
+	waitUntil(t, "read-ahead never retried after a transient failure", func() bool { return g.received.Load() > 0 })
+}
+
+func TestGatewayRestartsAStalledTransfer(t *testing.T) {
+	shortenHealthChecks(t)
+	content := randomContent(t, 512*1024)
+	var viewer *faultyViewer
+	fixture := newGatewayFixture(t, content, defaultMaxRange, func(cfg *GatewayConfig) {
+		cfg.DisableBackgroundFill = true
+		viewer = &faultyViewer{Viewer: cfg.Viewer}
+		viewer.dial = func(attempt int32, ctx context.Context) (net.Conn, error) {
+			if attempt == 1 {
+				// Accepts the request and never answers.
+				client, server := net.Pipe()
+				t.Cleanup(func() { server.Close() })
+				go io.Copy(io.Discard, server)
+				return client, nil
+			}
+			return viewer.Viewer.Dial(ctx)
+		}
+		cfg.Viewer = viewer
+	})
+	if body := fixture.get(t, ""); string(body) != string(content) {
+		t.Fatal("stream returned the wrong bytes after a stalled connection")
+	}
+	if viewer.dials.Load() < 2 {
+		t.Fatal("the stalled connection was never replaced")
+	}
+}
+
+func TestGatewayRestartsATricklingLink(t *testing.T) {
+	shortenHealthChecks(t)
+	content := randomContent(t, 2*1024*1024)
+	var viewer *faultyViewer
+	fixture := newGatewayFixture(t, content, defaultMaxRange, func(cfg *GatewayConfig) {
+		cfg.DisableBackgroundFill = true
+		viewer = &faultyViewer{Viewer: cfg.Viewer}
+		viewer.dial = func(attempt int32, ctx context.Context) (net.Conn, error) {
+			if attempt == 1 {
+				return tricklingConn(t, content), nil
+			}
+			return viewer.Viewer.Dial(ctx)
+		}
+		cfg.Viewer = viewer
+	})
+	began := time.Now()
+	if body := fixture.get(t, "bytes=0-1048575"); string(body) != string(content[:1024*1024]) {
+		t.Fatal("stream returned the wrong bytes after a trickling connection")
+	}
+	// At 4 KB/s the first megabyte alone would take over four minutes.
+	if elapsed := time.Since(began); elapsed > 10*time.Second || viewer.dials.Load() < 2 {
+		t.Fatalf("the trickling connection was not replaced (took %s, %d dials)", elapsed, viewer.dials.Load())
+	}
+}
+
+func TestGatewayStopsFetchingWhenTheDirectPathIsLost(t *testing.T) {
+	shortenHealthChecks(t)
+	content := randomContent(t, 2*1024*1024)
+	var lost atomic.Bool
+	var viewer *faultyViewer
+	fixture := newGatewayFixture(t, content, defaultMaxRange, func(cfg *GatewayConfig) {
+		cfg.DisableBackgroundFill = true
+		viewer = &faultyViewer{Viewer: cfg.Viewer}
+		viewer.direct = func() error {
+			if lost.Load() {
+				return errors.New("no direct path")
+			}
+			return nil
+		}
+		viewer.dial = func(attempt int32, ctx context.Context) (net.Conn, error) {
+			if attempt == 1 {
+				return tricklingConn(t, content), nil
+			}
+			return viewer.Viewer.Dial(ctx)
+		}
+		cfg.Viewer = viewer
+	})
+	g := fixture.gateway
+	g.mu.Lock()
+	g.scheduleReadAheadLocked(0)
+	g.mu.Unlock()
+	waitUntil(t, "the transfer never started", func() bool { return g.received.Load() > 0 })
+	lost.Store(true)
+	waitUntil(t, "a lost direct path was not reported", func() bool { return g.Progress().Route == RouteUnavailable })
+	g.mu.Lock()
+	running := 0
+	for f := range g.fetches {
+		if !f.requested.IsZero() {
+			running++
+		}
+	}
+	g.mu.Unlock()
+	if running != 0 {
+		t.Fatalf("%d fetches kept running without a direct path", running)
+	}
+	lost.Store(false)
+	if body := fixture.get(t, "bytes=0-65535"); string(body) != string(content[:65536]) {
+		t.Fatal("stream returned the wrong bytes after the direct path returned")
+	}
+	if route := g.Progress().Route; route != RouteDirect {
+		t.Fatalf("route is %q after the direct path returned", route)
+	}
+}
+
+func TestGatewayReconnectResumesTheTransfer(t *testing.T) {
+	content := randomContent(t, 1024*1024)
+	fixture := newGatewayFixture(t, content, 64*1024, func(cfg *GatewayConfig) {
+		cfg.ChunkBytes = 64 * 1024
+		cfg.DisableBackgroundFill = true
+	})
+	g := fixture.gateway
+	if body := fixture.get(t, "bytes=0-131071"); string(body) != string(content[:131072]) {
+		t.Fatal("first range returned the wrong bytes")
+	}
+	g.Disconnect()
+	if route := g.Progress().Route; route != RouteDisconnected {
+		t.Fatalf("route is %q after disconnecting", route)
+	}
+	// Cached bytes stay readable without a provider.
+	if body := fixture.get(t, "bytes=0-65535"); string(body) != string(content[:65536]) {
+		t.Fatal("cached range was not readable while disconnected")
+	}
+	result := make(chan []byte, 1)
+	go func() { result <- fixture.get(t, "") }()
+	select {
+	case <-result:
+		t.Fatal("an uncached range was served without a provider")
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := g.Reconnect(fixture.connectedViewer(t), fixture.capability); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case body := <-result:
+		if string(body) != string(content) {
+			t.Fatal("stream returned the wrong bytes after reconnecting")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiting player request did not resume after reconnecting")
+	}
+}
+
+func TestGatewayReportsAProviderThatRefusesTheTransfer(t *testing.T) {
+	content := randomContent(t, 512*1024)
+	refused := make(chan error, 2)
+	fixture := newGatewayFixture(t, content, 64*1024, func(cfg *GatewayConfig) {
+		cfg.ChunkBytes = 64 * 1024
+		cfg.DisableBackgroundFill = true
+		cfg.OnUpstreamRefused = func(err error) { refused <- err }
+	})
+	fixture.source.Revoke(fixture.capability)
+	request, err := http.NewRequest(http.MethodGet, fixture.gateway.URL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() {
+		if response, err := http.DefaultClient.Do(request.WithContext(ctx)); err == nil {
+			io.Copy(io.Discard, response.Body)
+			response.Body.Close()
+		}
+	}()
+	select {
+	case err := <-refused:
+		var refusal *UpstreamRefusedError
+		if !errors.As(err, &refusal) || refusal.Status != http.StatusUnauthorized {
+			t.Fatalf("unexpected refusal: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a revoked capability was not reported")
+	}
+	if route := fixture.gateway.Progress().Route; route != RouteDisconnected {
+		t.Fatalf("route is %q after the provider refused", route)
+	}
+	select {
+	case err := <-refused:
+		t.Fatalf("refusal reported twice: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestGatewayRejectsImpossibleFileSizes(t *testing.T) {
+	network := streamtransport.NewFakeNetwork()
+	viewer, err := network.NewViewer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, size := range []int64{-1, 0, protocol.MaxStreamBytes + 1, 1<<63 - 1} {
+		_, err := NewGateway(GatewayConfig{
+			Viewer: viewer, Capability: strings.Repeat("c", 32), CacheBytes: 4 * 1024 * 1024,
+			Media: protocol.Media{Title: "Movie.mkv", SizeBytes: size, Fingerprint: "file-v1:" + strings.Repeat("a", 64)},
+		})
+		if err == nil {
+			t.Fatalf("a %d-byte file was accepted", size)
+		}
+	}
+}
+
+func TestMemoryCacheEvictionKeepsNoDiskSlots(t *testing.T) {
+	store := newMemoryStore(100*1024, 2*1024, 1024)
+	data := make([]byte, 1024)
+	for block := int64(0); block < 100; block++ {
+		if _, err := store.WriteAt(data, block*1024); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(store.freeSlots) != 0 {
+		t.Fatalf("a memory cache recorded %d disk slots", len(store.freeSlots))
 	}
 }

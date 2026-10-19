@@ -464,7 +464,7 @@ func (s *Service) activateStream(ctx context.Context, client *faroclient.Client,
 	s.mu.RLock()
 	cache := s.streamCache
 	s.mu.RUnlock()
-	gateway, err := pending.viewer.StartGateway(ctx, grant, pending.media, cache)
+	gateway, err := pending.viewer.StartGateway(ctx, grant, pending.media, mediastream.GatewayOptions{Cache: cache})
 	if err != nil {
 		s.failStreamActivation(client, grant, pending, nil, "stream_connect", err)
 		return

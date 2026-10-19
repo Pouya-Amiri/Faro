@@ -403,3 +403,48 @@ func TestGatewayStreamsUncachedRangeBeforeFetchCompletes(t *testing.T) {
 		t.Fatalf("gateway remainder failed: bytes=%d error=%v", len(rest), err)
 	}
 }
+
+func TestSourceRefusesAFileModifiedInPlace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed := make(chan struct{}, 2)
+	source, err := NewSource(SourceConfig{
+		Path: path, OnChanged: func() { changed <- struct{}{} },
+		Media: protocol.Media{Title: "Movie.mkv", SizeBytes: 8, Fingerprint: "file-v1:" + strings.Repeat("a", 64)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { source.Close() })
+	capability := strings.Repeat("c", 32)
+	if err := source.Authorize(capability, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if response := sourceRequest(t, source, http.MethodGet, capability, "bytes=0-7"); response.StatusCode != http.StatusPartialContent {
+		t.Fatalf("unmodified file status = %d", response.StatusCode)
+	}
+	if err := os.WriteFile(path, []byte("replaced"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Minute)
+	if err := os.Chtimes(path, later, later); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if response := sourceRequest(t, source, http.MethodGet, capability, "bytes=0-7"); response.StatusCode != http.StatusGone {
+			t.Fatalf("modified file status = %d", response.StatusCode)
+		}
+	}
+	select {
+	case <-changed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the change was not reported")
+	}
+	select {
+	case <-changed:
+		t.Fatal("the change was reported twice")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
