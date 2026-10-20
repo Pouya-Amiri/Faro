@@ -119,9 +119,19 @@ func launchArguments(operatingSystem string, address string, extra []string, ini
 	// this adapter reads and reports state with legacy wording, so commands
 	// could never complete against it. The Lua cli exists on every platform
 	// VLC ships and provides the prompt plus the "( state ... )" responses.
-	args = append(args,
-		"--extraintf=luaintf", "--lua-intf=cli", "--cli-host="+address, "--no-video-title-show",
-	)
+	if operatingSystem == "darwin" {
+		// VLC's macOS interface must stay the main interface.
+		args = append(args, "--extraintf=luaintf")
+	} else {
+		// VLC starts its extra interfaces before the main one, and waits for
+		// the Qt interface to be ready only when it is an extra interface.
+		// With the Lua cli as the main interface, the control socket answers
+		// once Qt can host the video. Otherwise media Faro opens straight
+		// after starting VLC gets a separate video window, because the Qt
+		// window does not exist yet.
+		args = append(args, "--intf=luaintf", "--extraintf=qt")
+	}
+	args = append(args, "--lua-intf=cli", "--cli-host="+address, "--no-video-title-show")
 	if operatingSystem != "darwin" {
 		// Faro needs a dedicated process so its control socket and lifecycle cannot
 		// be redirected to an unrelated VLC window by the user's one-instance

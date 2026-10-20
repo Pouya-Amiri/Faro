@@ -16,8 +16,15 @@ import (
 func TestLaunchArgumentsTargetTheLuaCliInterface(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		args := launchArguments(goos, "127.0.0.1:1234", nil, "movie.mkv")
-		if !containsArgument(args, "--extraintf=luaintf") || !containsArgument(args, "--lua-intf=cli") {
+		if !containsArgument(args, "--lua-intf=cli") {
 			t.Fatalf("%s arguments do not target the Lua cli interface: %q", goos, args)
+		}
+		// Qt must be ready before the control socket answers, so it is an
+		// extra interface and the cli the main one; macOS keeps its own
+		// interface as the main one.
+		if goos == "darwin" && !containsArgument(args, "--extraintf=luaintf") ||
+			goos != "darwin" && (!containsArgument(args, "--intf=luaintf") || !containsArgument(args, "--extraintf=qt")) {
+			t.Fatalf("%s arguments start the interfaces in the wrong roles: %q", goos, args)
 		}
 		if !containsArgument(args, "--cli-host=127.0.0.1:1234") || containsArgument(args, "--rc-host=127.0.0.1:1234") {
 			t.Fatalf("%s arguments do not configure the Lua cli socket: %q", goos, args)
@@ -62,7 +69,7 @@ func TestLaunchArgumentsRejectControlChannelOverrides(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
-		"--lua-intf=cli", "--cli-host=127.0.0.1:1234", "--extraintf=luaintf", "--no-one-instance", "--no-audio",
+		"--lua-intf=cli", "--cli-host=127.0.0.1:1234", "--intf=luaintf", "--extraintf=qt", "--no-one-instance", "--no-audio",
 	} {
 		if !containsArgument(args, required) {
 			t.Fatalf("VLC arguments dropped required option %q: %q", required, args)
