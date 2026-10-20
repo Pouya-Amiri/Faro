@@ -22,6 +22,11 @@
     <id>io.github.pouya_amiri.Faro.desktop</id>
   </provides>
   <releases>
+    <release version="1.2.0" date="2026-10-20">
+      <description>
+        <p>Makes shared files stream reliably: stalled or trickling transfers restart on their own, failures retry with backoff, playback continues from the cache when sharing ends, and a corrupted-bytes race in capped caches is fixed. Playback switching, closing and reconnecting no longer let an older action override a newer one. Live streams no longer trip the room's command limit, share only play and pause, and show their YouTube chat in a separate tab. VLC now shows video in its own window, and Faro asks whether to keep running in the tray the first time its window closes.</p>
+      </description>
+    </release>
     <release version="1.1.4" date="2026-10-14">
       <description>
         <p>Picks the best installed media player automatically, adds a Browse button for the player executable, refuses to join without a usable player, reports a missing yt-dlp or JavaScript runtime for YouTube links, removes a stutter when first opening Host room, and updates dependencies.</p>
