@@ -2208,20 +2208,29 @@ function enhanceAllSelects() {
 // remember offers a "Don't ask again" box; its answer is left in
 // #confirm-remember for the caller to read once the question resolves.
 function askConfirmation(title, message, acceptLabel = "Continue", { remember = false } = {}) {
+  return askChoice(title, message, { acceptLabel, remember }).then((answer) => answer === "accept");
+}
+
+// askChoice shows the shared question dialog and resolves with "accept",
+// "cancel", or "" when it was dismissed with Escape.
+function askChoice(title, message, { acceptLabel = "Continue", cancelLabel = "Cancel", remember = false, rememberLabel = "Don't ask again", danger = true } = {}) {
   const dialog = $("confirm-dialog");
   // Only one question at a time; a newer one answers the older with "no".
   if (dialog.open) dialog.close("cancel");
   $("confirm-remember").checked = false;
   $("confirm-remember-row").classList.toggle("hidden", !remember);
+  $("confirm-remember-label").textContent = rememberLabel;
   $("confirm-title").textContent = title;
   $("confirm-message").textContent = message;
   $("confirm-accept").textContent = acceptLabel;
+  $("confirm-accept").className = `btn ${danger ? "btn-danger" : "btn-primary"}`;
+  $("confirm-cancel").textContent = cancelLabel;
   // Escape closes the dialog without a value, which would otherwise keep the
   // previous answer and count as "accept".
   dialog.returnValue = "";
   dialog.showModal();
   $("confirm-cancel").focus();
-  return new Promise((resolve) => dialog.addEventListener("close", () => resolve(dialog.returnValue === "accept"), { once: true }));
+  return new Promise((resolve) => dialog.addEventListener("close", () => resolve(dialog.returnValue), { once: true }));
 }
 
 // Leaving a room this Faro hosts stops its server and disconnects everyone.
@@ -3552,6 +3561,15 @@ if (wails?.Events) {
   wails.Events.On("faro:open-files", () => { void collectLaunchPaths(); });
   // The backend asks the page to finish a quit that leaves a room; ask is
   // false once the user has turned the question off.
+  // The first time the window is closed, ask whether Faro keeps running in
+  // the tray. Escape leaves the window open.
+  wails.Events.On("faro:ask-close", async () => {
+    const answer = await askChoice("Keep Faro running in the background?",
+      "Faro can stay in the system tray when its window closes, so rooms, hosting and shared files keep running. You can change this later in Preferences.",
+      { acceptLabel: "Keep in tray", cancelLabel: "Quit Faro", remember: true, rememberLabel: "Remember my choice", danger: false });
+    if (!answer) return;
+    invoke("CloseWindow", answer === "accept", $("confirm-remember").checked).then(() => refreshTrayStatus()).catch(showError);
+  });
   wails.Events.On("faro:confirm-quit", async (event) => {
     const hosting = Boolean(event.data?.hosting);
     if (event.data?.ask !== false) {

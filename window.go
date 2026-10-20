@@ -227,6 +227,9 @@ type windowSettings struct {
 	HardwareAcceleration bool   `json:"hardwareAcceleration,omitempty"`
 	// QuitOnClose turns off keeping Faro in the tray when its window closes.
 	QuitOnClose bool `json:"quitOnClose,omitempty"`
+	// CloseChoiceMade records that the user chose what closing the window
+	// does, so Faro stops asking.
+	CloseChoiceMade bool `json:"closeChoiceMade,omitempty"`
 	// SkipQuitConfirm quits from a room without asking first.
 	SkipQuitConfirm bool `json:"skipQuitConfirm,omitempty"`
 }

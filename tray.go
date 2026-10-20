@@ -30,6 +30,7 @@ type trayController struct {
 
 	confirmMu    sync.Mutex
 	confirmAsked time.Time
+	closeAsked   time.Time
 
 	updateMu    sync.Mutex
 	updateItem  *application.MenuItem
@@ -60,8 +61,14 @@ func setupTray(app *application.App, window *application.WebviewWindow, desktop 
 		if controller.quitting.Load() {
 			return
 		}
-		if !loadWindowSettings().QuitOnClose && trayHostAvailable() {
+		settings := loadWindowSettings()
+		if !settings.QuitOnClose && trayHostAvailable() {
 			event.Cancel()
+			// The first time, the page asks whether to keep running in the
+			// tray or quit.
+			if !settings.CloseChoiceMade && controller.askClose() {
+				return
+			}
 			window.Hide()
 			return
 		}
@@ -76,6 +83,47 @@ func setupTray(app *application.App, window *application.WebviewWindow, desktop 
 		controller.showWindow()
 	})
 	return controller
+}
+
+// askClose asks the page what closing the window should do, and reports
+// whether it asked. A second close while the question is open hides the
+// window, so it can always be closed even if the page cannot answer.
+func (c *trayController) askClose() bool {
+	c.confirmMu.Lock()
+	repeated := time.Since(c.closeAsked) < quitConfirmWindow
+	c.closeAsked = time.Now()
+	c.confirmMu.Unlock()
+	if repeated {
+		return false
+	}
+	c.app.Event.Emit("faro:ask-close", nil)
+	return true
+}
+
+// CloseWindow carries out the answer to the first-close question: keep
+// Faro running in the tray, or quit. With remember, the answer becomes the
+// close-to-tray preference and the question is not asked again.
+func (d *Desktop) CloseWindow(keepInTray, remember bool) error {
+	if remember {
+		if err := updateWindowSettings(func(settings *windowSettings) {
+			settings.QuitOnClose, settings.CloseChoiceMade = !keepInTray, true
+		}); err != nil {
+			return err
+		}
+	}
+	if d.tray == nil {
+		d.app.Quit()
+		return nil
+	}
+	d.tray.confirmMu.Lock()
+	d.tray.closeAsked = time.Time{}
+	d.tray.confirmMu.Unlock()
+	if keepInTray {
+		d.tray.window.Hide()
+		return nil
+	}
+	d.tray.requestQuit()
+	return nil
 }
 
 // showUpdate reflects an available update in the tray menu. The menu is only
@@ -185,8 +233,12 @@ func (d *Desktop) TrayStatus() TrayStatus {
 	return TrayStatus{CloseToTray: !loadWindowSettings().QuitOnClose, Available: trayHostAvailable()}
 }
 
+// SetCloseToTray stores the preference; setting it answers the
+// first-close question too.
 func (d *Desktop) SetCloseToTray(enabled bool) error {
-	return updateWindowSettings(func(settings *windowSettings) { settings.QuitOnClose = !enabled })
+	return updateWindowSettings(func(settings *windowSettings) {
+		settings.QuitOnClose, settings.CloseChoiceMade = !enabled, true
+	})
 }
 
 // ConfirmQuit reports whether quitting from a room asks first.

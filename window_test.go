@@ -139,3 +139,26 @@ func TestLaunchPathsKeepsExistingMedia(t *testing.T) {
 		t.Fatalf("launchPaths() = %q, want %q", got, want)
 	}
 }
+
+func TestCloseChoiceIsRememberedOnlyWhenAsked(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	desktop := &Desktop{}
+	if settings := loadWindowSettings(); settings.CloseChoiceMade || settings.QuitOnClose {
+		t.Fatalf("a new installation already has a close choice: %+v", settings)
+	}
+	// Choosing "Quit Faro" and remembering it makes closing quit from now on.
+	if err := updateWindowSettings(func(settings *windowSettings) { settings.QuitOnClose, settings.CloseChoiceMade = true, true }); err != nil {
+		t.Fatal(err)
+	}
+	if status := desktop.TrayStatus(); status.CloseToTray {
+		t.Fatal("a remembered Quit still closes to the tray")
+	}
+	// Changing the preference counts as a choice as well.
+	if err := desktop.SetCloseToTray(true); err != nil {
+		t.Fatal(err)
+	}
+	if settings := loadWindowSettings(); !settings.CloseChoiceMade || settings.QuitOnClose {
+		t.Fatalf("the preference did not record the choice: %+v", settings)
+	}
+}
