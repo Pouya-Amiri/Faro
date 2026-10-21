@@ -7,7 +7,7 @@ let timeline = [];
 let chatFilter = "all";
 // The live broadcast's own chat, shown in its own tab and never mixed with
 // the room's. A higher session replaces the chat of an earlier broadcast.
-let streamChat = { session: 0, state: "idle", message: "", entries: [] };
+let streamChat = { session: 0, state: "idle", entries: [] };
 let availability = {};
 let hosted = { running: false };
 let lastConnectionRequest = null;
@@ -2279,7 +2279,7 @@ function closeRoomView() {
   renderChat();
   streamingAvailable = false;
   streamState = { state: "idle", offerId: "", route: "" };
-  streamChat = { session: 0, state: "idle", message: "", entries: [] };
+  streamChat = { session: 0, state: "idle", entries: [] };
   $("stream-chat-filter").classList.add("hidden");
   if (chatFilter === "stream") document.querySelector('[data-chat-filter="all"]')?.click();
   syncStatus = { state: "idle", driftSeconds: 0 };
@@ -2717,7 +2717,7 @@ function renderChat() {
   $("chat-form").classList.toggle("hidden", chatFilter === "stream");
   const visible = chatFilter === "stream" ? streamChat.entries : timeline.filter((entry) => chatFilter === "all" || entry.kind === chatFilter);
   if (!visible.length) {
-    const label = chatFilter === "stream" ? streamChatEmptyLabel() : chatFilter === "activity" ? "No room activity yet." : chatFilter === "chat" ? "No chat messages yet." : "Chat messages and room activity will appear here.";
+    const label = chatFilter === "stream" ? "Waiting for the broadcast's chat…" : chatFilter === "activity" ? "No room activity yet." : chatFilter === "chat" ? "No chat messages yet." : "Chat messages and room activity will appear here.";
     chatStream.innerHTML = '<div class="chat-empty"><span>✦</span><p></p></div>';
     chatStream.querySelector(".chat-empty p").textContent = label;
     return;
@@ -2725,12 +2725,6 @@ function renderChat() {
   chatStream.replaceChildren(...visible.map((entry) => entry.kind === "stream" ? renderStreamChatMessage(entry) : entry.kind === "activity" ? renderActivity(entry) : renderChatMessage(entry)));
   chatStream.scrollTop = chatStream.scrollHeight;
   $("chat-new-messages")?.classList.add("hidden");
-}
-
-function streamChatEmptyLabel() {
-  if (streamChat.state === "unavailable") return streamChat.message ? `The broadcast's chat is unavailable: ${streamChat.message}` : "The broadcast's chat is unavailable.";
-  if (streamChat.state === "ended") return "The broadcast's chat has ended.";
-  return "Waiting for the broadcast's chat…";
 }
 
 function renderStreamChatMessage(entry) {
@@ -2749,16 +2743,20 @@ function renderStreamChatMessage(entry) {
 const streamChatLimit = 300;
 function receiveStreamChat(update) {
   const session = Number(update.session) || 0;
-  if (session < streamChat.session) return;
-  if (session > streamChat.session) streamChat = { session, state: "active", message: "", entries: [] };
+  // A chat that ended stays ended: its last messages may arrive after the
+  // notice that it stopped.
+  if (session < streamChat.session || session === streamChat.session && streamChat.state !== "active") return;
+  if (session > streamChat.session) streamChat = { session, state: "active", entries: [] };
   streamChat.state = update.state || streamChat.state;
-  streamChat.message = update.message || "";
   const removed = new Set(update.removed || []);
   if (removed.size) streamChat.entries = streamChat.entries.filter((entry) => !removed.has(entry.value.id));
   const added = (update.messages || []).map((message) => ({ kind: "stream", value: message, sentAtUnixMs: message.sentAtUnixMs || Date.now() }));
   streamChat.entries.push(...added);
   if (streamChat.entries.length > streamChatLimit) streamChat.entries = streamChat.entries.slice(-streamChatLimit);
-  const available = streamChat.state === "active" || streamChat.entries.length > 0;
+  // The tab lasts as long as the broadcast's chat is followed: it goes with
+  // the broadcast, whether the player closed or something else started.
+  const available = streamChat.state === "active";
+  if (!available) streamChat.entries = [];
   $("stream-chat-filter").classList.toggle("hidden", !available);
   if (chatFilter !== "stream") return;
   if (!available) {
