@@ -1608,6 +1608,65 @@ func TestSelectedFileIsSharedAutomaticallyWithParticipantsWithoutIt(t *testing.T
 	}
 }
 
+// A viewer who is streaming one of a friend's files can pick another one the
+// friend has: the friend's automatic offer moves to it and the viewer
+// streams it, without anyone sharing it by hand.
+func TestViewerSwitchesToAnotherFileAFriendHas(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	network := streamtransport.NewFakeNetwork()
+	host, viewer := New(context.Background(), nil), New(context.Background(), nil)
+	host.streamFactory, viewer.streamFactory = network, network
+	status, err := host.StartServer(ServerRequest{Mode: "advanced",
+		ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "switch",
+		StreamingDERPMapURL: "https://derp.example.test/map.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	t.Cleanup(viewer.Shutdown)
+	host.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	viewer.startPlayer = func(context.Context, ConnectionRequest) (player.Player, error) { return newLifecyclePlayer(), nil }
+	for _, participant := range []struct {
+		service *Service
+		name    string
+	}{{host, "Host"}, {viewer, "Viewer"}} {
+		if err := participant.service.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: participant.name, Player: "mpv"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := t.TempDir()
+	first, second := filepath.Join(dir, "first.mkv"), filepath.Join(dir, "second.mkv")
+	for path, content := range map[string]string{first: "first-episode-", second: "second-episode-"} {
+		if err := os.WriteFile(path, []byte(strings.Repeat(content, 1000)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := host.SetPlaylist([]PlaylistInput{{Label: "First", Source: first}, {Label: "Second", Source: second}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := viewer.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	streaming := func(fingerprint string) func() bool {
+		return func() bool {
+			viewer.mu.RLock()
+			defer viewer.mu.RUnlock()
+			media := viewer.streamMediaLocked()
+			return viewer.streamGatewayLocked() != nil && media != nil && media.Fingerprint == fingerprint
+		}
+	}
+	if err := viewer.SelectPlaylist(0, ""); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the viewer did not stream the first file", streaming(snapshot.Playlist.Items[0].Media.Fingerprint))
+	if err := viewer.SelectPlaylist(1, ""); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the viewer did not stream the second file", streaming(snapshot.Playlist.Items[1].Media.Fingerprint))
+}
+
 func TestLeaveRoomForgetsInvites(t *testing.T) {
 	service := New(context.Background(), nil)
 	service.invite = invite.Invite{Address: "127.0.0.1:8999", Room: "movie-night", Fingerprint: strings.Repeat("a", 64)}

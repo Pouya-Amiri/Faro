@@ -1631,11 +1631,12 @@ function renderPlaylist() {
     label.title = item.label;
 
     const local = item.url || availability[item.id];
- const receiving = streamState.state === "active" && (snapshot.streamOffers || []).some((offer) => offer.id === streamState.offerId && offer.media?.fingerprint === item.media?.fingerprint);
- row.classList.toggle("needs-file", !local && !receiving);
+    const receiving = streamState.state === "active" && (snapshot.streamOffers || []).some((offer) => offer.id === streamState.offerId && offer.media?.fingerprint === item.media?.fingerprint);
+    const fromFriend = !local && !receiving && streamingAvailable && friendHasFile(item.media);
+    row.classList.toggle("needs-file", !local && !receiving && !fromFriend);
     const status = document.createElement("span");
-    status.className = `queue-status-tag ${local || receiving ? "available" : "missing"}`;
-    status.textContent = item.url ? "Online video" : local ? "Ready to watch" : receiving ? "Watching shared file" : "Choose a local copy";
+    status.className = `queue-status-tag ${local || receiving || fromFriend ? "available" : "missing"}`;
+    status.textContent = item.url ? "Online video" : local ? "Ready to watch" : receiving ? "Watching shared file" : fromFriend ? "Streams from a friend" : "Choose a local copy";
     if (isYouTubeURL(item.url) && youtubeSupport.problem) {
       row.classList.add("needs-file");
       status.className = "queue-status-tag missing";
@@ -1784,12 +1785,19 @@ function friendsMissing(media) {
   return Boolean(media?.fingerprint && (snapshot?.participants || []).some((person) => person.id !== snapshot.selfId && !(person.availableMedia || []).includes(media.fingerprint)));
 }
 
+function friendHasFile(media) {
+  return Boolean(media?.fingerprint && (snapshot?.participants || []).some((person) => person.id !== snapshot.selfId && (person.availableMedia || []).includes(media.fingerprint)));
+}
+
 function isPlaylistItemPlayable(item) {
   if (!item) return false;
   if (item.url || availability[item.id]) return true;
-  return (snapshot?.streamOffers || []).some((offer) => offer.media?.fingerprint === item.media?.fingerprint && (
+  const offered = (snapshot?.streamOffers || []).some((offer) => offer.media?.fingerprint === item.media?.fingerprint && (
     offer.id === streamState.offerId && streamState.state === "active" || offer.providerId !== snapshot.selfId && offer.viewerCount < offer.maxViewers
   ));
+  // A friend who has the file shares it once it is selected, so it plays
+  // even though nobody is sharing it yet.
+  return offered || streamingAvailable && friendHasFile(item.media);
 }
 
 function actionButton(label, action, disabled = false, title = "") {
