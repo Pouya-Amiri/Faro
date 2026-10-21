@@ -331,6 +331,16 @@ function renderStreamCache() {
   layer.style.background = `linear-gradient(to right, ${stops.join(", ")})`;
 }
 
+// A live broadcast has no timeline to place the position on: the players
+// cannot seek in it and play at its live edge, so the bar shows that edge.
+function renderPlaybackPosition(projected, duration = playbackDuration()) {
+  const live = Boolean(referenceMedia()?.live);
+  const displayed = duration > 0 ? clamp(projected, 0, duration) : Math.max(0, projected);
+  $("position").value = duration > 0 ? String(displayed) : live ? "1" : "0";
+  updateScrubberProgress(live ? 1 : displayed, live ? 1 : duration);
+  $("current-time").textContent = live ? "LIVE" : formatTime(displayed);
+}
+
 function updateScrubberProgress(position = 0, duration = playbackDuration()) {
   const progress = duration > 0 ? clamp(position / duration * 100, 0, 100) : 0;
   $("position").style.setProperty("--range-progress", `${progress}%`);
@@ -814,13 +824,8 @@ function render() {
   const position = $("position");
   position.max = hasDuration ? String(duration) : "1";
   position.disabled = !allowed || !hasDuration;
-  if (!isScrubbing) {
-    const projected = projectedPlaybackPosition();
-    const displayedPosition = hasDuration ? clamp(projected, 0, duration) : Math.max(0, projected);
-    position.value = hasDuration ? String(displayedPosition) : "0";
-    $("current-time").textContent = live ? "LIVE" : formatTime(displayedPosition);
-    updateScrubberProgress(displayedPosition, duration);
-  }
+  position.title = live ? "A live broadcast plays at its live edge" : "";
+  if (!isScrubbing) renderPlaybackPosition(projectedPlaybackPosition(), duration);
   $("duration").textContent = hasDuration ? formatTime(duration) : live ? "" : "--:--";
   refreshTimelineSegments();
 
@@ -3594,11 +3599,7 @@ if (wails?.Events) {
 
 setInterval(() => {
   if (document.hidden || !snapshot || snapshot.playback.paused || connectionState !== "connected" || isScrubbing) return;
-  const projected = projectedPlaybackPosition();
-  const duration = playbackDuration();
-  if (duration) $("position").value = String(projected);
-  updateScrubberProgress(projected, duration);
-  $("current-time").textContent = formatTime(projected);
+  renderPlaybackPosition(projectedPlaybackPosition());
 }, 250);
 
 // Startup. On Linux the window stays hidden until WindowReady, so everything
