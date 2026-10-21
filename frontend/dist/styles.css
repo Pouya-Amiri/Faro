@@ -583,7 +583,7 @@ svg { display: block; flex: 0 0 auto; }
 .chat-filter { border: 0; background: transparent; color: var(--text-muted); }
 .chat-filter:hover { color: var(--text); }
 .chat-filter.active { color: var(--text); }
-.chat-feed-stream { min-height: 0; flex: 1; overflow: auto; user-select: text; }
+.chat-feed-stream { min-height: 0; flex: 1; overflow: hidden auto; user-select: text; }
 .chat-empty { height: 100%; display: grid; place-content: center; gap: 6px; padding: 20px; color: var(--text-muted); text-align: center; }
 .chat-empty span { display: none; }
 .chat-empty p { margin: 0; font-size: var(--fs-xs); }
@@ -592,9 +592,10 @@ svg { display: block; flex: 0 0 auto; }
 .chat-msg-row:hover, .activity-msg-row:hover { background: var(--hover); }
 .chat-msg-body { min-width: 0; flex: 1; }
 .chat-msg-header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.chat-msg-author { font-weight: 600; }
-.chat-msg-time, .activity-msg-time { color: var(--text-muted); font-variant-numeric: tabular-nums; }
-.chat-msg-text { margin: 2px 0 0; user-select: text; }
+.chat-msg-author { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.chat-msg-time, .activity-msg-time { flex-shrink: 0; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+/* Unbroken runs (links, repeated emoji shortcuts) wrap rather than widen the feed. */
+.chat-msg-text { margin: 2px 0 0; overflow-wrap: anywhere; user-select: text; }
 .activity-msg-row { display: grid; align-items: center; color: var(--text-muted); }
 .activity-msg-icon { text-align: center; color: var(--accent); }
 .activity-msg-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1641,11 +1642,20 @@ body[data-controls-style="kde"] .window-control svg { width: 11px; height: 11px;
    its widest panel's content and pushes the chat composer past the window
    edge when the window is narrow (snapped to half a screen). */
 .inspector-card { grid-template-columns: minmax(0, 1fr); }
-/* The side column is at its 280px minimum below about 1040px of window. */
-@media (max-width: 1040px) {
+/* The chat toolbar follows the panel's own width: with the broadcast's chat
+   tab shown, the heading gives way before the filters and Clear do. */
+.chat-panel { container-type: inline-size; }
+.chat-toolbar > * { flex-shrink: 0; }
+@container (max-width: 380px) {
   .chat-toolbar { gap: 6px; padding: 0 10px; }
   .chat-filter { padding: 0 7px; }
   .chat-toolbar #clear-chat { padding-inline: 6px; }
+}
+@container (max-width: 330px) {
+  .chat-toolbar:has(#stream-chat-filter:not(.hidden)) #chat-heading { display: none; }
+}
+@container (max-width: 290px) {
+  .chat-toolbar:has(#stream-chat-filter:not(.hidden)) .inspector-title-wrap { display: none; }
 }
 
 @media (max-width: 1160px) {
