@@ -38,6 +38,8 @@ let addingPlaylistURL = false;
 // What this device lacks to play YouTube links; problem is "" when nothing.
 let youtubeSupport = { ytDlp: "", runtime: "", problem: "" };
 let streamingAvailable = false;
+// Whether the room's server can ban people.
+let bansAvailable = false;
 let streamState = { state: "idle", offerId: "", route: "" };
 // roomEpoch changes whenever a room is entered or left; asynchronous results
 // check it so a reply meant for a room that was left is not applied.
@@ -757,10 +759,11 @@ async function refreshAvailability() {
 async function refreshStreamingSupport() {
   if (!snapshot || !hasBackend) return;
   const epoch = roomEpoch;
-  let available = false;
-  try { available = Boolean(await invoke("StreamingAvailable")); } catch (_) {}
+  let available = false, bans = false;
+  try { [available, bans] = (await Promise.all([invoke("StreamingAvailable"), invoke("BansAvailable")])).map(Boolean); } catch (_) {}
   if (epoch !== roomEpoch) return;
   streamingAvailable = available;
+  bansAvailable = bans;
   if (snapshot) render();
 }
 
@@ -794,9 +797,7 @@ function render() {
   $("window-context").textContent = `Room · ${snapshot.room.id}`;
   const me = self(), allowed = canControl();
 
-  $("room-mode").value = snapshot.room.mode;
-  $("room-mode").disabled = me?.role !== "owner";
-  $("room-mode")._syncCustomSelect?.();
+  renderRoomModeButton();
   $("owner-invite").classList.toggle("hidden", me?.role !== "owner");
   $("settings-owner-invite").classList.toggle("hidden", me?.role !== "owner");
 
@@ -1530,10 +1531,9 @@ function renderParticipants(referenceMedia) {
   const list = $("participants");
   if (!list || !snapshot) return;
   if ($("people-count")) $("people-count").textContent = snapshot.participants.length;
-  const key = JSON.stringify([snapshot.selfId, me?.role, referenceMedia?.fingerprint || "", snapshot.participants.map((person) => [person.id, person.name, person.role, person.media?.fingerprint || ""])]);
+  const key = JSON.stringify([snapshot.selfId, me?.role, bansAvailable, referenceMedia?.fingerprint || "", snapshot.participants.map((person) => [person.id, person.name, person.role, person.media?.fingerprint || ""])]);
   if (key === participantsRenderKey && list.childElementCount === snapshot.participants.length) return;
   participantsRenderKey = key;
-  document.querySelectorAll(".participant-custom-menu").forEach((menu) => menu.remove());
 
   list.replaceChildren(...snapshot.participants.map((person) => {
     const item = document.createElement("li");
@@ -1559,15 +1559,21 @@ function renderParticipants(referenceMedia) {
     details.append(name, meta);
     item.append(avatar, details);
 
-    if (me?.role === "owner" && person.role !== "owner") {
-      const role = document.createElement("select");
-      role.className = "participant-role-select";
-      role.setAttribute("aria-label", `Role for ${person.name}`);
-      role.innerHTML = '<option value="member">Member</option><option value="moderator">Moderator</option>';
-      role.value = person.role;
-      role.onchange = () => invoke("SetRole", person.id, role.value).catch(showError);
-      item.append(role);
-      enhanceSelect(role);
+    if (participantActions(person).length) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "btn btn-ghost btn-icon participant-menu-button";
+      more.setAttribute("aria-haspopup", "menu");
+      more.setAttribute("aria-label", `Options for ${person.name}`);
+      more.title = "Role and removal";
+      more.innerHTML = moreIcon;
+      more.onclick = () => {
+        // The list can be redrawn while the menu is open; act on the person
+        // as they are now.
+        const current = snapshot?.participants.find((entry) => entry.id === person.id);
+        if (current) showMenuBelow(more, participantActions(current));
+      };
+      item.append(more);
     }
     return item;
   }));
@@ -1580,10 +1586,89 @@ function canKick(person) {
   return role === "owner" || role === "moderator" && person.role === "member";
 }
 
+function canManageBans() {
+  const role = self()?.role;
+  return bansAvailable && (role === "owner" || role === "moderator");
+}
+
 async function kickParticipant(person) {
   const confirmed = await askConfirmation(`Remove ${person.name}?`, `${person.name} leaves the room now. They can rejoin with an invite.`, "Remove");
   if (!confirmed) return;
   await invoke("KickParticipant", person.id).catch(showError);
+}
+
+async function banParticipant(person) {
+  const confirmed = await askConfirmation(`Ban ${person.name}?`, `${person.name} leaves the room now and can't join it again from their device, even with an invite, until the ban is lifted from the playback control menu.`, "Ban");
+  if (!confirmed) return;
+  await invoke("BanParticipant", person.id).catch(showError);
+}
+
+const moreIcon = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></svg>';
+
+// What this participant may do to person: change their role (owners) and
+// remove or ban them.
+function participantActions(person) {
+  const items = [];
+  if (self()?.role === "owner" && person.role !== "owner" && person.id !== snapshot?.selfId) {
+    const setRole = (role) => () => { closePopovers(); invoke("SetRole", person.id, role).catch(showError); };
+    items.push(
+      menuHeading("Role"),
+      menuButton("Member", setRole("member"), { checked: person.role === "member" }),
+      menuButton("Moderator", setRole("moderator"), { checked: person.role === "moderator" })
+    );
+  }
+  if (canKick(person)) {
+    items.push(menuSeparator(), menuButton("Remove from room…", () => { closePopovers(); kickParticipant(person); }, { danger: true }));
+    if (bansAvailable) items.push(menuButton("Ban from room…", () => { closePopovers(); banParticipant(person); }, { danger: true }));
+  }
+  return tidyMenu(items);
+}
+
+const playbackModes = [
+  ["collaborative", "Everyone controls playback", '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.75-1.4"/></svg>'],
+  ["moderated", "Moderators control playback", '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>']
+];
+
+// The playback control button shows the room's mode as an open or closed
+// lock; its menu changes the mode (owners) and lists bans.
+function renderRoomModeButton() {
+  const button = $("room-mode");
+  const [mode, label, icon] = playbackModes.find(([value]) => value === snapshot.room.mode) || playbackModes[0];
+  const bans = canManageBans() ? (snapshot.room.bans || []).length : 0;
+  const key = `${mode}|${bans}`;
+  if (button.dataset.key === key) return;
+  button.dataset.key = key;
+  button.innerHTML = `${icon}<svg class="icon menu-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>`;
+  button.title = bans ? `${label} · ${bans} banned` : label;
+}
+
+function roomModeMenuItems() {
+  const owner = self()?.role === "owner";
+  const items = playbackModes.map(([mode, label]) => menuButton(label, () => {
+    closePopovers();
+    invoke("SetRoomMode", mode).catch(showError);
+  }, { checked: snapshot.room.mode === mode, disabled: !owner }));
+  const bans = canManageBans() ? snapshot.room.bans || [] : [];
+  if (bans.length) {
+    items.push(menuSeparator(), menuHeading(`Banned · ${bans.length}`), ...bans.map((ban) => menuButton(`Lift ban on ${ban.name}`, () => {
+      closePopovers();
+      invoke("LiftBan", ban.id).then(() => showToast(`${ban.name} can join again`)).catch(showError);
+    })));
+  }
+  return items;
+}
+
+function menuHeading(text) {
+  const heading = document.createElement("div");
+  heading.className = "popover-heading";
+  heading.textContent = text;
+  return heading;
+}
+
+// Opens a menu of items under button, as its dropdown.
+function showMenuBelow(button, items) {
+  const rect = button.getBoundingClientRect();
+  showContextMenu({ target: button, clientX: rect.left, clientY: rect.bottom + 4 }, items);
 }
 
 function capitalize(value) { return value ? value[0].toUpperCase() + value.slice(1) : ""; }
@@ -2174,7 +2259,7 @@ function enhanceSelect(select) {
   select.dataset.enhanced = "true";
   select.classList.add("native-select-source");
   const wrapper = document.createElement("div");
-  wrapper.className = `custom-select ${select.classList.contains("select-compact") || select.classList.contains("participant-role-select") ? "compact" : ""}`;
+  wrapper.className = `custom-select ${select.classList.contains("select-compact") ? "compact" : ""}`;
   if (select.dataset.selectClass) wrapper.classList.add(select.dataset.selectClass);
   select.parentNode.insertBefore(wrapper, select);
   wrapper.append(select);
@@ -2186,7 +2271,6 @@ function enhanceSelect(select) {
   wrapper.append(trigger);
   const menu = document.createElement("div");
   menu.className = "popover-menu custom-select-menu hidden";
-  if (select.classList.contains("participant-role-select")) menu.classList.add("participant-custom-menu");
   if (select.dataset.selectClass) menu.classList.add(`${select.dataset.selectClass}-menu`);
   menu.setAttribute("role", "menu");
   (select.closest("dialog") || document.body).append(menu);
@@ -2283,6 +2367,7 @@ function closeRoomView() {
   playlistRenderKey = ""; participantsRenderKey = ""; availabilityKey = "";
   renderChat();
   streamingAvailable = false;
+  bansAvailable = false;
   streamState = { state: "idle", offerId: "", route: "" };
   streamChat = { session: 0, state: "idle", entries: [] };
   $("stream-chat-filter").classList.add("hidden");
@@ -2413,7 +2498,7 @@ $("settings-leave").onclick = async () => {
   if (await confirmLeaveRoom()) withButtonLoading($("settings-leave"), leaveRoom, "Leaving").catch(showError);
 };
 $("reconnect").onclick = async () => { if (!lastConnectionRequest) return; await withButtonLoading($("reconnect"), async () => { try { await enterRoom(lastConnectionRequest); showToast("Connection restored"); } catch (error) { showError(error); } }, "Reconnecting"); };
-$("room-mode").onchange = (event) => invoke("SetRoomMode", event.target.value).catch(showError);
+$("room-mode").onclick = () => { if (snapshot) showMenuBelow($("room-mode"), roomModeMenuItems()); };
 $("pause").onclick = () => invoke("SetPaused", !snapshot.playback.paused).catch(showError);
 const positionControl = $("position");
 positionControl.onpointerdown = () => {
@@ -2651,6 +2736,7 @@ function activityDescription(activity) {
     case "wheel.started": return `${name} spun the wheel`;
     case "wheel.completed": return `The wheel chose ${activity.itemLabel || "a queue item"}`;
     case "participant.kicked": return `${name} removed ${activity.targetName || "someone"} from the room`;
+    case "participant.banned": return `${name} banned ${activity.targetName || "someone"} from the room`;
     default: return `${name} changed the room`;
   }
 }
@@ -2663,7 +2749,7 @@ function activityIcon(action) {
   if (action === "playback.rate") return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17a8 8 0 1 1 16 0M12 13l4-4"/></svg>';
   if (action === "playlist.updated") return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7h11M8 12h11M8 17h11"/><circle cx="4" cy="7" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="17" r="1"/></svg>';
   if (action === "wheel.started" || action === "wheel.completed") return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4v16M4 12h16M6.3 6.3l11.4 11.4M6.3 17.7 17.7 6.3"/></svg>';
-  if (action === "participant.kicked") return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="8" r="3.5"/><path d="M3.5 19a6.5 6.5 0 0 1 13 0M16 9h5"/></svg>';
+  if (action === "participant.kicked" || action === "participant.banned") return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="8" r="3.5"/><path d="M3.5 19a6.5 6.5 0 0 1 13 0M16 9h5"/></svg>';
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/></svg>';
 }
 
@@ -3261,11 +3347,8 @@ document.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     const items = [menuButton("Copy name", () => { closePopovers(); copyText(person.name, "Name copied"); })];
     if (person.media?.title) items.push(menuButton("Copy media title", () => { closePopovers(); copyText(person.media.title, "Title copied"); }));
-    if (self()?.role === "owner" && person.role !== "owner") {
-      const role = person.role === "moderator" ? "member" : "moderator";
-      items.push(menuButton(role === "moderator" ? "Make moderator" : "Make member", () => { closePopovers(); invoke("SetRole", person.id, role).catch(showError); }));
-    }
-    if (canKick(person)) items.push(menuSeparator(), menuButton("Remove from room…", () => { closePopovers(); kickParticipant(person); }, { danger: true }));
+    const actions = participantActions(person);
+    if (actions.length) items.push(menuSeparator(), ...actions);
     showContextMenu(event, items);
     return;
   }
@@ -3350,14 +3433,12 @@ document.addEventListener("contextmenu", (event) => {
 
   if (event.target.closest("#inspector-participants-panel") && snapshot) {
     const owner = self()?.role === "owner";
-    const setMode = (mode) => act(() => invoke("SetRoomMode", mode).catch(showError));
     open([
       ...copySelection,
       menuButton("Copy invite link", act(() => $("copy-invite").click())),
       owner ? menuButton("Copy owner recovery invite", act(() => copyInvite(true))) : null,
-      owner ? menuSeparator() : null,
-      owner ? menuButton("Everyone controls playback", setMode("collaborative"), { checked: snapshot.room.mode === "collaborative" }) : null,
-      owner ? menuButton("Moderators control playback", setMode("moderated"), { checked: snapshot.room.mode === "moderated" }) : null
+      menuSeparator(),
+      ...roomModeMenuItems()
     ]);
     return;
   }
@@ -3480,6 +3561,7 @@ function receive(event) {
     }
     if (event.connection.state === "disconnected") {
       streamingAvailable = false;
+      bansAvailable = false;
       streamState = { state: "idle", offerId: "", route: "" };
     }
   }
