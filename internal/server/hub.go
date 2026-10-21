@@ -56,6 +56,8 @@ type hub struct {
 	maxRooms            int
 	maxRoomParticipants int
 	streaming           *protocol.MediaStreamPolicy
+	// bans holds each room's bans by room ID; see banLocked.
+	bans map[string][]banEntry
 }
 
 type joinResult struct {
@@ -71,7 +73,10 @@ func newHub(maxRooms, maxRoomParticipants int, streaming ...*protocol.MediaStrea
 		copy := *streaming[0]
 		policy = &copy
 	}
-	return &hub{rooms: make(map[string]*room), maxRooms: maxRooms, maxRoomParticipants: maxRoomParticipants, streaming: policy}
+	return &hub{
+		rooms: make(map[string]*room), maxRooms: maxRooms, maxRoomParticipants: maxRoomParticipants,
+		streaming: policy, bans: make(map[string][]banEntry),
+	}
 }
 
 // join adds the session's participant to its room. welcome runs before the
@@ -86,10 +91,17 @@ func (h *hub) join(s *session, hello protocol.Hello, welcome func(joinResult)) e
 	if err != nil {
 		return err
 	}
+	identity, identified, err := clientIdentity(hello.ClientIdentity)
+	if err != nil {
+		return err
+	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	if identified && h.bannedLocked(roomID, identity) {
+		return invalid(protocol.ErrorBanned, "you were banned from this room")
+	}
 	r := h.rooms[roomID]
 	ownerToken := ""
 	if r == nil {
@@ -101,6 +113,7 @@ func (h *hub) join(s *session, hello protocol.Hello, welcome func(joinResult)) e
 			return fmt.Errorf("generate owner capability: %w", err)
 		}
 		r = newRoom(roomID, sha256.Sum256([]byte(ownerToken)))
+		h.syncBansLocked(r)
 		h.rooms[roomID] = r
 	}
 	if len(r.participants) >= h.maxRoomParticipants {
@@ -119,7 +132,7 @@ func (h *hub) join(s *session, hello protocol.Hello, welcome func(joinResult)) e
 	name = freeName(name, r.participants)
 	p := &participant{
 		state:   protocol.Participant{ID: s.id, Name: name, Role: role},
-		session: s,
+		session: s, identity: identity, identified: identified,
 	}
 	existing := sessionsOf(r)
 	r.participants[p.state.ID] = p
@@ -178,8 +191,9 @@ func (h *hub) removeParticipantLocked(p *participant) func() {
 }
 
 // kick removes a participant from p's room and closes their connection with a
-// fatal error, so their client does not rejoin on its own. Owners can remove
-// anyone but another owner; moderators can remove members.
+// fatal error, so their client does not rejoin on its own; a ban also keeps
+// them from joining again. Owners can remove anyone but another owner;
+// moderators can remove members.
 func (h *hub) kick(p *participant, request protocol.RoomParticipantKick) error {
 	h.mu.Lock()
 	r := h.roomForLocked(p)
@@ -200,10 +214,20 @@ func (h *hub) kick(p *participant, request protocol.RoomParticipantKick) error {
 		h.mu.Unlock()
 		return invalid("forbidden", "only the room owner can remove a moderator, and nobody can remove an owner")
 	}
+	action, message := protocol.ActivityParticipantKick, p.state.Name+" removed you from the room"
+	if request.Ban {
+		if err := h.banLocked(r, target); err != nil {
+			h.mu.Unlock()
+			return err
+		}
+		action, message = protocol.ActivityParticipantBan, p.state.Name+" banned you from the room"
+	}
 	h.removeParticipantLocked(target)()
-	activity := activityMessage(p.state.ID, p.state.Name, protocol.ActivityParticipantKick, 0, 0, "", 0)
+	if request.Ban {
+		broadcast(sessionsOf(r), protocol.TypeRoomUpdated, r.state)
+	}
+	activity := activityMessage(p.state.ID, p.state.Name, action, 0, 0, "", 0)
 	activity.TargetName = target.state.Name
-	message := p.state.Name + " removed you from the room"
 	broadcast(sessionsOf(r), protocol.TypeActivityMessage, activity)
 	h.mu.Unlock()
 	go func() {

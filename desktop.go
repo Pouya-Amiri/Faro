@@ -54,6 +54,12 @@ func (d *Desktop) ServiceStartup(ctx context.Context, _ application.ServiceOptio
 		log.Printf("Faro %s started", buildinfo.EffectiveVersion())
 		d.service.SetDiagnostics(log.Printf)
 	}
+	// Without an identity Faro still works; rooms just cannot ban it.
+	if identity, err := loadIdentity(); err == nil {
+		d.service.SetIdentity(identity)
+	} else {
+		d.diagnostics.Printf("identity: %v", err)
+	}
 	d.startUpdates()
 	return nil
 }
@@ -139,6 +145,14 @@ func (d *Desktop) SetRole(participantID string, role protocol.Role) error {
 func (d *Desktop) KickParticipant(participantID string) error {
 	return d.service.KickParticipant(participantID)
 }
+
+func (d *Desktop) BansAvailable() bool { return d.service.BansAvailable() }
+
+func (d *Desktop) BanParticipant(participantID string) error {
+	return d.service.BanParticipant(participantID)
+}
+
+func (d *Desktop) LiftBan(banID string) error { return d.service.LiftBan(banID) }
 
 func (d *Desktop) SetPaused(paused bool) error { return d.service.SetPaused(paused) }
 

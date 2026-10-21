@@ -126,7 +126,8 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 	helloID := client.nextID()
 	if err := client.write(protocol.TypeHello, helloID, protocol.Hello{
 		ClientVersion: cfg.ClientVersion, Name: cfg.Name, Room: cfg.Room,
-		JoinToken: cfg.JoinToken, OwnerToken: cfg.OwnerToken, Capabilities: append([]protocol.Capability(nil), cfg.Capabilities...),
+		JoinToken: cfg.JoinToken, OwnerToken: cfg.OwnerToken, ClientIdentity: cfg.roomIdentity(),
+		Capabilities: append([]protocol.Capability(nil), cfg.Capabilities...),
 	}); err != nil {
 		interrupt()
 		connection.Close()
@@ -183,7 +184,7 @@ func (e *RejectedError) Error() string {
 // an incompatible client cannot.
 func (e *RejectedError) Permanent() bool {
 	switch e.Code {
-	case "unauthorized", "invalid_owner_token", "invalid_hello":
+	case "unauthorized", "invalid_owner_token", "invalid_hello", protocol.ErrorBanned:
 		return true
 	}
 	return false
@@ -439,6 +440,9 @@ func (c *Client) SetRole(value protocol.RoomRoleSet) error {
 }
 func (c *Client) KickParticipant(value protocol.RoomParticipantKick) error {
 	return c.command(protocol.TypeRoomParticipantKick, value)
+}
+func (c *Client) LiftBan(value protocol.RoomBanLift) error {
+	return c.command(protocol.TypeRoomBanLift, value)
 }
 func (c *Client) SetPlayback(value protocol.PlaybackSet) error {
 	return c.command(protocol.TypePlaybackSet, value)

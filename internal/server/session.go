@@ -187,6 +187,12 @@ func (s *session) handle(envelope protocol.Envelope) error {
 			return err
 		}
 		return s.server.hub.kick(s.participant, request)
+	case protocol.TypeRoomBanLift:
+		request, err := decode[protocol.RoomBanLift](envelope)
+		if err != nil {
+			return err
+		}
+		return s.server.hub.liftBan(s.participant, request)
 	case protocol.TypePlaybackSet:
 		request, err := decode[protocol.PlaybackSet](envelope)
 		if err != nil {
@@ -281,7 +287,8 @@ func (s *session) negotiateCapabilities(requested []protocol.Capability) error {
 			return invalid("invalid_hello", "client capabilities must be unique")
 		}
 		seen[capability] = struct{}{}
-		if capability == protocol.CapabilityMediaAvailabilityV1 || capability == protocol.CapabilityMediaStreamV1 && s.server.streaming != nil {
+		if capability == protocol.CapabilityMediaAvailabilityV1 || capability == protocol.CapabilityRoomBanV1 ||
+			capability == protocol.CapabilityMediaStreamV1 && s.server.streaming != nil {
 			s.capabilities[capability] = struct{}{}
 		}
 	}

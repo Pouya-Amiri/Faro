@@ -55,6 +55,34 @@ func (s *Service) KickParticipant(participantID string) error {
 	return client.KickParticipant(protocol.RoomParticipantKick{ParticipantID: participantID})
 }
 
+// BansAvailable reports whether the room's server can ban participants.
+func (s *Service) BansAvailable() bool {
+	client, err := s.connected()
+	return err == nil && client.Supports(protocol.CapabilityRoomBanV1)
+}
+
+// BanParticipant removes a participant from the room and keeps their
+// installation from joining it again until the ban is lifted.
+func (s *Service) BanParticipant(participantID string) error {
+	client, err := s.connected()
+	if err != nil {
+		return err
+	}
+	if !client.Supports(protocol.CapabilityRoomBanV1) {
+		return errors.New("this room's server can't ban people; update it to a newer Faro")
+	}
+	return client.KickParticipant(protocol.RoomParticipantKick{ParticipantID: participantID, Ban: true})
+}
+
+// LiftBan lets a banned person join the room again.
+func (s *Service) LiftBan(banID string) error {
+	client, err := s.connected()
+	if err != nil {
+		return err
+	}
+	return client.LiftBan(protocol.RoomBanLift{BanID: banID})
+}
+
 func (s *Service) SetPaused(paused bool) error {
 	if !paused {
 		s.resumeStreamingIntent()

@@ -673,6 +673,55 @@ func TestKickedParticipantLeavesAndDoesNotRejoin(t *testing.T) {
 	}
 }
 
+// A banned participant is removed and cannot join again with the same
+// invite, under any name, until the ban is lifted.
+func TestBannedParticipantCannotRejoinUntilTheBanIsLifted(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	host, viewer := New(context.Background(), nil), New(context.Background(), nil)
+	host.SetIdentity(strings.Repeat("h", 43))
+	viewer.SetIdentity(strings.Repeat("v", 43))
+	status, err := host.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	t.Cleanup(viewer.Shutdown)
+	if err := host.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Host", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := viewer.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Viewer", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	if !host.BansAvailable() {
+		t.Fatal("the room's server does not offer bans")
+	}
+	snapshot, err := viewer.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.BanParticipant(snapshot.SelfID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the banned viewer stayed in the room", func() bool { return !viewer.InRoom() })
+	err = viewer.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Someone else", Player: "mpv"})
+	if message, permanent := permanentConnectFailure(err); !permanent || !strings.Contains(message, "banned") {
+		t.Fatalf("rejoining after a ban returned %v", err)
+	}
+	snapshot, err = host.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Room.Bans) != 1 || snapshot.Room.Bans[0].Name != "Viewer" {
+		t.Fatalf("the room lists bans %+v", snapshot.Room.Bans)
+	}
+	if err := host.LiftBan(snapshot.Room.Bans[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := viewer.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Viewer", Player: "mpv"}); err != nil {
+		t.Fatalf("rejoining after the ban was lifted: %v", err)
+	}
+}
+
 func TestRemovingSelectedFileStopsPlaybackAndCannotReopenIt(t *testing.T) {
 	t.Setenv("FARO_TLS_DIR", t.TempDir())
 	s := New(context.Background(), nil)

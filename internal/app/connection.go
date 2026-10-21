@@ -46,7 +46,7 @@ func (s *Service) Connect(request ConnectionRequest) error {
 		Address:     parsed.Address, Fingerprint: parsed.Fingerprint,
 		JoinToken: parsed.JoinToken, OwnerToken: parsed.OwnerToken,
 		Name: request.Name, Room: parsed.Room, ClientVersion: request.ClientVersion,
-		Capabilities: []protocol.Capability{protocol.CapabilityMediaStreamV1, protocol.CapabilityMediaAvailabilityV1},
+		Capabilities: roomCapabilities, Identity: s.identity,
 	})
 	s.mu.Lock()
 	current := s.connectAttempt == attempt && ctx.Err() == nil
@@ -352,7 +352,7 @@ func (s *Service) reconnect(ctx context.Context, failed *faroclient.Client) {
 			Address:     parsed.Address, Fingerprint: parsed.Fingerprint,
 			JoinToken: parsed.JoinToken, OwnerToken: ownerToken,
 			Name: request.Name, Room: parsed.Room, ClientVersion: request.ClientVersion,
-			Capabilities: []protocol.Capability{protocol.CapabilityMediaStreamV1, protocol.CapabilityMediaAvailabilityV1},
+			Capabilities: roomCapabilities, Identity: s.identity,
 		})
 		if err != nil {
 			if message, permanent := permanentConnectFailure(err); permanent {
@@ -685,6 +685,9 @@ func reconnectDelay(attempt int) time.Duration {
 	return time.Duration(float64(base) * (0.8 + 0.4*rand.Float64()))
 }
 
+// roomCapabilities are the protocol extensions this app asks rooms for.
+var roomCapabilities = []protocol.Capability{protocol.CapabilityMediaStreamV1, protocol.CapabilityMediaAvailabilityV1, protocol.CapabilityRoomBanV1}
+
 // permanentConnectFailure explains a reconnect failure that retrying cannot
 // fix, such as a host restarting Easy hosting (new join token and address).
 func permanentConnectFailure(err error) (string, bool) {
@@ -700,6 +703,8 @@ func permanentConnectFailure(err error) (string, bool) {
 		return "This invite no longer works; the host may have restarted hosting. Ask for a new invite to rejoin.", true
 	case "invalid_owner_token":
 		return "This room now has a different owner, so the owner invite no longer works. Rejoin with a regular invite.", true
+	case protocol.ErrorBanned:
+		return "You were banned from this room.", true
 	}
 	return "This version of Faro cannot rejoin the room: " + rejected.Message, true
 }

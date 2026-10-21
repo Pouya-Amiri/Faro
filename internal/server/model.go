@@ -11,6 +11,10 @@ import (
 type participant struct {
 	state   protocol.Participant
 	session *session
+	// identity is the digest of the identity the client presented, which a
+	// ban refuses; identified is false for a client that presented none.
+	identity   [sha256.Size]byte
+	identified bool
 }
 
 type room struct {

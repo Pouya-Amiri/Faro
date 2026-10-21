@@ -164,6 +164,9 @@ type Service struct {
 	availabilitySent   []string
 	syncApplyMu        sync.Mutex
 	log                func(format string, args ...any)
+	// identity is this installation's secret, from which rooms learn who to
+	// keep out after a ban. Set once before the service is used.
+	identity string
 
 	mu                      sync.RWMutex
 	sessionCtx              context.Context
@@ -260,4 +263,11 @@ func (s *Service) SetDiagnostics(logf func(format string, args ...any)) {
 	if logf != nil {
 		s.log = logf
 	}
+}
+
+// SetIdentity sets this installation's secret identity. It must be called
+// before the service is used; without it, this participant cannot be banned
+// and rooms refuse to ban it.
+func (s *Service) SetIdentity(identity string) {
+	s.identity = identity
 }

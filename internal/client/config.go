@@ -2,6 +2,9 @@ package client
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -21,6 +24,24 @@ type Config struct {
 	Room          string
 	ClientVersion string
 	Capabilities  []protocol.Capability
+	// Identity is this installation's secret. Each room receives its own
+	// value derived from it, so rooms cannot link one person across them.
+	Identity string
+}
+
+// roomIdentity derives what identifies this installation to one room of one
+// server.
+func (c Config) roomIdentity() string {
+	if c.Identity == "" {
+		return ""
+	}
+	server := c.Fingerprint
+	if server == "" {
+		server = c.Address
+	}
+	mac := hmac.New(sha256.New, []byte(c.Identity))
+	mac.Write([]byte("faro room identity v1\x00" + server + "\x00" + c.Room))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func (c Config) Validate() error {

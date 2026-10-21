@@ -21,6 +21,7 @@ const (
 	TypeRoomUpdated           MessageType = "room.updated"
 	TypeRoomRoleSet           MessageType = "room.role.set"
 	TypeRoomParticipantKick   MessageType = "room.participant.kick"
+	TypeRoomBanLift           MessageType = "room.ban.lift"
 	TypeParticipantsUpdated   MessageType = "participants.updated"
 	TypePlaybackSet           MessageType = "playback.set"
 	TypePlaybackUpdated       MessageType = "playback.updated"
@@ -49,6 +50,10 @@ const (
 type Capability string
 
 const CapabilityMediaStreamV1 Capability = "media-stream-v1"
+
+// CapabilityRoomBanV1 lets owners and moderators ban participants, which
+// the server enforces through the identity in Hello.ClientIdentity.
+const CapabilityRoomBanV1 Capability = "room-ban-v1"
 
 type CommandOK struct {
 	Revision uint64 `json:"revision,omitempty"`
@@ -92,12 +97,16 @@ const (
 )
 
 type Hello struct {
-	ClientVersion string       `json:"clientVersion"`
-	Name          string       `json:"name"`
-	Room          string       `json:"room"`
-	JoinToken     string       `json:"joinToken,omitempty"`
-	OwnerToken    string       `json:"ownerToken,omitempty"`
-	Capabilities  []Capability `json:"capabilities,omitempty"`
+	ClientVersion string `json:"clientVersion"`
+	Name          string `json:"name"`
+	Room          string `json:"room"`
+	JoinToken     string `json:"joinToken,omitempty"`
+	OwnerToken    string `json:"ownerToken,omitempty"`
+	// ClientIdentity is a secret that stays the same for one installation in
+	// one room, so a ban outlasts the banned person's connection. The server
+	// keeps only its digest.
+	ClientIdentity string       `json:"clientIdentity,omitempty"`
+	Capabilities   []Capability `json:"capabilities,omitempty"`
 }
 
 type Welcome struct {
@@ -211,6 +220,15 @@ type PlaylistWheel struct {
 type Room struct {
 	ID   string   `json:"id"`
 	Mode RoomMode `json:"mode"`
+	// Bans lists who may not join the room, newest last.
+	Bans []RoomBan `json:"bans,omitempty"`
+}
+
+// RoomBan is one person kept out of a room, under the name they had.
+type RoomBan struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	BannedAtUnixMs int64  `json:"bannedAtUnixMs"`
 }
 
 type Snapshot struct {
@@ -322,9 +340,16 @@ type RoomRoleSet struct {
 }
 
 // RoomParticipantKick removes a participant from the room. Owners can remove
-// anyone but another owner; moderators can remove members.
+// anyone but another owner; moderators can remove members. Ban also keeps
+// them from joining again, which needs CapabilityRoomBanV1.
 type RoomParticipantKick struct {
 	ParticipantID string `json:"participantId"`
+	Ban           bool   `json:"ban,omitempty"`
+}
+
+// RoomBanLift lets a banned person join the room again.
+type RoomBanLift struct {
+	BanID string `json:"banId"`
 }
 
 type PlaybackSet struct {
@@ -372,6 +397,9 @@ const (
 // The client does not reconnect after it.
 const ErrorKicked = "kicked"
 
+// ErrorBanned refuses to let a banned participant join the room.
+const ErrorBanned = "banned"
+
 type PlaylistWheelSpin struct{}
 
 type ChatSend struct {
@@ -399,6 +427,7 @@ const (
 	ActivityWheelStarted    ActivityAction = "wheel.started"
 	ActivityWheelCompleted  ActivityAction = "wheel.completed"
 	ActivityParticipantKick ActivityAction = "participant.kicked"
+	ActivityParticipantBan  ActivityAction = "participant.banned"
 )
 
 // ActivityMessage is a server-authored, ephemeral room event. Clients format
