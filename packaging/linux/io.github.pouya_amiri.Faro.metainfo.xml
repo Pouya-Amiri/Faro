@@ -22,6 +22,11 @@
     <id>io.github.pouya_amiri.Faro.desktop</id>
   </provides>
   <releases>
+    <release version="1.2.1" date="2026-10-22">
+      <description>
+        <p>Room owners and moderators can ban people, so they can't rejoin with the same invite until the ban is lifted. Roles, removal and bans now sit behind compact menus in the people panel. A file a friend has can be played before it is shared. Live broadcasts show at their live edge, and their chat tab closes with them. The chat toolbar and long messages now fit a narrow window.</p>
+      </description>
+    </release>
     <release version="1.2.0" date="2026-10-20">
       <description>
         <p>Makes shared files stream reliably: stalled or trickling transfers restart on their own, failures retry with backoff, playback continues from the cache when sharing ends, and a corrupted-bytes race in capped caches is fixed. Playback switching, closing and reconnecting no longer let an older action override a newer one. Live streams no longer trip the room's command limit, share only play and pause, and show their YouTube chat in a separate tab. VLC now shows video in its own window, and Faro asks whether to keep running in the tray the first time its window closes.</p>
