@@ -5,9 +5,9 @@ go 1.27.3
 require (
 	github.com/godbus/dbus/v5 v5.2.4
 	github.com/tailscale/tailcat v0.7.0
-	github.com/wailsapp/wails/v3 v3.0.0-beta.29
+	github.com/wailsapp/wails/v3 v3.0.0
 	golang.org/x/sys v0.49.0
-	tailscale.com v1.104.1
+	tailscale.com v1.104.2
 )
 
 require (

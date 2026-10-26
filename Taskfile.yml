@@ -134,6 +134,7 @@ tasks:
         -productcopyright "Copyright Faro contributors"
         -productdescription "Secure synchronized media playback"
         -productcomments "Secure synchronized media playback"
+        -productcomments "Secure synchronized media playback"
         -config config.yml
         -dir .
     dir: build
