@@ -673,6 +673,66 @@ func TestKickedParticipantLeavesAndDoesNotRejoin(t *testing.T) {
 	}
 }
 
+// A kick that arrives while the app is still busy with an earlier event can
+// miss the event loop, which then sees only a closed connection; the
+// participant must still leave rather than reconnect.
+func TestKickedParticipantDoesNotRejoinWhenBusy(t *testing.T) {
+	t.Setenv("FARO_TLS_DIR", t.TempDir())
+	kicked := make(chan struct{}, 1)
+	var busy atomic.Bool
+	host := New(context.Background(), nil)
+	viewer := New(context.Background(), func(event Event) {
+		// Longer than the client waits for the app to take its last event.
+		if event.Kind == "chat" && busy.CompareAndSwap(true, false) {
+			time.Sleep(2 * time.Second)
+		}
+		if event.Error != nil && event.Error.Code == protocol.ErrorKicked {
+			kicked <- struct{}{}
+		}
+	})
+	status, err := host.StartServer(ServerRequest{Mode: "advanced", ListenAddress: "127.0.0.1:0", PublicHost: "localhost", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Shutdown)
+	t.Cleanup(viewer.Shutdown)
+	if err := host.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Host", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := viewer.Connect(ConnectionRequest{Invite: status.LocalInvite, Name: "Viewer", Player: "mpv"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := viewer.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy.Store(true)
+	if err := host.SendChat("hello"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the viewer did not receive the chat message", func() bool { return !busy.Load() })
+	if err := host.KickParticipant(snapshot.SelfID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-kicked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the viewer was not told it was removed")
+	}
+	if viewer.InRoom() {
+		t.Fatal("the removed viewer is still in the room")
+	}
+	// The first reconnect attempt would come within 1.2 seconds.
+	time.Sleep(1500 * time.Millisecond)
+	snapshot, err = host.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Participants) != 1 {
+		t.Fatalf("room has %d participants after the kick, want 1", len(snapshot.Participants))
+	}
+}
+
 // A banned participant is removed and cannot join again with the same
 // invite, under any name, until the ban is lifted.
 func TestBannedParticipantCannotRejoinUntilTheBanIsLifted(t *testing.T) {
@@ -1051,12 +1111,13 @@ func TestPlaylistStreamConnectsAutomaticallyAndStopsWhenRemoved(t *testing.T) {
 		state, stateErr := mediaPlayer.State(context.Background())
 		return stateErr == nil && state.Source == nextURL
 	})
-	viewer.mu.RLock()
-	retired := viewer.stream == nil
-	viewer.mu.RUnlock()
-	if !retired {
-		t.Fatal("the cached stream outlived its queue selection")
-	}
+	// Loading the next item and retiring the stream both follow the same
+	// queue change but run separately, so either can finish first.
+	waitForState("the cached stream outlived its queue selection", func() bool {
+		viewer.mu.RLock()
+		defer viewer.mu.RUnlock()
+		return viewer.stream == nil
+	})
 }
 
 func TestRemovedPlaylistOfferIsWithdrawnAfterPlayerWasClosed(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -45,6 +46,33 @@ func TestHubEnforcesRoomAndParticipantLimits(t *testing.T) {
 	}
 	if _, err := testJoin(h, testSession("three"), protocol.Hello{Name: "Linus", Room: "other"}); err == nil || !strings.Contains(err.Error(), "room limit") {
 		t.Fatalf("expected server room limit, got %v", err)
+	}
+}
+
+// Names keep the joiners that Persian and emoji need, but lose characters
+// that are invisible or reorder text, and two names that look the same are
+// told apart.
+func TestNamesDropHiddenCharacters(t *testing.T) {
+	h := newHub(10, 10)
+	for _, test := range []struct{ name, want string }{
+		{"Ada", "Ada"},
+		{"Ada\u200b", "Ada (2)"},
+		{"\u202eAda\u202c", "Ada (3)"},
+		{"ADA\u200d", "ADA\u200d (4)"},
+		{"\u0645\u06cc\u200c\u0634\u0648\u062f", "\u0645\u06cc\u200c\u0634\u0648\u062f"},
+		{"\U0001F468\u200d\U0001F469\u200d\U0001F467", "\U0001F468\u200d\U0001F469\u200d\U0001F467"},
+		{"Linus\tT\x1b", "LinusT"},
+	} {
+		joined, err := testJoin(h, testSession(test.name), protocol.Hello{Name: test.name, Room: "movie"})
+		if err != nil {
+			t.Fatalf("%q: %v", test.name, err)
+		}
+		if got := joined.participant.state.Name; got != test.want {
+			t.Errorf("%q joined as %q, want %q", test.name, got, test.want)
+		}
+	}
+	if _, err := testJoin(h, testSession("blank"), protocol.Hello{Name: "\u200b\u2066", Room: "movie"}); err == nil {
+		t.Fatal("a name of only invisible characters was accepted")
 	}
 }
 
@@ -113,6 +141,51 @@ func TestSponsorBlockSeekEmitsSystemActivity(t *testing.T) {
 	}
 	if activity.Action != protocol.ActivitySponsorSkipped || activity.ParticipantID != "" || activity.ParticipantName != "" {
 		t.Fatalf("unexpected SponsorBlock activity: %#v", activity)
+	}
+}
+
+// Every participant with SponsorBlock on skips a segment at the same moment;
+// the room moves once and says so once.
+func TestRepeatedSponsorBlockSkipIsDropped(t *testing.T) {
+	h := newHub(1, 2)
+	s := testSession("owner")
+	owner, err := testJoin(h, s, protocol.Hello{Name: "Ada", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewer, err := testJoin(h, testSession("viewer"), protocol.Hello{Name: "Grace", Room: "movie"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for len(s.out) > 0 {
+		<-s.out
+	}
+	skips := []struct {
+		who    *participant
+		target float64
+	}{{owner.participant, 42}, {viewer.participant, 42.2}, {owner.participant, 90}}
+	for _, skip := range skips {
+		if err := h.setPlayback(skip.who, protocol.PlaybackSet{PositionSeconds: skip.target, Rate: 1, Seek: true, SponsorBlock: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var positions []float64
+	activities := 0
+	for len(s.out) > 0 {
+		frame := <-s.out
+		switch frame.envelope.Type {
+		case protocol.TypePlaybackUpdated:
+			playback, err := protocol.DecodePayload[protocol.Playback](frame.envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			positions = append(positions, playback.PositionSeconds)
+		case protocol.TypeActivityMessage:
+			activities++
+		}
+	}
+	if !slices.Equal(positions, []float64{42, 90}) || activities != 2 {
+		t.Fatalf("playback moved to %v with %d activities, want [42 90] with 2", positions, activities)
 	}
 }
 

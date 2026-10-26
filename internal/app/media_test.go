@@ -39,6 +39,25 @@ func TestExpandMediaPathsIncludesFilesAndDirectories(t *testing.T) {
 	}
 }
 
+func TestExpandMediaPathsAcceptsCommonContainers(t *testing.T) {
+	root := t.TempDir()
+	var paths []string
+	for _, name := range []string{"a.ts", "b.m2ts", "c.WMV", "d.flv", "e.mpg", "f.mpeg", "g.3gp", "h.ogv", "i.aac", "j.mkv", "k.m3u8"} {
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte("test"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+	}
+	files, err := ExpandMediaPaths(paths, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := paths[:len(paths)-1]; !slices.Equal(files, want) {
+		t.Fatalf("expanded %v, want every file but the playlist", files)
+	}
+}
+
 func TestExpandMediaPathsEnforcesLimit(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"one.mkv", "two.mp4"} {

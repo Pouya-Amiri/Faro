@@ -75,6 +75,7 @@ type Client struct {
 	mu       sync.RWMutex
 	welcome  protocol.Welcome
 	snapshot protocol.Snapshot
+	fatal    *protocol.Error
 	clock    clockEstimator
 }
 
@@ -370,6 +371,10 @@ func (c *Client) update(envelope protocol.Envelope) (Event, bool) {
 			return Event{}, false
 		}
 		event.Error = &value
+		if value.Fatal {
+			fatal := value
+			c.fatal = &fatal
+		}
 	}
 	return event, true
 }
@@ -431,6 +436,20 @@ func (c *Client) PlaybackPosition() float64 {
 func (c *Client) Events() <-chan Event { return c.events.out }
 
 func (c *Client) Done() <-chan struct{} { return c.done }
+
+// FatalError is the server's reason for ending the connection, such as a
+// kick, or nil if it gave none. It stays readable after Done, because an
+// app that was busy when the connection ended may never receive the event
+// that carried it.
+func (c *Client) FatalError() *protocol.Error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.fatal == nil {
+		return nil
+	}
+	fatal := *c.fatal
+	return &fatal
+}
 
 func (c *Client) SetRoomMode(value protocol.RoomModeSet) error {
 	return c.command(protocol.TypeRoomModeSet, value)

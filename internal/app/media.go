@@ -1264,13 +1264,19 @@ func playlistItemIdentity(item protocol.PlaylistItem) string {
 	return ""
 }
 
+// MediaExtensions are the file types Faro adds from a folder, a drop or the
+// file picker, and indexes in saved media folders. They cover what mpv and
+// VLC play and what the Linux desktop file offers to open; playlists are
+// left out, since they are loaded as a queue rather than played.
+var MediaExtensions = []string{
+	".mkv", ".mk3d", ".mp4", ".m4v", ".mov", ".webm", ".avi", ".divx", ".wmv", ".asf", ".flv", ".f4v",
+	".ts", ".mts", ".m2ts", ".mpg", ".mpeg", ".m2v", ".vob", ".3gp", ".3g2", ".ogv", ".ogm", ".rm", ".rmvb",
+	".mp3", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".wav", ".wma", ".mka", ".ac3", ".mp2", ".ra",
+	".aif", ".aiff",
+}
+
 func isMediaExtension(extension string) bool {
-	switch strings.ToLower(extension) {
-	case ".mkv", ".mp4", ".webm", ".avi", ".mov", ".m4v", ".mp3", ".m4a", ".flac", ".ogg", ".wav", ".opus":
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(MediaExtensions, strings.ToLower(extension))
 }
 
 // skipUnreadable lets a directory walk continue past a subfolder or file it

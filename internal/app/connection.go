@@ -221,6 +221,13 @@ func (s *Service) consumeClient(ctx context.Context, client *faroclient.Client) 
 				s.emitSnapshot()
 			}
 		case <-client.Done():
+			if fatal := client.FatalError(); fatal != nil && fatal.Code == protocol.ErrorKicked {
+				// The kick event is dropped when this loop was busy as the
+				// connection closed; rejoining would undo the kick.
+				s.leaveAfterKick(client)
+				s.sink(Event{Kind: "error", Error: fatal})
+				return
+			}
 			if ctx.Err() == nil {
 				s.reconnect(ctx, client)
 			}

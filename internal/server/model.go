@@ -28,6 +28,9 @@ type room struct {
 	streamOffers   map[string]*protocol.MediaStreamOffer
 	streamRequests map[string]*streamRequest
 	streamGrants   map[string]*streamGrant
+	// sponsorSkip is where the latest SponsorBlock skip went, and when.
+	sponsorSkip   float64
+	sponsorSkipAt time.Time
 }
 
 type streamRequest struct {

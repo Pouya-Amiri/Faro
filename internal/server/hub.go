@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Pouya-Amiri/Faro/internal/protocol"
@@ -35,6 +36,10 @@ const (
 	maxRevokeReasonRunes   = 256
 	wheelStartDelay        = 700 * time.Millisecond
 	wheelDuration          = 4800 * time.Millisecond
+	// A SponsorBlock skip within sponsorSkipTolerance of the previous one
+	// and within sponsorSkipWindow of it is the same skip.
+	sponsorSkipTolerance = 0.5
+	sponsorSkipWindow    = 3 * time.Second
 )
 
 // streamRequestTimeout is how long a stream request waits for the provider's
@@ -83,7 +88,7 @@ func newHub(maxRooms, maxRoomParticipants int, streaming ...*protocol.MediaStrea
 // room's lock is released, so the newcomer's welcome and snapshot are queued
 // ahead of any later change and nothing between them is lost.
 func (h *hub) join(s *session, hello protocol.Hello, welcome func(joinResult)) error {
-	name, err := validateText("name", hello.Name, maxNameRunes)
+	name, err := validateText("name", strings.Map(dropHidden, hello.Name), maxNameRunes)
 	if err != nil {
 		return err
 	}
@@ -313,6 +318,16 @@ func (h *hub) setPlayback(p *participant, request protocol.PlaybackSet) error {
 	}
 	previous := r.playback
 	now := time.Now()
+	if request.Seek && request.SponsorBlock {
+		// Synchronized players reach a segment together, so every
+		// participant with SponsorBlock on skips it at once. The first skip
+		// moves the room; the others would only repeat it.
+		if math.Abs(request.PositionSeconds-r.sponsorSkip) < sponsorSkipTolerance && now.Sub(r.sponsorSkipAt) < sponsorSkipWindow {
+			h.mu.Unlock()
+			return nil
+		}
+		r.sponsorSkip, r.sponsorSkipAt = request.PositionSeconds, now
+	}
 	r.playback.Revision++
 	r.playback.PositionSeconds = request.PositionSeconds
 	r.playback.Paused = request.Paused
@@ -1121,6 +1136,33 @@ func validateText(field, value string, maximum int) (string, error) {
 	return value, nil
 }
 
+// dropHidden removes characters that change how a name displays without
+// being seen themselves: controls, bidirectional overrides and zero-width
+// spaces. They would let two names look identical, or reorder the text
+// around a name. Joiners and tags stay, because Persian and other scripts,
+// emoji sequences and flags need them.
+func dropHidden(r rune) rune {
+	if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) && !isJoiner(r) {
+		return -1
+	}
+	return r
+}
+
+func isJoiner(r rune) bool {
+	return r == '\u200c' || r == '\u200d' || r >= 0xe0020 && r <= 0xe007f
+}
+
+// nameKey is how names are compared: two names that differ only in case or
+// in joiners look the same.
+func nameKey(name string) string {
+	return strings.ToLower(strings.Map(func(r rune) rune {
+		if isJoiner(r) {
+			return -1
+		}
+		return r
+	}, name))
+}
+
 func validatePlaylist(items []protocol.PlaylistItem) ([]protocol.PlaylistItem, error) {
 	if len(items) > maxPlaylistItems {
 		return nil, invalid("invalid_playlist", "playlist has too many items")
@@ -1174,14 +1216,14 @@ func validatePlaylist(items []protocol.PlaylistItem) ([]protocol.PlaylistItem, e
 func freeName(base string, participants map[string]*participant) string {
 	used := make(map[string]struct{}, len(participants))
 	for _, current := range participants {
-		used[strings.ToLower(current.state.Name)] = struct{}{}
+		used[nameKey(current.state.Name)] = struct{}{}
 	}
-	if _, exists := used[strings.ToLower(base)]; !exists {
+	if _, exists := used[nameKey(base)]; !exists {
 		return base
 	}
 	for suffix := 2; ; suffix++ {
 		candidate := fmt.Sprintf("%s (%d)", base, suffix)
-		if _, exists := used[strings.ToLower(candidate)]; !exists {
+		if _, exists := used[nameKey(candidate)]; !exists {
 			return candidate
 		}
 	}

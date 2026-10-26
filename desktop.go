@@ -330,7 +330,7 @@ func (d *Desktop) SavePlaylistFile() (string, error) {
 
 func mediaFileFilters() []application.FileFilter {
 	return []application.FileFilter{
-		{DisplayName: "Media files", Pattern: "*.mkv;*.mp4;*.webm;*.avi;*.mov;*.m4v;*.mp3;*.m4a;*.flac;*.ogg;*.wav;*.opus"},
+		{DisplayName: "Media files", Pattern: "*" + strings.Join(app.MediaExtensions, ";*")},
 		{DisplayName: "All files", Pattern: "*"},
 	}
 }

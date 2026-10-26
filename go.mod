@@ -1,6 +1,6 @@
 module github.com/Pouya-Amiri/Faro
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/godbus/dbus/v5 v5.2.4

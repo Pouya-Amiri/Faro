@@ -1043,6 +1043,11 @@ func (g *Gateway) replaceFailedStoreLocked(failed cacheStore, cause error) {
 	if bounded, ok := failed.(*blockStore); ok && !bounded.onDisk() {
 		return
 	}
+	// The OS error names the cache file, and so the user's home folder.
+	var pathErr *os.PathError
+	if errors.As(cause, &pathErr) {
+		cause = pathErr.Err
+	}
 	g.logf("stream disk cache failed, continuing in memory: %v", cause)
 	g.store = newMemoryStore(g.media.SizeBytes, memoryCacheBytes, g.chunkBytes)
 	clear(g.have)
