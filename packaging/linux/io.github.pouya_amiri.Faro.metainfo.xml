@@ -22,6 +22,11 @@
     <id>io.github.pouya_amiri.Faro.desktop</id>
   </provides>
   <releases>
+    <release version="1.2.2" date="2026-11-20">
+      <description>
+        <p>Restores fast streaming of shared files, which a network stack change had slowed to a trickle after packet loss; both the person sharing and the person watching need this version. YouTube links are added to the queue at once, with their details following in the background. If YouTube asks to confirm you're not a bot, Preferences → YouTube can now use the YouTube sign-in from a browser or a cookies file. Slow starts are recorded in the diagnostics log, and dependencies are updated.</p>
+      </description>
+    </release>
     <release version="1.2.1" date="2026-10-22">
       <description>
         <p>Room owners and moderators can ban people, so they can't rejoin with the same invite until the ban is lifted. Roles, removal and bans now sit behind compact menus in the people panel. A file a friend has can be played before it is shared. Live broadcasts show at their live edge, and their chat tab closes with them. The chat toolbar and long messages now fit a narrow window.</p>
