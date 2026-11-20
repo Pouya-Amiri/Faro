@@ -119,6 +119,7 @@ func (d *Desktop) revealWindow() {
 		d.backgroundMu.Unlock()
 		prepareWindowSurface(d.window, background)
 		d.window.Show()
+		d.diagnostics.Printf("startup: window shown %s after launch", sinceLaunch())
 	})
 }
 

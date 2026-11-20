@@ -3813,6 +3813,20 @@ setInterval(() => {
 
 // Startup. On Linux the window stays hidden until WindowReady, so everything
 // the first frame shows is settled before it is revealed.
+// During the first minute, a stall of this page (which also moves the window
+// by its title bar) is written to the diagnostics log, so a slow start can be
+// traced to the page or to the window around it.
+if (hasBackend) {
+  const watchStarted = performance.now();
+  let lastTick = watchStarted;
+  const stallWatch = setInterval(() => {
+    const now = performance.now();
+    const blocked = now - lastTick - 100;
+    lastTick = now;
+    if (blocked >= 300 && document.visibilityState === "visible") invoke("ReportStall", Math.round(blocked)).catch(() => {});
+    if (now - watchStarted > 60000) clearInterval(stallWatch);
+  }, 100);
+}
 applyPreferences();
 await Promise.all([
   configurePlayerOptions(),

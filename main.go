@@ -109,6 +109,9 @@ func main() {
 	} {
 		mainWindow.OnWindowEvent(eventType, emitWindowState)
 	}
+	wailsApp.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
+		desktop.watchMainThread()
+	})
 	if revealWhenReady {
 		// The page calls Desktop.WindowReady after its first render. These
 		// fallbacks guarantee the window still appears if it never does.
