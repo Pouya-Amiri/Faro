@@ -1847,9 +1847,23 @@ function savedYouTubeQuality(source) {
 
 async function prepareYouTubeSource(source) {
   if (!isYouTubeURL(source)) return null;
-  const info = await youtubeInfo(source);
-  await invoke("SetYouTubeQuality", source, savedYouTubeQuality(source));
+  const [info] = await Promise.all([youtubeInfo(source), invoke("SetYouTubeQuality", source, savedYouTubeQuality(source))]);
   return info;
+}
+
+// What a link needs to be queued: its title, and its duration when already
+// known. yt-dlp takes seconds to read a video's details, but YouTube's quick
+// title lookup answers at once, so the link is queued with that and the
+// backend adds the duration when yt-dlp has it. Links without a quick title
+// (private or removed videos, a channel's /live address) and devices that
+// cannot play YouTube wait for yt-dlp, so its error is shown instead.
+async function queueableYouTubeInfo(source) {
+  if (!isYouTubeURL(source)) return null;
+  const details = prepareYouTubeSource(source);
+  if (youtubeSupport.problem) return details;
+  details.catch(() => {});
+  const quick = invoke("YouTubeTitle", source).then((title) => (title ? { title } : details), () => details);
+  return Promise.race([details, quick]);
 }
 
 // Each Play click supersedes the previous one: a slow first click that
@@ -2579,7 +2593,7 @@ $("add-playlist").onclick = async () => {
   button.querySelector("span").textContent = "Adding";
   input.disabled = true;
   try {
-    const info = await prepareYouTubeSource(source);
+    const info = await queueableYouTubeInfo(source);
     const label = info?.title || playlistSourceLabel(source);
     await appendToPlaylist([{ id: "", label, source, url: "", media: null, durationSeconds: Number(info?.duration) || 0 }]);
     input.value = "";
@@ -2913,8 +2927,121 @@ document.querySelectorAll("[data-settings]").forEach((button) => {
     document.querySelectorAll("[data-settings]").forEach((node) => node.classList.toggle("active", node === button));
     document.querySelectorAll("[data-page]").forEach((page) => page.classList.toggle("hidden", page.dataset.page !== button.dataset.settings));
     if (button.dataset.settings === "legal") loadLegalInfo();
+    if (button.dataset.settings === "youtube") void loadYouTubeAccount();
   };
 });
+
+// YouTube sign-in. yt-dlp uses the YouTube cookies of a browser the user is
+// signed in with, or of an exported cookies.txt file. The backend validates
+// and saves the choice; Faro itself never asks for a password.
+const youtubeSignInURL = `https://accounts.google.com/ServiceLogin?service=youtube&continue=${encodeURIComponent("https://www.youtube.com/")}`;
+const youtubeBrowserNames = {
+  firefox: "Firefox", chrome: "Google Chrome", chromium: "Chromium", brave: "Brave", edge: "Microsoft Edge",
+  opera: "Opera", vivaldi: "Vivaldi", safari: "Safari"
+};
+let youtubeAccount = { browser: "", profile: "", cookiesFile: "" };
+let youtubeAccountLoad = null;
+let youtubeAccountCheck = 0;
+if (document.body.dataset.platform !== "mac") $("youtube-account-source").querySelector('option[value="safari"]')?.remove();
+$("youtube-windows-note").classList.toggle("hidden", document.body.dataset.platform !== "windows");
+
+function youtubeAccountChoice(account) { return account.cookiesFile ? "file" : account.browser || ""; }
+
+function youtubeAccountStatus(message, state = "") {
+  const status = $("youtube-account-status");
+  status.className = `field-status${state ? ` ${state}` : ""}`;
+  status.textContent = message;
+}
+
+function renderYouTubeAccount(choice = youtubeAccountChoice(youtubeAccount)) {
+  const select = $("youtube-account-source");
+  select.value = choice;
+  select._syncCustomSelect?.();
+  const browser = choice !== "" && choice !== "file";
+  $("youtube-profile-group").classList.toggle("hidden", !browser);
+  $("youtube-file-group").classList.toggle("hidden", choice !== "file");
+  if (document.activeElement !== $("youtube-account-profile")) $("youtube-account-profile").value = youtubeAccount.profile || "";
+  $("youtube-cookies-file").value = youtubeAccount.cookiesFile || "";
+  $("youtube-cookies-file").title = youtubeAccount.cookiesFile || "";
+  $("youtube-account-check").disabled = !youtubeAccount.browser && !youtubeAccount.cookiesFile;
+}
+
+function loadYouTubeAccount() {
+  if (!hasBackend) return Promise.resolve();
+  youtubeAccountLoad ||= invoke("YouTubeAccount").then((account) => {
+    youtubeAccount = { browser: "", profile: "", cookiesFile: "", ...(account || {}) };
+    renderYouTubeAccount();
+    if (youtubeAccount.browser || youtubeAccount.cookiesFile) {
+      const source = youtubeAccount.cookiesFile ? "the cookies file" : youtubeBrowserNames[youtubeAccount.browser] || youtubeAccount.browser;
+      youtubeAccountStatus(`YouTube links use the sign-in from ${source}.`);
+    }
+  }, (error) => { youtubeAccountLoad = null; youtubeAccountStatus(errorText(error), "missing"); });
+  return youtubeAccountLoad;
+}
+
+// Saves the account and checks it; a refused choice shows why and the saved
+// one is shown again.
+async function saveYouTubeAccount(account) {
+  try {
+    youtubeAccount = { browser: "", profile: "", cookiesFile: "", ...(await invoke("SetYouTubeAccount", account)) };
+  } catch (error) {
+    renderYouTubeAccount();
+    youtubeAccountStatus(errorText(error), "missing");
+    return;
+  }
+  // Details read without the sign-in may differ from those read with it.
+  youtubeInfoCache.clear();
+  renderYouTubeAccount();
+  if (youtubeAccount.browser || youtubeAccount.cookiesFile) await checkYouTubeAccount();
+  else youtubeAccountStatus("YouTube links play signed out.");
+}
+
+async function checkYouTubeAccount() {
+  const sequence = ++youtubeAccountCheck;
+  const button = $("youtube-account-check");
+  button.disabled = true;
+  youtubeAccountStatus("Checking the sign-in…");
+  try {
+    const result = await invoke("CheckYouTubeAccount");
+    if (sequence === youtubeAccountCheck) youtubeAccountStatus(result?.message || "", result?.signedIn ? "detected" : "missing");
+  } catch (error) {
+    if (sequence === youtubeAccountCheck) youtubeAccountStatus(errorText(error), "missing");
+  } finally {
+    if (sequence === youtubeAccountCheck) renderYouTubeAccount();
+  }
+}
+
+async function chooseYouTubeCookiesFile() {
+  let path = "";
+  try { path = await invoke("ChooseCookiesFile"); }
+  catch (error) { youtubeAccountStatus(errorText(error), "missing"); }
+  if (path) await saveYouTubeAccount({ cookiesFile: path });
+  else renderYouTubeAccount();
+}
+
+$("youtube-account-source").onchange = async (event) => {
+  await loadYouTubeAccount();
+  const choice = event.target.value;
+  if (choice === "file") {
+    renderYouTubeAccount("file");
+    if (!youtubeAccount.cookiesFile) await chooseYouTubeCookiesFile();
+    return;
+  }
+  if (!choice) $("youtube-account-profile").value = "";
+  const profile = choice === youtubeAccount.browser ? $("youtube-account-profile").value.trim() : "";
+  await saveYouTubeAccount(choice ? { browser: choice, profile } : {});
+};
+$("youtube-account-profile").onchange = (event) => {
+  if (youtubeAccount.browser) void saveYouTubeAccount({ browser: youtubeAccount.browser, profile: event.target.value.trim() });
+};
+$("youtube-cookies-browse").onclick = () => { void chooseYouTubeCookiesFile(); };
+$("youtube-account-check").onclick = () => { void checkYouTubeAccount(); };
+$("youtube-sign-in").onclick = () => {
+  if (!wails?.Browser) return;
+  wails.Browser.OpenURL(youtubeSignInURL)
+    .then(() => youtubeAccountStatus("Sign in to YouTube in your browser, choose that browser above, then check the sign-in."))
+    .catch(showError);
+};
 
 async function loadLegalInfo() {
   if (legalInfoLoaded) return;
@@ -3532,7 +3659,7 @@ document.addEventListener("drop", async (event) => {
   const value = event.dataTransfer?.getData("text/uri-list") || event.dataTransfer?.getData("text/plain") || "";
   if (/^https?:\/\//i.test(value.trim()) && snapshot && canControl()) {
     try {
-      const source = value.trim(), info = await prepareYouTubeSource(source);
+      const source = value.trim(), info = await queueableYouTubeInfo(source);
       await appendToPlaylist([{ id: "", label: info?.title || playlistSourceLabel(source), source, url: "", media: null, durationSeconds: Number(info?.duration) || 0 }]);
     } catch (error) { showError(error); }
   }

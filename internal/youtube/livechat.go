@@ -54,6 +54,7 @@ func (r *Resolver) LiveChat(ctx context.Context, source string, deliver func(Cha
 		"--skip-download", "--write-subs", "--sub-langs", "live_chat",
 		"--output", filepath.Join(dir, "chat.%(ext)s"),
 	}
+	args = append(args, r.accountArgs()...)
 	args = append(args, runtimeArg...)
 	args = append(args, "--remote-components", "ejs:github", "--", source)
 	command := newCommandContext(ctx, executable, args...)

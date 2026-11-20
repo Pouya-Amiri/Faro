@@ -25,7 +25,7 @@
         document.documentElement.style.colorScheme = isDark ? "dark" : "light";
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=43" />
+    <link rel="stylesheet" href="/styles.css?v=44" />
     <link rel="stylesheet" href="/desktop.css?v=18" />
   </head>
   <body>
@@ -644,6 +644,10 @@
                   <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2 4a1 1 0 0 1 1-1h4l2 2h4a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4Z" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
                   <span>Media Library</span>
                 </button>
+                <button type="button" class="pref-nav-btn" data-settings="youtube">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="1.5" y="3.5" width="13" height="9" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m6.75 6 3.5 2-3.5 2V6Z" fill="currentColor"/></svg>
+                  <span>YouTube</span>
+                </button>
                 <button type="button" class="pref-nav-btn" data-settings="session">
                   <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 1v2m0 10v2M1 8h2m10 0h2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
                   <span>Session &amp; Server</span>
@@ -828,6 +832,60 @@
                   </div>
                 </section>
 
+                <!-- Page: YouTube -->
+                <section data-page="youtube" class="pref-page hidden">
+                  <div class="pref-section-head">
+                    <h3>YouTube Sign-in</h3>
+                    <p>If YouTube links stop playing and YouTube asks to confirm you're not a bot, yt-dlp can use your YouTube sign-in from a browser.</p>
+                  </div>
+
+                  <div class="form-group">
+                    <label for="youtube-account-source" class="form-label">Use the Sign-in From</label>
+                    <select id="youtube-account-source" class="form-select">
+                      <option value="">No account (signed out)</option>
+                      <option value="firefox">Firefox</option>
+                      <option value="chrome">Google Chrome</option>
+                      <option value="chromium">Chromium</option>
+                      <option value="brave">Brave</option>
+                      <option value="edge">Microsoft Edge</option>
+                      <option value="opera">Opera</option>
+                      <option value="vivaldi">Vivaldi</option>
+                      <option value="safari">Safari</option>
+                      <option value="file">A cookies.txt file</option>
+                    </select>
+                  </div>
+
+                  <div id="youtube-profile-group" class="form-group hidden">
+                    <label for="youtube-account-profile" class="form-label">Browser Profile <span class="optional">(optional)</span></label>
+                    <input id="youtube-account-profile" class="form-input" placeholder="Default profile" spellcheck="false" autocomplete="off" />
+                    <small class="form-hint">Only needed if you use several profiles in that browser, such as "Profile 1".</small>
+                  </div>
+
+                  <div id="youtube-file-group" class="form-group hidden">
+                    <label for="youtube-cookies-file" class="form-label">Cookies File</label>
+                    <div class="input-with-action">
+                      <input id="youtube-cookies-file" class="form-input" placeholder="No file chosen" readonly />
+                      <button id="youtube-cookies-browse" class="btn btn-secondary" type="button">Browse…</button>
+                    </div>
+                  </div>
+
+                  <div class="youtube-account-actions">
+                    <button id="youtube-sign-in" class="btn btn-secondary btn-sm" type="button">Sign in to YouTube…</button>
+                    <button id="youtube-account-check" class="btn btn-secondary btn-sm" type="button">Check Sign-in</button>
+                  </div>
+                  <small id="youtube-account-status" class="field-status" aria-live="polite"></small>
+
+                  <div class="pref-section-head pref-subsection">
+                    <h3>Privacy and Your Account</h3>
+                  </div>
+                  <ul class="youtube-account-notes">
+                    <li>Faro never sees your password. You sign in on YouTube's own page in your browser.</li>
+                    <li>yt-dlp reads that browser's YouTube cookies on this device and sends them only to YouTube. They are never sent to the room, your friends or anyone else.</li>
+                    <li>YouTube can flag accounts used with tools like yt-dlp. A spare Google account is the safer choice.</li>
+                    <li id="youtube-windows-note" class="hidden">On Windows, Chrome, Edge and other Chromium browsers keep their sign-in from other programs; use Firefox.</li>
+                  </ul>
+                </section>
+
                 <!-- Page: Session -->
                 <section data-page="session" class="pref-page hidden">
                   <div class="pref-section-head">
@@ -977,6 +1035,6 @@
       </div>
     </div>
 
-    <script type="module" src="/app.js?v=34"></script>
+    <script type="module" src="/app.js?v=35"></script>
   </body>
 </html>

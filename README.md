@@ -79,7 +79,12 @@ paths and launch arguments can be configured in the connection screen. YouTube
 playback requires [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and a supported
 JavaScript runtime installed on the computer. Faro detects common install
 locations and configures the runtime automatically; `Deno 2.3+` is recommended.
-Restart Faro after installing either dependency.
+Restart Faro after installing either dependency. If YouTube starts asking to
+confirm you're not a bot, choose a browser you're signed in to YouTube with in
+**Preferences → YouTube**. yt-dlp then reads that browser's YouTube cookies on
+your computer; Faro never sees your password, and the cookies are never sent to
+the room. YouTube can flag accounts used with tools like yt-dlp, so a spare
+Google account is the safer choice.
 
 Flatpak builds of media players are not currently supported. Their sandbox does
 not expose the local control endpoint Faro uses; install the player from a

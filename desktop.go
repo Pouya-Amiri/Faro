@@ -60,6 +60,7 @@ func (d *Desktop) ServiceStartup(ctx context.Context, _ application.ServiceOptio
 	} else {
 		d.diagnostics.Printf("identity: %v", err)
 	}
+	d.restoreYouTubeAccount()
 	d.startUpdates()
 	return nil
 }

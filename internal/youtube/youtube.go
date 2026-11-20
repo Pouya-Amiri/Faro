@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -64,6 +65,12 @@ type Resolver struct {
 	run            commandRunner
 	find           func(string) string
 	version        func(context.Context, string) (int, int, bool)
+	// account is the YouTube sign-in yt-dlp uses, if any.
+	account Account
+	cache   inspections
+	// oembedURL and httpClient replace YouTube's oEmbed endpoint in tests.
+	oembedURL  string
+	httpClient *http.Client
 }
 
 // Support reports whether YouTube links can play. Problem says what is
@@ -219,21 +226,13 @@ func IsURL(source string) bool {
 	return false
 }
 
-func (r *Resolver) Inspect(ctx context.Context, source string) (Info, error) {
-	metadata, _, err := r.extract(ctx, source, 0, false)
-	if err != nil {
-		return Info{}, err
-	}
-	return infoFrom(metadata, r.executable), nil
-}
-
 func (r *Resolver) Resolve(ctx context.Context, source string, height int) (Stream, error) {
-	metadata, _, err := r.extract(ctx, source, height, true)
+	metadata, _, err := r.extractAttempts(ctx, source, height, true, true, defaultAttempts)
 	if err != nil {
 		return Stream{}, err
 	}
 	stream := streamFrom(metadata, height)
-	stream.Info = infoFrom(metadata, r.executable)
+	stream.Info = infoFrom(metadata, r.ytDlpPath())
 	if stream.VideoURL == "" && stream.CombinedURL == "" {
 		return Stream{}, errors.New("yt-dlp returned no playable video stream")
 	}
@@ -244,12 +243,12 @@ func (r *Resolver) Resolve(ctx context.Context, source string, height int) (Stre
 // and a single combined format avoid adaptive-stream requests that YouTube may
 // selectively reject after metadata extraction has already succeeded.
 func (r *Resolver) ResolveFallback(ctx context.Context, source string, height int) (Stream, error) {
-	metadata, _, err := r.extractAttempts(ctx, source, height, true, []extractAttempt{{client: "youtube:player_client=web_safari", remote: true, combined: true}})
+	metadata, _, err := r.extractAttempts(ctx, source, height, true, true, []extractAttempt{{client: "youtube:player_client=web_safari", remote: true, combined: true}})
 	if err != nil {
 		return Stream{}, err
 	}
 	stream := streamFrom(metadata, height)
-	stream.Info = infoFrom(metadata, r.executable)
+	stream.Info = infoFrom(metadata, r.ytDlpPath())
 	if stream.CombinedURL == "" {
 		return Stream{}, errors.New("yt-dlp web_safari fallback returned no combined video stream")
 	}
@@ -262,27 +261,41 @@ type extractAttempt struct {
 	combined bool
 }
 
-func (r *Resolver) extract(ctx context.Context, source string, height int, resolve bool) (extractOutput, string, error) {
-	attempts := []extractAttempt{
-		{client: "youtube:player_client=web_embedded", remote: true},
-		{client: "youtube:player_client=web_safari", remote: true, combined: true},
-	}
-	return r.extractAttempts(ctx, source, height, resolve, attempts)
+// defaultAttempts are the YouTube clients tried in order.
+var defaultAttempts = []extractAttempt{
+	{client: "youtube:player_client=web_embedded", remote: true},
+	{client: "youtube:player_client=web_safari", remote: true, combined: true},
 }
 
-func (r *Resolver) extractAttempts(ctx context.Context, source string, height int, resolve bool, attempts []extractAttempt) (extractOutput, string, error) {
+// ytDlpPath is the yt-dlp executable last found.
+func (r *Resolver) ytDlpPath() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.executable
+}
+
+// extractAttempts runs yt-dlp with each client in turn until one returns the
+// video. resolve selects the formats to play; sponsor asks SponsorBlock for
+// the segments to mark.
+func (r *Resolver) extractAttempts(ctx context.Context, source string, height int, resolve, sponsor bool, attempts []extractAttempt) (extractOutput, string, error) {
 	executable, runtimeArg, err := r.tools(ctx)
 	if err != nil {
 		return extractOutput{}, "", err
 	}
+	r.mu.Lock()
+	account := r.account
+	r.mu.Unlock()
 	var failures []string
 	for _, current := range attempts {
 		args := []string{
 			"--ignore-config", "--dump-single-json", "--skip-download", "--no-playlist",
 			"--no-warnings", "--no-progress", "--no-colors",
 			"--extractor-retries", "3", "--retries", "3", "--fragment-retries", "3",
-			"--sponsorblock-mark", sponsorCategories,
 		}
+		if sponsor {
+			args = append(args, "--sponsorblock-mark", sponsorCategories)
+		}
+		args = append(args, account.args()...)
 		args = append(args, runtimeArg...)
 		if current.remote {
 			args = append(args, "--remote-components", "ejs:github")
@@ -314,6 +327,12 @@ func (r *Resolver) extractAttempts(ctx context.Context, source string, height in
 			return extractOutput{}, "", errRateLimited
 		}
 		failures = append(failures, conciseError(err))
+		if account.Enabled() && cookieProblem(err.Error()) {
+			break // every client would fail to read the sign-in the same way
+		}
+	}
+	if err := signInError(account, failures); err != nil {
+		return extractOutput{}, "", err
 	}
 	return extractOutput{}, "", fmt.Errorf("YouTube extraction failed after all client fallbacks: %s", strings.Join(unique(failures), "; "))
 }

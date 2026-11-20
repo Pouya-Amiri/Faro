@@ -440,6 +440,7 @@ func (s *Service) AppendPlaylist(inputs []PlaylistInput, play bool) (int, error)
 		return 0, err
 	}
 	s.reportSkippedMedia(skipped)
+	s.fillYouTubeDetails(client, additions)
 	if play {
 		if err := client.SelectPlaylist(protocol.PlaylistSelect{ItemID: additions[0].ID, Index: len(client.Snapshot().Playlist.Items) - len(additions)}); err != nil {
 			return len(additions), err
